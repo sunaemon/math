@@ -1,0 +1,11 @@
+{
+  "comment": "Type-checks the browser src unit tests (node:test). Separate from the browser tsconfig because tests pull in Node types and import .ts files directly, the way `node --test` runs them.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "typeRoots": ["./server/node_modules/@types"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/*.test.ts"],
+  "exclude": ["vendor"]
+}

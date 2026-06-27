@@ -1,0 +1,27 @@
+# Licensing
+
+Different parts of this repository are licensed under different terms, with
+third-party components retaining their own upstream licenses.
+
+## Source code — MIT License
+
+The build tooling and software in this repository — including `Makefile`,
+`setup.sh`, the Haskell sources under `tools/`, the formalization viewer
+sources under `tools/formalization-viewer/` (excluding `vendor/`, see below),
+the Python scripts, and the Lean sources — are licensed under the MIT License.
+See [LICENSE-MIT](LICENSE-MIT).
+
+## Written content — CC BY 4.0
+
+The written mathematical content — the Markdown book sources, the TeX prose
+and macros, figures, and the rendered PDF documents — is licensed under the
+Creative Commons Attribution 4.0 International License (CC BY 4.0).
+See [LICENSE-CC-BY-4.0](LICENSE-CC-BY-4.0).
+
+## Third-party components
+
+Vendored third-party code under `tools/formalization-viewer/vendor/` is NOT
+covered by the licenses above. Each component is redistributed under its own
+upstream license. See
+[tools/formalization-viewer/vendor/THIRD-PARTY-NOTICES.md](tools/formalization-viewer/vendor/THIRD-PARTY-NOTICES.md)
+for the full list, versions, and license texts.

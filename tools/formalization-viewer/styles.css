@@ -1,0 +1,1622 @@
+:root {
+  color-scheme: light;
+  --border: #c8ced8;
+  --text: #1c2430;
+  --muted: #647084;
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --header: #eef2f6;
+  --accent: #1f6feb;
+  --mark: #fff0a6;
+  --active: #ffbe55;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Show focus rings only for keyboard navigation, not after a mouse click. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.4 system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+
+.toolbar {
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  min-height: 48px;
+  padding: 8px 12px;
+}
+
+.icon-button {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 18px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 32px;
+  padding: 5px;
+}
+
+.icon-button:hover {
+  background: var(--header);
+  color: var(--text);
+}
+
+.icon-button[aria-expanded="true"] {
+  background: var(--header);
+  color: var(--accent);
+}
+
+button,
+select {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  min-height: 32px;
+  padding: 5px 9px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Drop the OS dropdown chrome and match the custom marker field: a muted caret
+   (same ▾ as .marker-field-caret) and room for it. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 7 8 3.5Z' fill='%23647084'/%3E%3C/svg%3E");
+  background-position: right 9px center;
+  background-repeat: no-repeat;
+  cursor: pointer;
+  padding-right: 24px;
+}
+
+select:hover,
+.marker-field:hover {
+  border-color: var(--muted);
+}
+
+/* Prev/Next marker nav: centered arrow glyphs. */
+#prev-entry,
+#next-entry {
+  font-size: 15px;
+  line-height: 1;
+  min-width: 34px;
+  padding: 5px;
+  text-align: center;
+}
+
+.toolbar-selects {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.toolbar-selects .select-label-grow {
+  flex: 1;
+}
+
+#book-select-label select {
+  max-width: 200px;
+  width: auto;
+}
+
+.select-label {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
+.select-caption {
+  color: var(--muted);
+  flex: none;
+  font-size: 12px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+.select-label select {
+  min-width: 0;
+  width: 100%;
+}
+
+/* Marker combobox — a "Jump to marker" palette replacing the native dropdown. */
+.marker-combo {
+  min-width: 0;
+  position: relative;
+}
+
+.marker-field {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-height: 32px;
+  text-align: left;
+  width: 100%;
+}
+
+.marker-field .select-caption {
+  margin-right: 0;
+}
+
+.marker-field-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.marker-field-caret {
+  color: var(--muted);
+  flex: none;
+  font-size: 10px;
+}
+
+.marker-popover {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(28, 36, 48, 0.2);
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  max-height: 45vh;
+  overflow: hidden;
+  position: absolute;
+  top: calc(100% + 6px);
+  width: min(600px, calc(100vw - 1.5rem));
+  z-index: 40;
+}
+
+.marker-popover[hidden] {
+  display: none;
+}
+
+.marker-search {
+  appearance: none;
+  background: var(--panel);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  margin: 0;
+  padding: 9px 12px;
+  width: 100%;
+}
+
+.marker-search:focus {
+  outline: none;
+}
+
+.marker-list {
+  list-style: none;
+  margin: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.marker-row {
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 6px 9px;
+}
+
+.marker-row-head {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.marker-title {
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* KaTeX-rendered math sits at the row/field text size and inherits its colour. */
+.marker-title .katex,
+.marker-field-label .katex {
+  font-size: 1.02em;
+}
+
+.marker-chip {
+  background: var(--header);
+  border-radius: 999px;
+  color: var(--muted);
+  flex: none;
+  font-size: 11px;
+  padding: 1px 8px;
+  text-transform: capitalize;
+}
+
+.marker-chip[data-kind="statement"] {
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
+}
+
+.marker-row-meta {
+  align-items: baseline;
+  color: var(--muted);
+  display: flex;
+  font-size: 11.5px;
+  gap: 8px;
+  margin-top: 1px;
+  overflow: hidden;
+}
+
+.marker-id {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.marker-snip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.marker-row.is-highlight {
+  background: var(--header);
+}
+
+.marker-row.is-selected {
+  background: rgba(31, 111, 235, 0.1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.marker-row.is-selected.is-highlight {
+  background: rgba(31, 111, 235, 0.16);
+}
+
+.marker-row.is-selected .marker-title {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.marker-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 12px;
+  text-align: center;
+}
+
+.marker-hints {
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 11px;
+  padding: 6px 12px;
+}
+
+.marker-hints kbd {
+  background: var(--header);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+/* Custom dropdown overlaid on native <select>s — same popover as the marker
+   palette, so every selector opens to a consistent list. */
+.cselect {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  position: relative;
+}
+
+/* The native <select> is kept only as the value source; hide it completely so
+   it can't render (or open the OS dropdown) over the custom one. */
+.cselect-native {
+  display: none;
+}
+
+.cselect-field {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  text-align: left;
+}
+
+.cselect-label {
+  max-width: 46ch;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cselect-caret {
+  color: var(--muted);
+  flex: none;
+  font-size: 10px;
+}
+
+/* Fixed (not absolute) so the popover escapes the enclosing
+   `.pane { overflow: hidden }`, which would otherwise clip it (and its shadow)
+   to the pane box. enhanceSelect() sets left/top/min-width from the field's
+   screen rect on open. */
+.cselect-popover {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(28, 36, 48, 0.2);
+  display: flex;
+  flex-direction: column;
+  max-height: 45vh;
+  max-width: min(560px, calc(100vw - 1.5rem));
+  /* A position:fixed element that is itself the scroll container has a Chrome
+     compositing bug where its overscroll bounce reveals whatever is painted
+     behind it (the source code). Keep this fixed box a plain overflow:hidden
+     clip and move the scroll to the nested .cselect-list, mirroring the marker
+     popover (.marker-popover wrapping .marker-list), which does not leak. */
+  overflow: hidden;
+  position: fixed;
+  width: max-content;
+  z-index: 50;
+}
+
+.cselect-popover[hidden] {
+  display: none;
+}
+
+/* The filter box, styled like the marker palette's search field. */
+.cselect-search {
+  appearance: none;
+  background: var(--panel);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  flex: none;
+  font: inherit;
+  font-size: 13px;
+  margin: 0;
+  padding: 9px 12px;
+  width: 100%;
+}
+
+.cselect-search:focus {
+  outline: none;
+}
+
+.cselect-list {
+  list-style: none;
+  margin: 0;
+  /* The scroller is this nested (non-fixed) element, not the fixed popover. */
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.cselect-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 12px;
+  text-align: center;
+}
+
+.cselect-hints {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  display: flex;
+  flex: none;
+  font-size: 11px;
+  gap: 4px;
+  padding: 6px 12px;
+}
+
+.cselect-hints kbd {
+  background: var(--header);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.cselect-option {
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  overflow: hidden;
+  padding: 6px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cselect-option.is-highlight {
+  background: var(--header);
+}
+
+.cselect-option.is-selected {
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cselect-option.is-selected.is-highlight {
+  background: rgba(31, 111, 235, 0.1);
+}
+
+.settings {
+  position: relative;
+}
+
+.settings-menu {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(28, 36, 48, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  left: auto;
+  width: 264px;
+  padding: 12px 14px 10px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+}
+
+.settings-menu[hidden] {
+  display: none;
+}
+
+.vo-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.vo-section {
+  display: grid;
+  gap: 8px;
+}
+
+.vo-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.vo-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+  width: 100%;
+}
+
+/* Panels — vertical checkbox list */
+.vo-panels {
+  display: grid;
+  gap: 7px;
+}
+
+.vo-panels label {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  min-height: 22px;
+  white-space: nowrap;
+}
+
+.vo-panels input {
+  accent-color: var(--accent);
+  height: 15px;
+  margin: 0;
+  width: 15px;
+}
+
+/* A labelled control row: label left, control right */
+.vo-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.vo-row-label {
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* Segmented control */
+.segmented {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.segmented.segmented-full {
+  display: flex;
+  width: 100%;
+}
+
+.segmented button {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  min-height: 26px;
+  padding: 4px 12px;
+  white-space: nowrap;
+}
+
+.segmented.segmented-full button {
+  flex: 1;
+}
+
+.segmented button:first-child {
+  border-left: none;
+}
+
+.segmented button:hover:not([aria-pressed="true"]):not(:disabled) {
+  background: var(--header);
+  color: var(--text);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.segmented button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Footer — About as a quiet secondary link */
+.vo-footer {
+  display: flex;
+}
+
+.vo-link {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.vo-link:hover {
+  color: var(--accent);
+}
+
+.workspace {
+  display: flex;
+  height: calc(100vh - 49px);
+  padding: 4px;
+  position: relative;
+}
+
+/* Nested split containers: a row lays panes out left-to-right, a col stacks. */
+/* No flex gap: the splitters between siblings supply the (now slim) spacing, so
+   gap would only double it. */
+.split {
+  display: flex;
+  flex: 1 1 0;
+  gap: 0;
+  min-height: 0;
+  min-width: 0;
+}
+
+.split[data-dir="row"] {
+  flex-direction: row;
+}
+
+.split[data-dir="col"] {
+  flex-direction: column;
+}
+
+.workspace > .split,
+.workspace > .pane {
+  flex: 1 1 0;
+}
+
+.pane {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  grid-template-rows: 34px minmax(0, 1fr);
+  min-height: 120px;
+  min-width: 120px;
+  overflow: hidden;
+}
+
+.pane[hidden],
+.pane-hidden {
+  display: none;
+}
+
+.pane.dragging {
+  opacity: 0.5;
+}
+
+#pane-parking {
+  display: none;
+}
+
+.pane-header {
+  align-items: center;
+  background: var(--header);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 0 10px;
+  user-select: none;
+}
+
+.pane-header:active {
+  cursor: grabbing;
+}
+
+/* Flex-item splitters sit between siblings of a split. */
+.splitter {
+  background: transparent;
+  flex: 0 0 8px;
+  position: relative;
+  z-index: 10;
+}
+
+.splitter::after {
+  background: rgba(31, 111, 235, 0);
+  border-radius: 4px;
+  content: "";
+  inset: 0;
+  position: absolute;
+  transition: background 120ms ease;
+}
+
+.splitter:hover::after,
+.splitter.dragging::after {
+  background: rgba(31, 111, 235, 0.25);
+}
+
+/* The 8px splitter keeps a comfortable grab area; the negative margins pull the
+   panes back so its visible footprint between them is only ~4px. */
+.splitter-vertical {
+  cursor: col-resize;
+  margin: 0 -2px;
+}
+
+.splitter-horizontal {
+  cursor: row-resize;
+  margin: -2px 0;
+}
+
+/* Drop target preview shown while dragging a pane header. */
+.drop-overlay {
+  background: rgba(31, 111, 235, 0.16);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 40;
+}
+
+.drop-overlay[hidden] {
+  display: none;
+}
+
+/* Dock-to-edge drop targets along the workspace border, live only while
+   dragging a pane so they never intercept normal clicks. */
+.edge-zone {
+  pointer-events: none;
+  position: absolute;
+  z-index: 45;
+}
+
+.workspace.dragging-active .edge-zone {
+  pointer-events: auto;
+}
+
+.edge-zone-top {
+  height: 26px;
+  left: 0;
+  right: 0;
+  top: 0;
+}
+
+.edge-zone-bottom {
+  bottom: 0;
+  height: 26px;
+  left: 0;
+  right: 0;
+}
+
+.edge-zone-left {
+  bottom: 0;
+  left: 0;
+  top: 0;
+  width: 26px;
+}
+
+.edge-zone-right {
+  bottom: 0;
+  right: 0;
+  top: 0;
+  width: 26px;
+}
+
+.pane-actions {
+  align-items: center;
+  cursor: default;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pane-actions .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Building…" pill in the PDF pane header while the server auto-rebuilds the
+   selected PDF after a Markdown edit; a failed build flashes red briefly. */
+.build-status {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  display: inline-flex;
+  flex: none;
+  font-size: 11px;
+  gap: 5px;
+  line-height: 1;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.build-status[hidden] {
+  display: none;
+}
+
+.build-status::before {
+  animation: build-spin 0.8s linear infinite;
+  border: 2px solid currentcolor;
+  border-radius: 50%;
+  border-top-color: transparent;
+  content: "";
+  height: 10px;
+  width: 10px;
+}
+
+.build-status[data-state="failed"] {
+  border-color: #b42318;
+  color: #b42318;
+}
+
+.build-status[data-state="failed"]::before {
+  animation: none;
+  border-color: transparent;
+  /* a small "!" disc instead of the spinner */
+  background: currentcolor;
+  height: 4px;
+  width: 4px;
+  margin: 3px;
+}
+
+@keyframes build-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-status::before {
+    animation: none;
+  }
+}
+
+.pdf-controls,
+.file-controls {
+  align-items: center;
+  display: grid;
+  flex: 1 1 auto;
+  gap: 12px;
+  grid-template-columns: auto minmax(140px, 1fr);
+  min-width: 0;
+}
+
+.pdf-controls select,
+.file-controls select {
+  font-size: 12px;
+  min-height: 26px;
+  min-width: 0;
+  padding: 3px 7px;
+  width: 100%;
+}
+
+.pane-header a,
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.pdf-viewer {
+  align-content: start;
+  background: #3d424a;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  overflow: auto;
+  padding: 8px 0;
+}
+
+.pdf-message {
+  align-self: center;
+  color: #eef2f6;
+  font-size: 13px;
+  justify-self: center;
+  padding: 16px;
+}
+
+.pdf-page {
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+  display: grid;
+  position: relative;
+  width: 100%;
+}
+
+.pdf-page::before {
+  color: #8a93a3;
+  content: attr(data-page);
+  font-size: 12px;
+  left: 8px;
+  position: absolute;
+  top: 6px;
+  z-index: 1;
+}
+
+.pdf-page canvas {
+  display: block;
+  height: auto;
+  width: 100%;
+}
+
+/* `formalization: skip` overlay band on the PDF, mirroring the Markdown pane's
+   grey skip wash. Takes the pointer (default cursor) so hovering it lights every
+   fragment of the skip across panes and shows the reason tooltip; wheel scrolling
+   still passes through to the viewer. z-index 2 sits above the canvas (and the
+   page-number ::before) but below the booklink overlays (z-index 3). */
+.pdf-skip-band {
+  background: rgba(120, 124, 134, 0.22);
+  border-left: 2px solid rgba(120, 124, 134, 0.6);
+  left: 0;
+  position: absolute;
+  right: 0;
+  transition: background 0.12s ease;
+  z-index: 2;
+}
+
+.pdf-skip-band.is-hover {
+  background: rgba(120, 124, 134, 0.34);
+}
+
+/* Per-entry booklink overlay on the PDF: the canvas counterpart of the source
+   panes' .mark spans, colored by the entry's hue (--mark-rgb, set inline). Unlike
+   the skip bands these take the pointer, so a click navigates and a hover lights
+   up the same booklink across panes. Opacities run a touch stronger than the text
+   marks since they sit over the white page. z-index 3 keeps them above the grey
+   skip wash where the two coincide. */
+.pdf-mark {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.14);
+  cursor: pointer;
+  left: 0;
+  position: absolute;
+  right: 0;
+  transition:
+    background 0.12s ease,
+    box-shadow 0.12s ease;
+  z-index: 3;
+}
+
+.pdf-mark.is-hover {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.22);
+}
+
+/* Active entry: the PDF is the linked (never focused) pane, so mirror that
+   pane's active mark — a soft fill plus a left rail so a multi-line region reads
+   as one place. */
+.pdf-mark.active {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.26);
+  box-shadow: inset 3px 0 0 rgba(var(--mark-rgb, 124, 58, 237), 0.7);
+}
+
+.source {
+  font:
+    12px/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  tab-size: 2;
+  white-space: pre-wrap;
+  word-break: normal;
+}
+
+/* Marker overview rail: a "map" of where the linked passages are. It lives in
+   its own grid column (see .pane.has-mark-rail below) to the right of the pane
+   body, so the ticks never compete with the scrollbar thumb. The lane itself is
+   inert; only the ticks take the pointer. */
+.pane.has-mark-rail {
+  grid-template-columns: minmax(0, 1fr) 10px;
+}
+
+.pane.has-mark-rail > .pane-header {
+  grid-column: 1 / -1;
+}
+
+.pane.has-mark-rail > :not(.pane-header):not(.mark-rail) {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.mark-rail {
+  border-left: 1px solid var(--border);
+  grid-column: 2;
+  grid-row: 2;
+  pointer-events: none;
+  position: relative;
+}
+
+.pane:not(.has-mark-rail) > .mark-rail {
+  display: none;
+}
+
+/* A short dash in the booklink's own hue, slightly dimmed so dense clusters
+   stay calm; the active/hovered marker brightens and grows. */
+.mark-rail-tick {
+  background: rgb(var(--mark-rgb, 124, 58, 237));
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  height: 7px;
+  margin-top: -3.5px;
+  /* Override the global `button { min-height: 32px }` — without this the ticks
+     are forced 32px tall regardless of `height`. */
+  min-height: 0;
+  opacity: 0.45;
+  padding: 0;
+  pointer-events: auto;
+  position: absolute;
+  right: 2px;
+  transition:
+    opacity 0.12s ease,
+    height 0.12s ease,
+    width 0.12s ease;
+  width: 6px;
+}
+
+/* Hovered marker: brighter and a touch larger — connects the tick to the
+   highlighted text range in the panes. */
+.mark-rail-tick:hover,
+.mark-rail-tick.is-hover {
+  height: 8px;
+  margin-top: -4px;
+  opacity: 1;
+  width: 8px;
+}
+
+/* Active marker: full-strength hue with a crisp ring so it stands out even amid
+   a dense cluster. */
+.mark-rail-tick.is-active {
+  box-shadow:
+    0 0 0 1px var(--panel),
+    0 0 0 2px rgb(var(--mark-rgb, 124, 58, 237));
+  height: 9px;
+  margin-top: -4.5px;
+  opacity: 1;
+  width: 8px;
+}
+
+.line {
+  min-height: 17px;
+}
+
+/* Folded /-@ … -/ machine-metadata comments in the Lean pane. */
+.lean-fold > summary {
+  align-items: baseline;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  list-style: none;
+}
+
+.lean-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.lean-fold > summary::before {
+  color: var(--muted);
+  content: "▸";
+  font-size: 10px;
+}
+
+.lean-fold[open] > summary::before {
+  content: "▾";
+}
+
+.lean-fold:not([open]) > summary {
+  opacity: 0.7;
+}
+
+.lean-fold:not([open]) > summary::after {
+  color: var(--muted);
+  content: attr(data-fold-count);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.lean-fold > summary .line {
+  flex: 0 1 auto;
+}
+
+/* LSP hover tooltip for the Lean pane. */
+.lean-hover {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(28, 36, 48, 0.18);
+  color: var(--text);
+  font:
+    12px/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  max-height: 320px;
+  max-width: 480px;
+  overflow: auto;
+  padding: 8px 10px;
+  pointer-events: none;
+  position: fixed;
+  white-space: pre-wrap;
+  z-index: 60;
+}
+
+.lean-hover[hidden] {
+  display: none;
+}
+
+body.show-line-numbers .line {
+  padding-left: 3.4em;
+  position: relative;
+}
+
+body.show-line-numbers .line::before {
+  color: var(--muted);
+  content: attr(data-line);
+  left: 0;
+  position: absolute;
+  text-align: right;
+  user-select: none;
+  width: 2.8em;
+}
+
+/* Booklink markers. Calm by default — a pale tint, no border — so they fade
+   into the code while reading; the active selection earns the emphasis.
+   box-decoration-break keeps multiline ranges one soft band, not per-line pills. */
+.mark {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.12);
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition:
+    background 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+/* The pane you're not focused on stays calmer, so the centre isn't all colour. */
+.pane:not(.is-focus-pane) .mark {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.07);
+}
+
+/* Hovering any marker highlights every fragment of that booklink (the .is-hover
+   class is applied by JS to all spans sharing the entry id — CSS :hover would
+   only reach the one fragment under the pointer, missing wrapped lines). A fill
+   only; the border is reserved for the active selection. */
+.mark:not(.active).is-hover {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.16);
+}
+
+/* Active marker in the focused pane: a soft fill + a left rail (not per-line
+   outlines), so a multiline range reads as one region. */
+.is-focus-pane .mark.active {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.2);
+  box-shadow: inset 2px 0 0 rgba(var(--mark-rgb, 124, 58, 237), 0.75);
+}
+
+/* Its counterpart in the linked pane: softer, an underline rather than a fill. */
+.pane:not(.is-focus-pane) .mark.active {
+  background: rgba(var(--mark-rgb, 124, 58, 237), 0.14);
+  box-shadow: inset 0 -2px 0 rgba(var(--mark-rgb, 124, 58, 237), 0.5);
+}
+
+/* `formalization: skip` overlay: book prose deliberately not formalized. A
+   neutral grey wash with a dashed left rail, distinct from the coloured booklink
+   marks, so skipped regions read as "intentionally out of scope" rather than as
+   another linked entry. The reason text shows as a native title tooltip. */
+.skip-mark {
+  background: rgba(120, 124, 134, 0.1);
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  box-shadow: inset 2px 0 0 rgba(120, 124, 134, 0.5);
+  transition: background 0.12s ease;
+}
+
+/* `:hover` gives the fragment under the pointer immediate feedback; `.is-hover`
+   is applied by JS to every fragment of the skip (and its PDF band) so the whole
+   region lights together across panes, like the booklink marks. */
+.skip-mark:hover,
+.skip-mark.is-hover {
+  background: rgba(120, 124, 134, 0.2);
+}
+
+/* Tree-sitter token colors. Text color only, so they compose over the mark
+   background overlay (which sets only background). Light One-Light-ish palette. */
+.tok-keyword {
+  color: #a626a4;
+}
+
+.tok-string {
+  color: #50a14f;
+}
+
+.tok-number,
+.tok-attribute {
+  color: #986801;
+}
+
+.tok-comment {
+  color: #8b919e;
+  font-style: italic;
+}
+
+.tok-type,
+.tok-module {
+  color: #c18401;
+}
+
+.tok-function {
+  color: #4078f2;
+}
+
+.tok-operator {
+  color: #0184bc;
+}
+
+.tok-punctuation {
+  color: #7a8294;
+}
+
+.tok-heading,
+.tok-link {
+  color: #1f6feb;
+  font-weight: 600;
+}
+
+.tok-emph {
+  font-style: italic;
+}
+
+.tok-strong {
+  font-weight: 600;
+}
+
+.tok-literal {
+  color: #50a14f;
+}
+
+.tok-label {
+  color: #986801;
+}
+
+.infoview {
+  font:
+    12px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.infoview-pos {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+.infoview-section {
+  margin-bottom: 14px;
+}
+
+.infoview-section h4 {
+  color: var(--muted);
+  font:
+    600 11px/1.2 system-ui,
+    -apple-system,
+    sans-serif;
+  letter-spacing: 0.03em;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.infoview-goal {
+  background: #f4f6f9;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: normal;
+}
+
+.infoview-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.infoview-empty code {
+  background: #eef2f6;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.infoview-msg {
+  border-left: 3px solid var(--border);
+  margin-bottom: 8px;
+  padding-left: 8px;
+}
+
+.infoview-msg-loc {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.infoview-msg-text {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  word-break: normal;
+}
+
+.infoview-msg.sev-error {
+  border-left-color: #e11d48;
+}
+
+.infoview-msg.sev-warning {
+  border-left-color: #d97706;
+}
+
+.infoview-msg.sev-info {
+  border-left-color: #2563eb;
+}
+
+.infoview-msg.sev-hint {
+  border-left-color: #16a34a;
+}
+
+#infoview-status[data-status="ready"] {
+  color: #16a34a;
+}
+
+#infoview-status[data-status="error"],
+#infoview-status[data-status="closed"] {
+  color: #e11d48;
+}
+
+@media (max-width: 900px) {
+  .toolbar {
+    grid-template-columns: 1fr auto auto auto;
+  }
+
+  .toolbar-selects {
+    grid-column: 1 / -1;
+  }
+}
+
+/* About — version & license dialog */
+.about-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(28, 36, 48, 0.45);
+}
+
+.about-overlay[hidden] {
+  display: none;
+}
+
+.about-dialog {
+  position: relative;
+  max-width: 540px;
+  width: 100%;
+  max-height: 85vh;
+  overflow: auto;
+  padding: 1.5rem 1.75rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(28, 36, 48, 0.25);
+}
+
+.about-dialog h2 {
+  margin: 0 2rem 0.75rem 0;
+  font-size: 1.2rem;
+}
+
+.about-dialog h3 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.about-close {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 2rem;
+  height: 2rem;
+  font-size: 1.4rem;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.about-close:hover {
+  background: var(--header);
+  color: var(--text);
+}
+
+.about-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0;
+}
+
+.about-meta dt {
+  color: var(--muted);
+}
+
+.about-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-license-summary {
+  margin: 0 0 0.5rem;
+  color: var(--text);
+}
+
+.about-license-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+/* Lead with the thing being licensed (component name / scope); the SPDX id is
+   secondary but still scannable. */
+.about-license-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.about-license-spdx {
+  color: var(--muted);
+}
+
+.about-license-head {
+  color: var(--text);
+}
+
+.about-license-version {
+  color: var(--muted);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-license-source {
+  color: var(--accent);
+  font-size: 0.85em;
+  text-decoration: none;
+}
+
+.about-license-source:hover {
+  text-decoration: underline;
+}
+
+#about-repo {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+#about-repo:hover {
+  text-decoration: underline;
+}
+
+.about-license-file {
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+/* Version row: text + copy button */
+.about-version {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-copy {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  line-height: 0;
+  padding: 3px;
+}
+
+.about-copy:hover {
+  background: var(--header);
+  color: var(--text);
+}
+
+.about-copy.is-copied {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Per-license disclosure: the filename toggles its inlined text */
+.about-license-view {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.85em;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+  padding: 0;
+}
+
+.about-license-view::before {
+  content: "";
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.12s ease;
+}
+
+.about-license-view[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.about-license-view:hover {
+  color: var(--accent);
+}
+
+.about-license-text {
+  margin: 0.4rem 0 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 0.55rem 0.7rem;
+  background: rgba(28, 36, 48, 0.025);
+  border: 1px solid rgba(28, 36, 48, 0.1);
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

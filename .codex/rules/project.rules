@@ -1,0 +1,36 @@
+# Generated from .claude/settings.local.json.
+
+prefix_rule(
+    pattern = ["mise", "--version"],
+    decision = "allow",
+    justification = "Read-only version check from the Claude project allowlist.",
+    match = ["mise --version"],
+)
+
+prefix_rule(
+    pattern = ["mise", "ls-remote"],
+    decision = "allow",
+    justification = "Read-only remote version listing from the Claude project allowlist.",
+    match = ["mise ls-remote ghc"],
+)
+
+prefix_rule(
+    pattern = ["cabal", "--version"],
+    decision = "allow",
+    justification = "Read-only version check from the Claude project allowlist.",
+    match = ["cabal --version"],
+)
+
+prefix_rule(
+    pattern = ["ghc", "--version"],
+    decision = "allow",
+    justification = "Read-only version check from the Claude project allowlist.",
+    match = ["ghc --version"],
+)
+
+prefix_rule(
+    pattern = ["make"],
+    decision = "allow",
+    justification = "Project builds are explicitly allowed by the Claude project allowlist.",
+    match = ["make polish-space/build/polish-space-book.tex"],
+)

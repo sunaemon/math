@@ -1,0 +1,24 @@
+# This file lists only artifacts produced by this repo's own tooling.
+# OS- and editor-specific junk (.DS_Store, swap files, etc.) is intentionally
+# left out: ignore those in your personal global gitignore (core.excludesFile,
+# e.g. ~/.config/git/ignore) so they don't leak into the project for everyone.
+
+# Build artifacts
+build/
+dist/
+dist-newstyle/
+.lake/
+.texlive/
+
+# esbuild output for the formalization viewer (transpiled from src/*.ts)
+/tools/formalization-viewer/build/
+
+# @types/node symlink for the viewer server's tsc type-checking (see Makefile)
+/tools/formalization-viewer/server/node_modules
+
+# Environment
+.ghc.environment.*
+
+# Python
+__pycache__/
+*.pyc

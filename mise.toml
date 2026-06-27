@@ -1,0 +1,26 @@
+[tools]
+ghc = "9.6.7"
+cabal = "3.12.1.0"
+python = "3.14.5"
+node = "24.12.0"
+watchexec = "2.5.1"
+pandoc = "3.9.0.2"
+tree-sitter = "0.26.9"
+lefthook = "2.1.9"
+gh = "2.94.0"
+ruff = "0.15.17"
+oxlint = "1.70.0"
+shfmt = "3.13.1"
+shellcheck = "0.11.0"
+taplo = "0.10.0"
+actionlint = "1.7.12"
+"ubi:fourmolu/fourmolu" = "0.19.0.1"
+"ubi:ndmitchell/hlint" = "3.10"
+"npm:typescript" = "5.9.3"
+"npm:esbuild" = "0.28.1"
+"npm:prettier" = "3.4.2"
+"npm:@types/node" = "24.13.2"
+"github:leanprover/elan" = "4.2.1"
+
+[env]
+_.path = ["{{env.HOME}}/.elan/bin"]

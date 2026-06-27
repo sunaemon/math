@@ -1,0 +1,10 @@
+# Ruff config for the repository's Python (tools/, tests/, and the skill
+# scripts). `make lint` runs `ruff format --check` (formatter) and `ruff check`
+# (linter); `make lint-fix` applies both with autofix.
+line-length = 120
+
+[lint.per-file-ignores]
+# worktree_diff.py sets `sys.dont_write_bytecode = True` before importing its
+# sibling tools modules, so those imports are intentionally not at the top of
+# the file.
+"tools/worktree_diff.py" = ["E402"]

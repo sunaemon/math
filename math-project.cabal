@@ -1,0 +1,35 @@
+cabal-version:      3.0
+name:               math-project
+version:            0.1.0.0
+license:            MIT
+
+executable book-filter
+    main-is:          Main.hs
+    other-modules:    DependencyGraph
+                      SectionRef
+    hs-source-dirs:   tools/book-filter
+    -- -Wall surfaces high-value warnings (incomplete patterns, unused imports
+    -- and top-level/local binds, name shadowing, etc.). The two suppressed
+    -- categories are noisy-by-design here: type-defaults is harmless, and
+    -- unused-matches fires on every multi-clause function whose parameter is
+    -- used only in sibling equations.
+    ghc-options:      -Wall -Wno-type-defaults -Wno-unused-matches
+    build-depends:
+        base ^>= 4.18.2.1,
+        pandoc-types,
+        text,
+        containers,
+        directory,
+        time
+    default-language: Haskell2010
+
+test-suite book-filter-golden
+    type:             exitcode-stdio-1.0
+    main-is:          run-book-filter-golden.hs
+    hs-source-dirs:   tests
+    build-depends:
+        base ^>= 4.18.2.1,
+        directory,
+        filepath,
+        process
+    default-language: Haskell2010

@@ -1,0 +1,104 @@
+# CI for the private repo (sunaemon/math-private), which carries the full
+# polish-space book. Runs lint + tests, then builds the full-book static viewer
+# distribution WITHOUT deploying it. That dist build runs `lake build` over the
+# whole PolishSpaceBook package and elaborates every module for the Lean infoview
+# cache, so it doubles as a full polish-space Lean-consistency check.
+#
+# The public `math` mirror (produced by tools/publish_math.sh) deploys to Pages
+# via deploy-pages.yml instead; both workflow files exist in both repos and gate
+# on the repository name so only the right one runs.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Coalesce rapid pushes / PR updates on the same ref: these jobs run the full
+# Lean + TeX build and are very expensive, so cancel superseded in-flight runs.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    if: github.repository == 'sunaemon/math-private'
+    runs-on: ubuntu-latest
+    # GITHUB_TOKEN lifts mise's unauthenticated GitHub API rate limit, used when
+    # resolving github-backed tools — including the ghcup plugin that backs
+    # ghc/cabal (registered by setup.sh; see its comment for why conda is avoided).
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # mathlib's olean cache (~7 GB unpacked + the download cache) plus TeX Live
+      # and the toolchains overflow the runner's ~14 GB free disk. Drop large
+      # preinstalled bits we don't use to make room before lake fetches mathlib.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+      # Provision the mise binary, put it on PATH, and cache the tool installs.
+      # install: false defers the actual `mise install` to setup.sh below, so the
+      # ghcup-backed ghc/cabal plugins it registers are in place before tools are
+      # installed — mise's default conda GHC backend has no linux-64 candidate for
+      # the pinned 9.6.7.
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache: true
+          install: false
+
+      # The repo-local TeX Live snapshot (~179 MB) is the heaviest input setup.sh
+      # builds; cache it keyed on setup.sh (which pins the tlnet snapshot + package
+      # set) so warm runs install nothing.
+      - name: Cache TeX Live snapshot
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .texlive
+          key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
+
+      # mathlib oleans: lake's download cache, so `lake exe cache get` is a no-op
+      # on warm runs. Keyed on the pins that determine the mathlib build.
+      - name: Cache mathlib build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/mathlib
+          key: mathlib-${{ runner.os }}-${{ hashFiles('**/lake-manifest.json', 'lean-toolchain') }}
+
+      # mise is on PATH from the step above; setup.sh installs the mise.toml tools
+      # (registering the ghcup ghc/cabal plugins first), the repo-local TeX Live
+      # snapshot, and the Lean toolchain.
+      - name: Provision toolchain (mise tools + TeX Live + Lean)
+        run: ./setup.sh --run
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      # Full polish-space Lean consistency check: batch-compile all 30
+      # PolishSpaceBook modules. This replaces building the full-book infoview
+      # cache, which elaborates every file through the Lean LSP (much slower than
+      # `lake build`) — on the runner that ran ~3h and hit the per-file
+      # elaboration timeout. `make lean` gives the same "does it all compile"
+      # coverage without the per-file timeout.
+      # Only the full book (LAKE_PROJECTS=polish-space): ch1's single Lean module
+      # is a byte-identical subset, and building both clones mathlib twice, which
+      # overflows the runner disk. ch1's standalone build is covered by the math
+      # repo's deploy-pages run.
+      - name: Verify all polish-space Lean (make lean)
+        run: make lean LAKE_PROJECTS=polish-space
+
+      # Exercise the PDF + viewer dist pipeline with no Pages upload and no Lean
+      # infoview elaboration (--skip-lsp-cache). The infoview cache is only needed
+      # for the published ch1 viewer (deploy-pages.yml), not this consistency run.
+      - name: Build full-book viewer dist (pipeline check)
+        run: make dist BOOKLINK_PROJECT=polish-space BOOKLINK_DIST_FLAGS=--skip-lsp-cache

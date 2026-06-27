@@ -1,0 +1,83 @@
+# Git hooks managed by lefthook (installed via `lefthook install`, wired into
+# setup.sh). lefthook itself is pinned in mise.toml.
+#
+# Besides the git hooks, this file defines three runnable groups -- lint,
+# lint-fix, and format -- invoked via `lefthook run <group>`. The matching
+# `make` targets delegate to those groups, so `make lint` etc. get parallel
+# execution and lefthook's colored per-command summary. Each command calls a
+# per-tool make subtarget (the Makefile stays the single source of truth for
+# tool paths and target lists); lefthook only schedules them. `parallel: true`
+# runs the tools concurrently and aggregates every failure instead of stopping
+# at the first. The make targets build the book-filter binary and @types/node
+# symlink before invoking lefthook, so the parallel commands never race on them.
+
+# Quiet success, loud failure. Without this, lefthook streams every command's
+# stdout under a live `┃ tool ❯` header (execution_out); for tools that print a
+# banner even when clean (oxlint's "Found 0 warnings", hlint's "No hints") the
+# live re-render leaves duplicated noise in scrollback. Restricting output to
+# meta/summary/failure shows only the header box and the per-command pass/fail
+# summary on success, while a failing command still prints its full output.
+output:
+  - meta
+  - summary
+  - failure
+
+# Run the repository lint suite before each commit, reusing the same parallel
+# `lint` group that `make lint` drives.
+pre-commit:
+  commands:
+    lint:
+      run: make lint
+
+# Check-only gate: every tool in read/verify mode. Mirrors the old sequential
+# `make lint`, now run in parallel.
+lint:
+  parallel: true
+  commands:
+    book-filter: { run: make lint-book }
+    tsc: { run: make lint-tsc }
+    prettier: { run: make lint-prettier }
+    ruff: { run: make lint-ruff }
+    fourmolu: { run: make lint-fourmolu }
+    hlint: { run: make lint-hlint }
+    oxlint: { run: make lint-oxlint }
+    shell: { run: make lint-shell }
+    taplo: { run: make lint-taplo }
+    actionlint: { run: make lint-actionlint }
+
+# Write mode: formatters plus auto-fixable lint rules. hlint and actionlint have
+# no fix mode, so they reuse the check-only subtargets.
+lint-fix:
+  parallel: true
+  commands:
+    book-filter: { run: make fix-book }
+    prettier: { run: make fix-prettier }
+    ruff: { run: make fix-ruff }
+    fourmolu: { run: make fix-fourmolu }
+    hlint: { run: make lint-hlint }
+    oxlint: { run: make fix-oxlint }
+    shell: { run: make fix-shell }
+    taplo: { run: make fix-taplo }
+    actionlint: { run: make lint-actionlint }
+
+# Pure formatters only (no linters, no book-filter). prettier/fourmolu/taplo
+# reuse the fix-* subtargets; ruff/shfmt use format-only variants.
+format:
+  parallel: true
+  commands:
+    prettier: { run: make fix-prettier }
+    ruff: { run: make format-ruff }
+    fourmolu: { run: make fix-fourmolu }
+    shfmt: { run: make format-shfmt }
+    taplo: { run: make fix-taplo }
+
+# Block direct pushes to main (local guard; bypass with `git push --no-verify`).
+# lefthook forwards git's pre-push stdin to the script, which inspects the
+# destination refs. Real enforcement would be server-side branch protection.
+pre-push:
+  commands:
+    no-direct-main:
+      # use_stdin forwards git's pre-push ref lines to the script; without it
+      # lefthook swallows stdin and the guard would read nothing (fail open).
+      use_stdin: true
+      run: bash tools/git-hooks/pre-push-guard.sh

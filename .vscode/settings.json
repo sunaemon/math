@@ -1,0 +1,22 @@
+{
+  // The books build through pandoc + make (see the Makefile), not LaTeX
+  // Workshop. Disable its autobuild so it doesn't try to compile the generated
+  // .tex under build/ and fight the pipeline.
+  "latex-workshop.latex.autoBuild.run": "never",
+
+  // Keep the large generated and vendored trees out of search and the file
+  // watcher: .texlive/ (TeX Live snapshot), */build (pandoc/PDF output),
+  // */.lake (mathlib/Lake build), and the viewer's vendored assets.
+  "search.exclude": {
+    "**/build": true,
+    ".texlive": true,
+    "**/.lake": true,
+    "tools/formalization-viewer/vendor": true
+  },
+  "files.watcherExclude": {
+    "**/build/**": true,
+    ".texlive/**": true,
+    "**/.lake/**": true,
+    "tools/formalization-viewer/vendor/**": true
+  }
+}

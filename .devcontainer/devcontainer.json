@@ -1,0 +1,28 @@
+{
+  "name": "math",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  // setup.sh installs the system build tools (via apt), mise and its pinned
+  // toolchain, the repo-local TeX Live snapshot, and the Lean toolchain.
+  // It is idempotent, so re-running it on a rebuilt container is safe.
+  "postCreateCommand": "./setup.sh --run",
+  "remoteEnv": {
+    "PATH": "${containerEnv:HOME}/.local/bin:${containerEnv:PATH}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "leanprover.lean4",
+        "James-Yu.latex-workshop",
+        "GitHub.vscode-github-actions",
+        "hverlin.mise-vscode",
+        "haskell.haskell",
+        "ms-python.python",
+        "ms-vscode.makefile-tools",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}

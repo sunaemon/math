@@ -1,0 +1,7 @@
+# Fourmolu config for the book-filter Haskell sources. Only the deviations from
+# fourmolu's defaults are set; everything else uses the built-in defaults.
+#
+# The existing code uses 2-space indentation and leading commas, so we keep
+# those rather than re-indenting the whole tree to fourmolu's 4-space default.
+indentation: 2
+comma-style: leading

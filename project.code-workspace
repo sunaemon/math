@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "path": ".",
+    },
+  ],
+  "settings": {
+    "haskell.manageHLS": "PATH",
+  },
+  "extensions": {
+    "recommendations": ["tomoki1207.pdf", "haskell.haskell", "james-yu.latex-workshop", "ms-vscode.makefile-tools"],
+  },
+}

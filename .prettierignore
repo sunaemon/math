@@ -1,0 +1,16 @@
+# Build artifacts, generated output, vendored / installed code.
+**/build/
+**/dist/
+**/vendor/
+**/node_modules/
+**/.lake/
+**/lake-manifest.json
+
+# Book chapter sources are owned by the book-filter linter (LaTeX/math, custom
+# pandoc directives, strict 120-column wrapping) — Prettier must not touch them.
+polish-space/src/**/*.md
+polish-space-ch1/src/**/*.md
+
+# Test fixtures encode the exact bytes the test suites assert on.
+tests/fixtures/
+tools/formalization-viewer/fixtures/
