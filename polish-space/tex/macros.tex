@@ -1,0 +1,481 @@
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{graphs,graphdrawing,fit,backgrounds}
+\usegdlibrary{force}
+
+% A5 pages are too narrow for robust running section titles, especially
+% with long mathematical headings. Use quiet page-number headers instead.
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+}
+\emergencystretch=2em
+
+% Emit an index hyperlink target only once, even if the same term or notation
+% is defined in more than one indexed place.
+\makeatletter
+\newcommand{\indexhypertarget}[1]{%
+  \@ifundefined{indexanchor@#1}{%
+    \global\@namedef{indexanchor@#1}{}%
+    \hypertarget{#1}{}%
+  }{}%
+}
+\makeatother
+\newcommand{\notationindexpage}[2]{\indexhypertarget{#1}\hyperpage{#2}}
+\newcommand{\termindexpage}[2]{\indexhypertarget{#1}\hyperpage{#2}}
+\makeatletter
+\@ifundefined{ifbooklinkhighlight}{%
+  \newif\ifbooklinkhighlight
+  \booklinkhighlightfalse
+}{}
+% \booklinkanchorhere places a named destination at the *exact pen baseline*. A
+% bare \hypertarget at a paragraph/list start runs in vertical mode, where the
+% destination node lands in the inter-line space ~one line (about 16pt) above the
+% first line's baseline. That offset exceeds the line spacing (~12pt), so a
+% vertical-mode start destination sits above the *previous* line's baseline and the
+% viewer cannot tell which line the span begins on. \leavevmode forces horizontal
+% mode first (firing \everypar, so indentation is unaffected), so the destination
+% attaches to the first line's baseline — the true span boundary. A bare
+% \booklinkanchor is for ends, which the filter injects right after the last
+% content character (already horizontal mode, already exact); forcing \leavevmode
+% there could open a stray paragraph.
+\newcommand{\booklinkanchor}[1]{\hypertarget{#1}{}}
+\newcommand{\booklinkanchorhere}[1]{\leavevmode\hypertarget{#1}{}}
+\makeatother
+\ExplSyntaxOn
+\int_new:N \l__booklink_entry_int
+\keys_define:nn { booklink }
+  {
+    entry .int_set:N = \l__booklink_entry_int,
+    entry .initial:n = 0,
+    kind .code:n = {}
+  }
+% The booklink macros drop zero-width hypertargets (booklink-entry-N and
+% booklink-entry-N-end) marking each span's start and end, so the formalization
+% viewer can resolve the span's PDF extent and draw its overlay. They no longer
+% color the text itself: the viewer's per-kind overlay is the single source of
+% booklink coloring, so the rendered PDF stays visually clean. The anchors are
+% un-raised (see \booklinkanchor above) so their coordinates are the exact span
+% boundaries.
+% At a list-item start the span begins with \item; \leavevmode *before* \item adds
+% horizontal material ahead of it and breaks the list ("missing \item"). So when an
+% \item is next, let it run first, then force horizontal mode (safe now) for the
+% exact item-baseline anchor. Otherwise force horizontal mode directly so a
+% paragraph/vertical-mode start lands on its first line's baseline.
+\NewDocumentCommand{\BooklinkStart}{O{}m}
+  {
+    \keys_set:nn { booklink } { entry=0, #1 }
+    \peek_meaning_remove:NTF \item
+      { \item \exp_args:Nx \booklinkanchorhere { booklink-entry-\int_use:N \l__booklink_entry_int } }
+      { \exp_args:Nx \booklinkanchorhere { booklink-entry-\int_use:N \l__booklink_entry_int } }
+  }
+\NewDocumentCommand{\BooklinkEnd}{O{}m}
+  {
+    \keys_set:nn { booklink } { entry=0, #1 }
+    \exp_args:Nx \booklinkanchor { booklink-entry-\int_use:N \l__booklink_entry_int -end }
+  }
+\ExplSyntaxOff
+
+% Formalization-skip anchors. The book filter wraps each `formalization: skip`
+% region with \SkipStart{key}/\SkipEnd{key}; these drop zero-width hypertargets
+% (skip-key-start / skip-key-end) so the formalization viewer can resolve the
+% region's PDF coordinates and draw an overlay band. Gated on the same debug
+% flag as the Booklink coloring, so the released book emits nothing and stays
+% unchanged; only the booklink-highlight (debug) PDF carries the anchors.
+\newcommand{\SkipStart}[1]{\ifbooklinkhighlight\hypertarget{skip-#1-start}{}\fi}
+\newcommand{\SkipEnd}[1]{\ifbooklinkhighlight\hypertarget{skip-#1-end}{}\fi}
+
+% Theorem/proof structure. Use these environments for genuine mathematical
+% statements and proofs instead of raw Markdown bold labels such as
+% **Theorem.**, **Lemma.**, **Corollary.**, **Claim.**, or **Proof.**.
+% They are unnumbered for now so source cleanup does not change the book's
+% visible numbering scheme.
+\theoremstyle{plain}
+\newtheorem*{theorem*}{Theorem}
+\newtheorem*{lemma*}{Lemma}
+\newtheorem*{proposition*}{Proposition}
+\newtheorem*{corollary*}{Corollary}
+\newtheorem*{claim*}{Claim}
+\newtheorem*{fact*}{Fact}
+\theoremstyle{definition}
+\newtheorem*{recall*}{Recall}
+\newtheorem*{definition*}{Definition}
+\newtheorem*{example*}{Example}
+\newtheorem*{construction*}{Construction}
+\newtheorem*{remark*}{Remark}
+
+% Generic amsthm environment for statement headings that do not fit one of the
+% named theorem-like environments above.
+\newtheorem*{statement*}{Statement}
+
+% Boldface Borel/projective-hierarchy classes
+\newcommand{\bSigma}{{\symbf{\Sigma}}}
+\newcommand{\bPi}{{\symbf{\Pi}}}
+\newcommand{\bDelta}{{\symbf{\Delta}}}
+\newcommand{\DeltaZero}{\Delta_0}
+
+% Classical low-level Borel class names.
+% notation-index: $\Fsigma$
+\newcommand{\Fsigma}{F_\sigma}
+% notation-index: $\Gdelta$
+\newcommand{\Gdelta}{G_\delta}
+% notation-index: $\GdeltaSigma$
+\newcommand{\GdeltaSigma}{G_{\delta\sigma}}
+% notation-index: $\FsigmaDelta$
+\newcommand{\FsigmaDelta}{F_{\sigma\delta}}
+
+% Lightface Borel/projective-hierarchy classes
+\newcommand{\lSigma}{\Sigma}
+\newcommand{\lPi}{\Pi}
+\newcommand{\lDelta}{\Delta}
+
+% The set of natural numbers
+% notation-index: $\NN$
+% lint-raw-notation: enforce
+\newcommand{\NN}{{\mathbb{N}}}
+% The set of integers
+% notation-index: $\ZZ$
+% lint-raw-notation: enforce
+\newcommand{\ZZ}{{\mathbb{Z}}}
+% The set of rational numbers
+% notation-index: $\QQ$
+% lint-raw-notation: enforce
+\newcommand{\QQ}{{\mathbb{Q}}}
+% The set of real numbers
+% notation-index: $\R$
+% lint-raw-notation: enforce
+\newcommand{\R}{\mathbb{R}}
+% The set of complex numbers
+% lint-raw-notation: enforce
+\newcommand{\C}{\mathbb{C}}
+
+% Function-space notation: \funcspace{A}{B} = functions from A to B,
+% rendered as B^A (right superscript). Switch to {}^{A}\!B by editing
+% this single definition.
+% notation-index: $\funcspace{A}{B}$
+\newcommand{\funcspace}[2]{#2^{#1}}
+
+% Power set of A.
+% notation-index: $\PowerSet{A}$
+\newcommand{\PowerSet}[1]{\mathcal P(#1)}
+
+% Inclusion relation allowing equality.
+% notation-index: $A \IncludedIn B$
+% lint-raw-notation: enforce
+\newcommand{\IncludedIn}{\mathrel{\subseteq}}
+% Strict inclusion relation.
+% notation-index: $A \StrictlyIncludedIn B$
+% lint-raw-notation: enforce
+\newcommand{\StrictlyIncludedIn}{\mathrel{\subsetneq}}
+% Set difference A without B.
+% notation-index: $\SetDifference{A}{B}$
+% lint-raw-notation: enforce
+\newcommand{\SetDifference}[2]{#1 \setminus #2}
+
+% Named partial single-valued map.
+% notation-index: $\PartialFunctionMap{f}{X}{Y}$
+\newcommand{\PartialFunctionMap}[3]{#1 : \subseteq #2 \to #3}
+
+% Relation composition: first R, then S, rendered as S \circ R.
+% notation-index: $\RelationComposition{S}{R}$
+\newcommand{\RelationComposition}[2]{#1\circ #2}
+% Injective map notation.
+% notation-index: $\InjectionMap{f}{X}{Y}$
+\newcommand{\InjectionMap}[3]{#1 : #2 \hookrightarrow #3}
+% Surjective map notation.
+% notation-index: $\SurjectionMap{f}{X}{Y}$
+\newcommand{\SurjectionMap}[3]{#1 : #2 \twoheadrightarrow #3}
+
+% Semantic aliases for the main spaces used throughout the text.
+% These preserve the existing rendering while giving the source a more
+% descriptive vocabulary.
+\newcommand{\BaireSpace}{\funcspace{\omega}{\omega}}
+\newcommand{\CantorSpace}{\funcspace{\omega}{2}}
+% notation-index: $\HilbertCube$
+\newcommand{\HilbertCube}{\seqPower{[0,1]}{\omega}}
+% notation-index: $\RealSequenceSpace$
+\newcommand{\RealSequenceSpace}{\seqPower{\R}{\omega}}
+% Infinite symmetric group on the natural numbers.
+% notation-index: $\InfiniteSymmetricGroup$
+\newcommand{\InfiniteSymmetricGroup}{S_\infty}
+
+% Sequence powers are function-space notation with ordinal domain n,
+% read as sequences of length n.
+% notation-index: $A^n$
+\newcommand{\seqPower}[2]{#1^{#2}}
+
+% Word/block repetition: w repeated n times as a concatenated word.
+% notation-index: $w^n$
+\newcommand{\wordRepeat}[2]{#1^{#2}}
+
+% Finite sequences with entries in A: \finseq{A} = A^{<\omega}.
+% notation-index: $A^{<\omega}$
+\newcommand{\finseq}[1]{#1^{<\omega}}
+
+% Infinite subsets of A: \infiniteSubsets{A} = [A]^\omega.
+% notation-index: $\infiniteSubsets{\omega}$
+\newcommand{\infiniteSubsets}[1]{[#1]^\omega}
+
+% Disjoint union: A \disjointUnion B.
+% notation-index: $A\disjointUnion B$
+\newcommand{\disjointUnion}{\mathbin{\sqcup}}
+
+% External indexed disjoint union/topological sum.
+% notation-index: $\ExternalDisjointUnion_{i\in I} A_i$
+\newcommand{\ExternalDisjointUnion}{\mathop{\bigsqcup}\displaylimits}
+
+% Internal binary disjoint union: A \internalDisjointUnion B.
+% notation-index: $A\internalDisjointUnion B$
+\newcommand{\internalDisjointUnion}{\mathbin{\uplus}}
+
+% Internal indexed/family disjoint union: \InternalDisjointUnion_{i\in I} A_i.
+% notation-index: $\InternalDisjointUnion_{i\in I} A_i$
+\newcommand{\InternalDisjointUnion}{\mathop{\uplus}\displaylimits}
+
+% Directed supremum in domain theory.
+% notation-index: $\DirectedSup S$
+\newcommand{\DirectedSup}{\mathop{\bigsqcup}\displaylimits}
+
+% Restriction of a function or sequence: \restrict{f}{A}.
+% notation-index: $\restrict{f}{A}$
+\newcommand{\restrict}[2]{#1\mathord{\upharpoonright}_{#2}}
+
+% Sequence concatenation: s \concat t for the concatenation of finite
+% (or finite-and-infinite) sequences. Renders as a superscript frown
+% (the descriptive-set-theory standard, per Kechris / Moschovakis).
+% notation-index: $s\concat t$
+\newcommand{\concat}{\mathbin{{}^\frown}}
+
+% Initial-segment / prefix relation for finite and infinite sequences.
+% notation-index: $s\prefixOf y$
+\newcommand{\prefixOf}{\mathrel{\preceq}}
+% Negated initial-segment / prefix relation.
+% notation-index: $s\notPrefixOf y$
+\newcommand{\notPrefixOf}{\mathrel{\not\preceq}}
+% Proper initial-segment / proper-prefix relation.
+% notation-index: $s\properPrefixOf y$
+\newcommand{\properPrefixOf}{\mathrel{\prec}}
+% Reverse initial-segment relation: t extends s.
+% notation-index: $t\extendsPrefix s$
+\newcommand{\extendsPrefix}{\mathrel{\succeq}}
+% Restriction of an ambient set by a subscript condition.
+% notation-index: $P_{\le t}$
+\newcommand{\RestrictedSet}[2]{#1_{#2}}
+
+% Cylinder above a finite sequence: \cyl{s} = N_s = set of infinite
+% extensions of s in the ambient sequence space. Rendered as N_s
+% (Kechris / Moschovakis convention; "N" for neighborhood). Kept as a
+% macro so the notation is grep-able and a future rename touches one
+% line. We avoid [s] because [T] is already taken for the body of a
+% tree.
+% notation-index: $\cyl{s}$
+\newcommand{\cyl}[1]{N_{#1}}
+
+% The body [T] of a tree T.
+% notation-index: $\TreeBody{T}$
+\newcommand{\TreeBody}[1]{[#1]}
+
+% Open subsets of a topological space X.
+% notation-index: $\OpenSets{X}$
+\newcommand{\OpenSets}[1]{\mathcal O(#1)}
+% Closed subsets of a topological space X.
+% notation-index: $\ClosedSets{X}$
+\newcommand{\ClosedSets}[1]{\mathcal F(#1)}
+% Prefix up-sets of finite sequences over an alphabet A.
+% notation-index: $\PrefixUpSets{A}$
+\newcommand{\PrefixUpSets}[1]{\operatorname{Up}_{\prefixOf}(\finseq{#1})}
+% Prefix subtrees of finite sequences over an alphabet A.
+% notation-index: $\PrefixSubtrees{A}$
+\newcommand{\PrefixSubtrees}[1]{\operatorname{Subtr}_{\prefixOf}(\finseq{#1})}
+% Cylinder-code map from prefix up-sets to open sets.
+% notation-index: $\CylinderCode{A}$
+\newcommand{\CylinderCode}[1]{\Phi(#1)}
+% Open-cylinder-code map from open sets to prefix up-sets.
+% notation-index: $\OpenCylinderCode{U}$
+\newcommand{\OpenCylinderCode}[1]{\Psi(#1)}
+% Closed-tree-code map from closed sets to prefix trees.
+% notation-index: $\ClosedTreeCode{F}$
+\newcommand{\ClosedTreeCode}[1]{T_{#1}}
+
+% Diameter of a subset in the ambient metric.
+% notation-index: $\Diameter{A}$
+\newcommand{\Diameter}[1]{\mathrm{diam}(#1)}
+% Diameter of a metric subset: \MetricDiameter{d}{A} = sup_{x,y \in A} d(x, y).
+% The first argument names the metric.
+% notation-index: $\operatorname{diam}_{d}(A)$
+\newcommand{\MetricDiameter}[2]{\operatorname{diam}_{#1}(#2)}
+% Open metric ball with center x and radius r.
+% notation-index: $\Ball{x}{r}$
+\newcommand{\Ball}[2]{B(#1,#2)}
+% Open metric ball with an explicitly named metric.
+% notation-index: $\MetricBall{d}{x}{r}$
+\newcommand{\MetricBall}[3]{B_{#1}(#2,#3)}
+% Open metric ball in an explicitly named ambient space.
+% notation-index: $\AmbientBall{X}{x}{r}$
+\newcommand{\AmbientBall}[3]{B_{#1}(#2,#3)}
+% Closure in the ambient topological space.
+% notation-index: $\operatorname{cl}(A)$
+\newcommand{\Closure}[1]{\operatorname{cl}(#1)}
+% Closure in an explicitly named ambient space.
+% notation-index: $\operatorname{cl}_X(A)$
+\newcommand{\AmbientClosure}[2]{\operatorname{cl}_{#1}(#2)}
+% Standard metric on sequence spaces such as 2^omega and omega^omega.
+% notation-index: $d_{\mathrm{seq}}$
+\newcommand{\SeqMetricName}{d_{\mathrm{seq}}}
+% notation-index: $\SeqMetric{x}{y}$
+\newcommand{\SeqMetric}[2]{\SeqMetricName(#1,#2)}
+% Cylinder radius for the standard sequence metric.
+% notation-index: $\CylinderBallRadius{k}$
+\newcommand{\CylinderBallRadius}[1]{\rho_{#1}}
+
+% Domain of a function.
+% notation-index: $\DomainOf{f}$
+\newcommand{\DomainOf}[1]{\mathrm{dom}(#1)}
+
+% Cantor–Bendixson derivative.
+% \cbderivative{A}         produces A'
+% \cbderivative[\alpha]{F} produces F^{(\alpha)}
+% Use-before-definition is enforced at filter time (see tools/book-filter.hs);
+% \define{cbderivative} in a mathmeta block marks the definition point.
+% notation-index: $\cbderivative[\alpha]{F}$
+\newcommand{\cbderivative}[2][]{\if\relax\detokenize{#1}\relax#2'\else#2^{(#1)}\fi}
+
+% Cofinality of a limit ordinal
+% notation-index: $\cf(\lambda)$
+\newcommand{\cf}{\mathrm{cf}}
+
+% Substitution: \subst{x}{t} renders as [x <- t], meaning "send x to t".
+% Used in syntactic substitution into formulas: \varphi\subst{x}{t}.
+\newcommand{\subst}[2]{[#1 \leftarrow #2]}
+% notation-index: $t_0\subst{x}{t}$, first-order terms
+\newcommand{\SubstTerm}[3]{#1\subst{#2}{#3}}
+% notation-index: $\varphi\subst{x}{t}$, first-order formulas
+\newcommand{\SubstFormula}[3]{#1\subst{#2}{#3}}
+% notation-index: $M\subst{x}{N}$, lambda terms
+\newcommand{\SubstLambda}[3]{#1\subst{#2}{#3}}
+% notation-index: $t\subst{x_1,\ldots,x_n}{a_1,\ldots,a_n}$, PCA terms
+\newcommand{\SubstPCA}[3]{#1\subst{#2}{#3}}
+% Free variables of a syntactic expression.
+\newcommand{\FreeVars}[1]{\mathrm{FV}(#1)}
+% notation-index: $\FreeVars{t}$, first-order terms
+\newcommand{\FreeVarsTerm}[1]{\FreeVars{#1}}
+% notation-index: $\FreeVars{\varphi}$, first-order formulas
+\newcommand{\FreeVarsFormula}[1]{\FreeVars{#1}}
+% notation-index: $\FreeVars{M}$, lambda terms
+\newcommand{\FreeVarsLambda}[1]{\FreeVars{#1}}
+% First-order quantifier binders, kept separate from the raw symbols \forall
+% and \exists so mathmeta inference only sees actual quantified formulas.
+\newcommand{\forallbind}[2]{\forall #1\,#2}
+\newcommand{\existsbind}[2]{\exists #1\,#2}
+% Lambda abstraction, kept separate from the raw symbol \lambda so mathmeta
+% inference only sees actual abstraction syntax.
+\newcommand{\lambdaab}[2]{\lambda #1.#2}
+
+% Forcing relation: p \forces \varphi.
+% notation-index: $p\forces\varphi$
+\newcommand{\forces}{\Vdash}
+
+% Gandy--Harrington topology.
+% notation-index: $\GHTopology$
+\newcommand{\GHTopology}{\tau_{\rm GH}}
+
+% Category-theoretic notation.
+% Category names.
+% notation-index: $\SetCat$
+\newcommand{\SetCat}{\mathbf{Set}}
+% notation-index: $\TopCat$
+\newcommand{\TopCat}{\mathbf{Top}}
+% notation-index: $\PolCat$
+\newcommand{\PolCat}{\mathbf{Pol}}
+% notation-index: $\MesCat$
+\newcommand{\MesCat}{\mathbf{Mes}}
+% notation-index: $\DomOmegaCat$
+\newcommand{\DomOmegaCat}{\mathbf{Dom}_\omega}
+% notation-index: $\qPolAdmCat$
+\newcommand{\qPolAdmCat}{\mathbf{qPol}_{\rm adm}}
+% notation-index: $\EffCat$
+\newcommand{\EffCat}{\mathbf{Eff}}
+% notation-index: $\CatCat$
+\newcommand{\CatCat}{\mathbf{Cat}}
+% notation-index: $\AsmCat{A}$
+\newcommand{\AsmCat}[1]{\mathbf{Asm}(#1)}
+% notation-index: $\ModCat{A}$
+\newcommand{\ModCat}[1]{\mathbf{Mod}(#1)}
+% notation-index: $\RTCat{A}$
+\newcommand{\RTCat}[1]{\mathbf{RT}(#1)}
+% notation-index: $\HeytAlgCat$
+\newcommand{\HeytAlgCat}{\mathbf{HeytAlg}}
+% notation-index: $\ShCat{X}$
+\newcommand{\ShCat}[1]{\mathbf{Sh}(#1)}
+% notation-index: $\SetCat_U$
+\newcommand{\SetCatU}{\mathbf{Set}_U}
+% notation-index: $\Ob{\mathcal C}$
+\newcommand{\Ob}[1]{\mathrm{Ob}(#1)}
+% Hom-set in a category: morphisms A -> B in C.
+% notation-index: $\HomSet{\mathcal C}{A}{B}$
+\newcommand{\HomSet}[3]{#1(#2,#3)}
+% notation-index: $\opcat{\mathcal C}$
+\newcommand{\opcat}[1]{#1^{\mathrm{op}}}
+% notation-index: $\functorCat{\mathcal C}{\mathcal D}$
+\newcommand{\functorCat}[2]{#2^{#1}}
+% notation-index: $\presheafCat{\mathcal C}$
+\newcommand{\presheafCat}[1]{\SetCat^{\opcat{#1}}}
+% notation-index: $\catExp{A}{B}$
+\newcommand{\catExp}[2]{#2^{#1}}
+% notation-index: $\evalMap$
+\newcommand{\evalMap}{\mathrm{ev}}
+% notation-index: $\adjunction{F}{U}$
+\newcommand{\adjunction}[2]{#1 \dashv #2}
+% notation-index: $\Subobjects{A}$
+\newcommand{\Subobjects}[1]{\mathrm{Sub}(#1)}
+% notation-index: $\SubobjectClassifier$
+\newcommand{\SubobjectClassifier}{\Omega}
+
+% First uncountable ordinal
+% notation-index: $\omegaOneOrd$
+% lint-raw-notation: enforce
+\newcommand{\omegaOneOrd}{\omega_1}
+% Church--Kleene ordinal.
+% notation-index: $\churchKleeneOrd$
+% lint-raw-notation: enforce
+\newcommand{\churchKleeneOrd}{\omega_1^{CK}}
+% First infinite cardinal (= cardinality of \NN)
+% notation-index: $\alephNull$
+% lint-raw-notation: enforce
+\newcommand{\alephNull}{\aleph_0}
+% Aleph cardinal indexed by an ordinal.
+% notation-index: $\alephCard{\alpha}$
+% lint-raw-notation: enforce
+\newcommand{\alephCard}[1]{\aleph_{#1}}
+% Beth cardinals.
+% notation-index: $\bethCard{\alpha}$
+% lint-raw-notation: enforce
+\newcommand{\bethCard}[1]{\beth_{#1}}
+% Countable infinitary logic.
+% notation-index: $\LCountableInfinitaryLogic$
+\newcommand{\LCountableInfinitaryLogic}{L_{\omega_1\omega}}
+% Consistency of a theory.
+% notation-index: $\ConsistentTheory{T}$
+\newcommand{\ConsistentTheory}[1]{\operatorname{Con}(#1)}
+% The AD/Wadge determinacy ordinal: supremum of ordinals which are
+% surjective images of the reals.
+% notation-index: $\ADTheta$
+\newcommand{\ADTheta}{\Theta}
+
+% Effective descriptive set theory.
+% notation-index: $\BorelCodes$
+\newcommand{\BorelCodes}{\mathrm{BC}}
+% notation-index: $\WellFoundedTrees$
+\newcommand{\WellFoundedTrees}{\mathrm{WF}}
+% notation-index: $\HyperarithmeticalSets$
+\newcommand{\HyperarithmeticalSets}{\mathrm{HYP}}
+% notation-index: $\KleeneO$
+\newcommand{\KleeneO}{\mathcal{O}}

@@ -1,0 +1,81 @@
+{
+  "comment": "Single source of truth for the third-party components vendored under this directory. tools/vendor_notices.py generates THIRD-PARTY-NOTICES.md from this file, and the viewer's About panel reads it via the server (repo-version.ts). To re-pin a component: `python tools/vendor_notices.py set-version <id> <version>`, then `fetch-license <id>`, then `generate`, then refresh the asset files (e.g. tools/fetch_treesitter_assets.sh).",
+  "components": [
+    {
+      "id": "katex",
+      "name": "KaTeX",
+      "version": "0.16.11",
+      "spdx": "MIT",
+      "homepage": "https://github.com/KaTeX/KaTeX",
+      "description": "Renders the book's math (macros extracted from macros.tex) in the viewer's marker titles and infoview. The vendored CSS was trimmed to reference only the woff2 fonts below.",
+      "files": ["katex/katex.mjs", "katex/katex.min.css"],
+      "licenseFile": "katex/LICENSE",
+      "licenseUrl": "https://raw.githubusercontent.com/KaTeX/KaTeX/v{version}/LICENSE"
+    },
+    {
+      "id": "katex-fonts",
+      "name": "KaTeX fonts",
+      "version": "0.16.11",
+      "spdx": "OFL-1.1",
+      "homepage": "https://github.com/KaTeX/KaTeX",
+      "description": "The KaTeX web fonts (woff2), derived from the MathJax/TeX fonts. Licensed under the SIL Open Font License 1.1, separately from the MIT-licensed KaTeX library above.",
+      "copyright": [
+        "Copyright (c) 2009-2010, Design Science, Inc. (www.mathjax.org)",
+        "Copyright (c) 2014-2017 Khan Academy (www.khanacademy.org)"
+      ],
+      "files": ["katex/fonts/*.woff2"],
+      "licenseFile": "katex/fonts/OFL.txt"
+    },
+    {
+      "id": "pdfjs",
+      "name": "pdf.js",
+      "version": "5.7.284",
+      "spdx": "Apache-2.0",
+      "homepage": "https://github.com/mozilla/pdf.js",
+      "copyright": ["Copyright 2024 Mozilla Foundation"],
+      "description": "Renders the book PDF in the viewer's PDF pane. The distributed files also retain their Apache-2.0 notice inline (@licstart … @licend).",
+      "files": ["pdfjs/pdf.mjs", "pdfjs/pdf.worker.mjs"],
+      "licenseFile": "pdfjs/LICENSE",
+      "licenseUrl": "https://raw.githubusercontent.com/mozilla/pdf.js/v{version}/LICENSE",
+      "licenseInline": false
+    },
+    {
+      "id": "web-tree-sitter",
+      "name": "web-tree-sitter",
+      "version": "0.26.9",
+      "spdx": "MIT",
+      "homepage": "https://github.com/tree-sitter/tree-sitter",
+      "description": "The tree-sitter syntax-highlighting runtime (WASM) the source panes load.",
+      "files": ["treesitter/web-tree-sitter.js", "treesitter/web-tree-sitter.wasm", "treesitter/web-tree-sitter.d.ts"],
+      "licenseFile": "treesitter/LICENSE-web-tree-sitter",
+      "licenseUrl": "https://raw.githubusercontent.com/tree-sitter/tree-sitter/v{version}/LICENSE"
+    },
+    {
+      "id": "tree-sitter-markdown",
+      "name": "tree-sitter-markdown",
+      "version": "0.5.3",
+      "spdx": "MIT",
+      "homepage": "https://github.com/MDeiml/tree-sitter-markdown",
+      "description": "Markdown grammar (block + inline) and highlight queries for the md pane.",
+      "files": [
+        "treesitter/tree-sitter-markdown.wasm",
+        "treesitter/tree-sitter-markdown_inline.wasm",
+        "treesitter/queries/markdown.scm",
+        "treesitter/queries/markdown_inline.scm"
+      ],
+      "licenseFile": "treesitter/LICENSE-tree-sitter-markdown",
+      "licenseUrl": "https://raw.githubusercontent.com/MDeiml/tree-sitter-markdown/v{version}/LICENSE"
+    },
+    {
+      "id": "tree-sitter-lean",
+      "name": "tree-sitter-lean",
+      "version": "463a9d8a509c935f4e10854b5078bbe2839b274c",
+      "spdx": "MIT",
+      "homepage": "https://github.com/Julian/tree-sitter-lean",
+      "description": "Lean grammar and highlight queries for the lean pane.",
+      "files": ["treesitter/tree-sitter-lean.wasm", "treesitter/queries/lean.scm"],
+      "licenseFile": "treesitter/LICENSE-tree-sitter-lean",
+      "licenseUrl": "https://raw.githubusercontent.com/Julian/tree-sitter-lean/{version}/LICENSE"
+    }
+  ]
+}

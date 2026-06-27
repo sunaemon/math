@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Formalization Viewer</title>
+    <link rel="icon" href="./favicon.svg" />
+    <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="toolbar-selects">
+        <label class="select-label" id="book-select-label" hidden>
+          <select id="book-select" aria-label="Book"></select>
+        </label>
+        <div class="marker-combo select-label-grow" id="marker-combo">
+          <button
+            id="marker-field"
+            class="marker-field"
+            type="button"
+            aria-haspopup="listbox"
+            aria-expanded="false"
+            title="Jump to linked passage"
+          >
+            <span class="select-caption">Marker</span>
+            <span id="marker-field-label" class="marker-field-label">—</span>
+            <span class="marker-field-caret" aria-hidden="true">&#9662;</span>
+          </button>
+          <div id="marker-popover" class="marker-popover" hidden>
+            <input
+              id="marker-search"
+              class="marker-search"
+              type="search"
+              placeholder="Search markers…"
+              aria-label="Search markers"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <ul id="marker-list" class="marker-list" role="listbox" aria-label="Markers"></ul>
+            <div class="marker-hints"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>↵</kbd> jump · <kbd>esc</kbd> close</div>
+          </div>
+        </div>
+      </div>
+      <button id="prev-entry" type="button" title="Previous marker" aria-label="Previous marker">&larr;</button>
+      <button id="next-entry" type="button" title="Next marker" aria-label="Next marker">&rarr;</button>
+      <div class="settings">
+        <button
+          id="settings-toggle"
+          class="icon-button"
+          type="button"
+          aria-expanded="false"
+          aria-haspopup="true"
+          aria-label="View options"
+          title="View options"
+        >
+          &#9776;
+        </button>
+        <div id="settings-menu" class="settings-menu view-options" hidden aria-label="View options">
+          <h2 class="vo-title">View options</h2>
+
+          <section class="vo-section">
+            <h3 class="vo-label">Panels</h3>
+            <div class="vo-panels">
+              <label><input class="pane-check" type="checkbox" value="pdf" checked /> PDF</label>
+              <label><input class="pane-check" type="checkbox" value="md" checked /> Markdown</label>
+              <label><input class="pane-check" type="checkbox" value="lean" checked /> Lean</label>
+              <label><input class="pane-check" type="checkbox" value="tex" /> TeX</label>
+              <label><input class="pane-check" type="checkbox" value="infoview" checked /> Lean Infoview</label>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <section class="vo-section">
+            <h3 class="vo-label">Sync</h3>
+            <div class="vo-row">
+              <span class="vo-row-label">Scroll sync</span>
+              <div class="segmented" id="sync-seg" role="group" aria-label="Scroll sync">
+                <button type="button" data-value="on" aria-pressed="true">On</button>
+                <button type="button" data-value="off" aria-pressed="false">Off</button>
+              </div>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <section class="vo-section">
+            <h3 class="vo-label">Editor</h3>
+            <div class="vo-row">
+              <span class="vo-row-label">Line numbers</span>
+              <div class="segmented" id="linenum-seg" role="group" aria-label="Line numbers">
+                <button type="button" data-value="on" aria-pressed="false">On</button>
+                <button type="button" data-value="off" aria-pressed="true">Off</button>
+              </div>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <section class="vo-section">
+            <h3 class="vo-label">Layout</h3>
+            <div class="segmented segmented-full" id="layout-seg" role="group" aria-label="Layout">
+              <button type="button" data-value="columns" aria-pressed="true">Columns</button>
+              <button type="button" data-value="rows" aria-pressed="false">Rows</button>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <footer class="vo-footer">
+            <button id="about-open" type="button" class="vo-link" aria-haspopup="dialog">
+              About — version &amp; license
+            </button>
+          </footer>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="pane" data-pane="pdf">
+        <div class="pane-header">
+          <div class="pdf-controls">
+            <span>Rendered PDF</span>
+            <select id="pdf-select" aria-label="PDF document"></select>
+          </div>
+          <div class="pane-actions">
+            <span id="pdf-build-status" class="build-status" role="status" aria-live="polite" hidden></span>
+            <a id="pdf-link" target="_blank" rel="noreferrer">Open</a>
+          </div>
+        </div>
+        <div id="pdf-viewer" class="pdf-viewer" role="region" aria-label="PDF preview">
+          <div class="pdf-message">Loading PDF...</div>
+        </div>
+      </section>
+
+      <section class="pane" data-pane="md">
+        <div class="pane-header">
+          <div class="file-controls">
+            <span>Book source</span>
+            <select id="md-select" aria-label="Markdown file"></select>
+          </div>
+        </div>
+        <pre id="md-source" class="source"></pre>
+      </section>
+
+      <section class="pane" data-pane="lean">
+        <div class="pane-header">
+          <div class="file-controls">
+            <span>Lean formalization</span>
+            <select id="lean-select" aria-label="Lean file"></select>
+          </div>
+        </div>
+        <pre id="lean-source" class="source"></pre>
+      </section>
+
+      <section class="pane" data-pane="tex">
+        <div class="pane-header">
+          <span>TeX</span>
+          <div class="pane-actions">
+            <span id="tex-meta" class="meta"></span>
+          </div>
+        </div>
+        <pre id="tex-source" class="source"></pre>
+      </section>
+
+      <section class="pane" data-pane="infoview">
+        <div class="pane-header">
+          <span>Lean proof state</span>
+          <div class="pane-actions">
+            <span id="infoview-status" class="meta" data-status="connecting">LSP: connecting…</span>
+          </div>
+        </div>
+        <div id="infoview-body" class="infoview"></div>
+      </section>
+    </main>
+
+    <div id="about-overlay" class="about-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
+      <div class="about-dialog" role="document">
+        <button id="about-close" class="about-close" type="button" aria-label="Close">&times;</button>
+        <h2 id="about-title">Formalization Viewer</h2>
+        <dl class="about-meta">
+          <dt>Book</dt>
+          <dd id="about-book">—</dd>
+          <dt>Version</dt>
+          <dd class="about-version">
+            <span id="about-version-text">—</span>
+            <button
+              id="about-copy"
+              class="about-copy"
+              type="button"
+              aria-label="Copy commit hash"
+              title="Copy commit hash"
+            >
+              <svg class="icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+                <rect
+                  x="9"
+                  y="9"
+                  width="11"
+                  height="11"
+                  rx="2"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                ></rect>
+                <path d="M5 15V5a2 2 0 0 1 2-2h8" fill="none" stroke="currentColor" stroke-width="2"></path>
+              </svg>
+            </button>
+          </dd>
+          <dt>Repository</dt>
+          <dd><a id="about-repo" target="_blank" rel="noreferrer">—</a></dd>
+        </dl>
+        <h3>License</h3>
+        <p id="about-license-summary" class="about-license-summary"></p>
+        <ul id="about-license-list" class="about-license-list"></ul>
+      </div>
+    </div>
+
+    <script type="module" src="./build/app.js"></script>
+  </body>
+</html>

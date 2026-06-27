@@ -1,0 +1,7 @@
+# HLint configuration for the book-filter Haskell sources.
+#
+# The code uses `pattern` as an ordinary variable name. HLint's parser enables
+# PatternSynonyms by default, which turns `pattern` into a keyword and produces
+# spurious parse errors; the project does not enable that extension (GHC compiles
+# the code fine), so tell HLint to match the project's real extension set.
+- arguments: [-XNoPatternSynonyms]

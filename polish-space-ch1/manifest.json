@@ -1,0 +1,26 @@
+{
+  "name": "polish-space-ch1",
+  "mount": "/polish-space-ch1",
+  "dir": "polish-space-ch1",
+  "repository": "https://github.com/sunaemon/math",
+  "served": {
+    "src": ["md", "json"],
+    "lean": ["lean"],
+    "build": ["json", "pdf", "tex"]
+  },
+  "flat": ["build"],
+  "sourceMap": "build/polish-space-ch1-sourcemap.json",
+  "pdf": "build/polish-space-ch1-debug.pdf",
+  "book": "src/polish-space-ch1.md",
+  "bookManifest": "src/polish-space-ch1.json",
+  "bookSourcePrefix": "src/polish-space-book/",
+  "leanSourcePrefix": "lean/PolishSpaceBook/",
+  "leanRootModule": "lean/PolishSpaceBook.lean",
+  "license": {
+    "summary": "Mixed licensing: source code is MIT-licensed; written and rendered content is CC BY 4.0; bundled third-party components retain their upstream licenses.",
+    "items": [
+      { "scope": "Source code", "spdx": "MIT", "file": "LICENSE-MIT" },
+      { "scope": "Written content", "spdx": "CC BY 4.0", "file": "LICENSE-CC-BY-4.0" }
+    ]
+  }
+}

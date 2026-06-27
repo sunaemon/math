@@ -1,0 +1,172 @@
+{
+  "version": 2,
+  "coordinateSystem": {
+    "line": "1-based",
+    "column": "0-based Unicode code-point offset within line",
+    "offset": "0-based Unicode code-point offset within file",
+    "end": "exclusive"
+  },
+  "root": "/Users/sunaemon/math",
+  "leanFile": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.lean",
+  "leanFiles": [
+    "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.lean"
+  ],
+  "entryCount": 3,
+  "counts": {
+    "matched": 3
+  },
+  "entries": [
+    {
+      "lean": {
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.lean",
+        "markerLine": 45,
+        "markerEndLine": 50,
+        "declKind": "theorem",
+        "declName": "alpha_theorem",
+        "declLine": 51,
+        "declEndLine": 52
+      },
+      "booklink": {
+        "source": "tools/formalization-viewer/fixtures/simple.md",
+        "target": "statement",
+        "kind": "theorem",
+        "title": "Alpha theorem"
+      },
+      "match": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.md",
+        "kind": "theorem",
+        "title": "Alpha theorem",
+        "startLine": 51,
+        "startColumn": 0,
+        "startOffset": 1414,
+        "endLine": 54,
+        "endColumn": 14,
+        "endOffset": 1514
+      },
+      "texMatch": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.tex",
+        "names": [
+          "SimpleFixture.alpha_theorem"
+        ],
+        "kind": "statement",
+        "startLine": 52,
+        "startColumn": 0,
+        "startOffset": 1487,
+        "endLine": 56,
+        "endColumn": 0,
+        "endOffset": 1588,
+        "markerStartOffset": 1487,
+        "markerEndOffset": 1588
+      }
+    },
+    {
+      "lean": {
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.lean",
+        "markerLine": 104,
+        "markerEndLine": 109,
+        "declKind": "theorem",
+        "declName": "beta_prose",
+        "declLine": 110,
+        "declEndLine": 111
+      },
+      "booklink": {
+        "source": "tools/formalization-viewer/fixtures/simple.md",
+        "target": "prose",
+        "excerpt": "Some prose target says beta words exactly here."
+      },
+      "match": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.md",
+        "startLine": 114,
+        "startColumn": 0,
+        "startOffset": 3740,
+        "endLine": 114,
+        "endColumn": 47,
+        "endOffset": 3787
+      },
+      "texMatch": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.tex",
+        "names": [
+          "SimpleFixture.beta_prose"
+        ],
+        "startLine": 117,
+        "startColumn": 0,
+        "startOffset": 3923,
+        "endLine": 118,
+        "endColumn": 0,
+        "endOffset": 3971,
+        "markerStartOffset": 3923,
+        "markerEndOffset": 3971
+      }
+    },
+    {
+      "lean": {
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.lean",
+        "markerLine": 163,
+        "markerEndLine": 168,
+        "declKind": "theorem",
+        "declName": "gamma_proof",
+        "declLine": 169,
+        "declEndLine": 170
+      },
+      "booklink": {
+        "source": "tools/formalization-viewer/fixtures/simple.md",
+        "target": "proof",
+        "excerpt": "Gamma proof step happens here."
+      },
+      "match": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.md",
+        "startLine": 175,
+        "startColumn": 0,
+        "startOffset": 6034,
+        "endLine": 175,
+        "endColumn": 30,
+        "endOffset": 6064
+      },
+      "texMatch": {
+        "status": "matched",
+        "score": 1.0,
+        "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.tex",
+        "names": [
+          "SimpleFixture.gamma_proof"
+        ],
+        "startLine": 179,
+        "startColumn": 0,
+        "startOffset": 6289,
+        "endLine": 182,
+        "endColumn": 0,
+        "endOffset": 6353,
+        "markerStartOffset": 6289,
+        "markerEndOffset": 6353
+      }
+    }
+  ],
+  "skips": [
+    {
+      "source": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.md",
+      "kind": "block",
+      "key": "simple-4299",
+      "reason": "illustrative fixture skip (filler prose, not a proof obligation)",
+      "startLine": 116,
+      "startColumn": 0,
+      "startOffset": 4299,
+      "endLine": 120,
+      "endColumn": 43,
+      "endOffset": 4518
+    }
+  ],
+  "texFile": "/Users/sunaemon/math/tools/formalization-viewer/fixtures/simple.tex",
+  "texMarkerCount": 3,
+  "texCounts": {
+    "matched": 3
+  }
+}

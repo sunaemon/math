@@ -1,0 +1,95 @@
+# CD for the public mirror (sunaemon/math), produced by tools/publish_math.sh,
+# which contains only the polish-space-ch1 excerpt plus shared tooling. Builds
+# the ch1 static viewer distribution and deploys it to GitHub Pages.
+#
+# Requires Pages to be enabled on the `math` repo with "GitHub Actions" as the
+# source (Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
+#
+# The private repo runs check.yml instead; this job gates on the repo name so it
+# only deploys from the public mirror (and never leaks the full private book).
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-flight deploy finish rather than cancel it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'sunaemon/math'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # GITHUB_TOKEN lifts mise's GitHub API rate limit, used when resolving
+    # github-backed tools — including the ghcup plugin that backs ghc/cabal
+    # (registered by setup.sh; see its comment for why conda is avoided).
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Make room for mathlib's olean cache + TeX Live + toolchains (see check.yml).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+      # Provision the mise binary + PATH and cache the tool installs. install:
+      # false defers `mise install` to setup.sh below, so its ghcup-backed
+      # ghc/cabal plugins are registered before tools install — mise's default
+      # conda GHC backend has no linux-64 candidate for the pinned 9.6.7.
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache: true
+          install: false
+
+      - name: Cache TeX Live snapshot
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .texlive
+          key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
+
+      - name: Cache mathlib build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/mathlib
+          key: mathlib-${{ runner.os }}-${{ hashFiles('**/lake-manifest.json', 'lean-toolchain') }}
+
+      # mise is on PATH from the step above; setup.sh installs the mise.toml tools
+      # (registering the ghcup ghc/cabal plugins first), the repo-local TeX Live
+      # snapshot, and the Lean toolchain.
+      - name: Provision toolchain (mise tools + TeX Live + Lean)
+        run: ./setup.sh --run
+
+      # Builds the ch1 dist: debug + release PDFs, sourcemaps, and the Lean
+      # infoview cache (which compiles ch1's standalone lake project).
+      - name: Build ch1 viewer dist
+        run: make dist BOOKLINK_PROJECT=polish-space-ch1
+
+      # Serve the public viewer from the custom domain. actions/deploy-pages
+      # publishes whatever CNAME file the artifact carries; the apex DNS for
+      # sunaemon.dev must point at GitHub Pages (configured at the DNS provider,
+      # and the domain set under Settings -> Pages so the TLS cert is issued).
+      - name: Set custom domain
+        run: echo 'sunaemon.dev' > dist/CNAME
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: dist
+
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

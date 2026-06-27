@@ -1,0 +1,18 @@
+{
+  "comment": "Type-checks the browser-driven E2E harness. Node-flavored like the server (it spawns processes and speaks CDP over Node's global WebSocket) and run directly with type stripping, so it imports .ts files and must be erasable-only.",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "esnext",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "typeRoots": ["../server/node_modules/@types"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.ts"]
+}
