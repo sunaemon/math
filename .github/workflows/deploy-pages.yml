@@ -75,8 +75,13 @@ jobs:
 
       # Builds the ch1 dist: debug + release PDFs, sourcemaps, and the Lean
       # infoview cache (which compiles ch1's standalone lake project).
+      # --base-path nests the viewer under sunaemon.dev/math/ (the public mirror
+      # is sunaemon/math); the apex redirect hops on into the book.
+      # --legacy-redirect preserves the one pre-move URL, sunaemon.dev/polish-space-ch1/.
+      # It is per-book on purpose: a future book published straight under /math/
+      # has no old URL, so it adds no such flag and gets no host-root redirect.
       - name: Build ch1 viewer dist
-        run: make dist BOOKLINK_PROJECT=polish-space-ch1
+        run: make dist BOOKLINK_PROJECT=polish-space-ch1 BOOKLINK_DIST_FLAGS="--base-path math --legacy-redirect polish-space-ch1"
 
       # Serve the public viewer from the custom domain. actions/deploy-pages
       # publishes whatever CNAME file the artifact carries; the apex DNS for

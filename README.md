@@ -2,6 +2,8 @@
 
 A collection of mathematical books written in Markdown and compiled to PDF via Pandoc and a custom Haskell filter, with accompanying Lean formalizations and a browser-based formalization viewer.
 
+The formalization viewer is published live at <https://sunaemon.dev/math/>.
+
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/sunaemon/math)
 
 Launch a cloud dev environment from the badge above; it provisions the toolchain automatically (the devcontainer runs `make setup-run` on create). Pick at least an 8-core machine; the default 2-core Codespace makes provisioning (TeX Live, GHC, and friends) painfully slow.
