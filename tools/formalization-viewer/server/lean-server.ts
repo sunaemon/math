@@ -171,6 +171,12 @@ export class LeanServer {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
+  closeDocument(uri: string): void {
+    this.notify("textDocument/didClose", { textDocument: { uri } });
+    this.diagnostics.delete(uri);
+    this.progressDone.delete(uri);
+  }
+
   diagnosticsFor(uri: string): unknown[] {
     return this.diagnostics.get(uri) ?? [];
   }

@@ -7,8 +7,23 @@ The formalization viewer is published live at <https://sunaemon.dev/math/>.
 The public export includes the [complete English book](https://sunaemon.dev/math/polish-space/)
 and the [first-chapter excerpt](https://sunaemon.dev/math/polish-space-ch1/).
 From the private checkout, run `tools/publish_math.sh ../math` to prepare both
-editions in the public checkout. The Pages workflow builds both mounts from that
-checkout.
+editions in the public checkout. Pages deployment uses locally built assets;
+pushing source changes does not start a remote Lean/TeX rebuild.
+
+After merging the public source update, run this from a configured local checkout:
+
+```sh
+tools/publish_pages_local.sh pages-YYYYMMDD-HHMMSS
+```
+
+This builds both English mounts with their PDFs and Lean hover caches, packages
+only those mounts, uploads `pages.tar.gz` to a public GitHub Release, and dispatches
+the Pages workflow. Actions verifies the archive SHA-256 and deploys it without
+installing the build toolchain. Use a fresh release tag for each deployment.
+Unchanged local Lean caches are reused. To publish text and PDFs before hover
+cache generation finishes, add `--without-hover`; rerun later with a new tag and
+without that option to include all hover data. Japanese editions and print artifacts
+are excluded from this package.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/sunaemon/math)
 

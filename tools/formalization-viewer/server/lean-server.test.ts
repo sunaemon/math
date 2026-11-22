@@ -28,3 +28,25 @@ test("the cache client closes and reaps a server with a negative frame length", 
   }
   assert.ok(child.exitCode !== null || child.signalCode !== null);
 });
+
+test("closing a cached document releases its diagnostics and notifies Lean", async () => {
+  const server = new LeanServer(os.tmpdir(), () =>
+    spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "pipe", "ignore"],
+      detached: true,
+    }),
+  );
+  try {
+    const messages: unknown[] = [];
+    server.notify = (method, params) => {
+      messages.push({ method, params });
+    };
+    const uri = "file:///example.lean";
+    server.diagnostics.set(uri, [{ message: "old diagnostics" }]);
+    server.closeDocument(uri);
+    assert.deepEqual(messages, [{ method: "textDocument/didClose", params: { textDocument: { uri } } }]);
+    assert.equal(server.diagnostics.has(uri), false);
+  } finally {
+    await server.shutdown();
+  }
+});

@@ -1,25 +1,23 @@
-# CD for the public mirror (sunaemon/math), produced by tools/publish_math.sh,
-# which contains the full English book, the polish-space-ch1 excerpt, and shared
-# tooling. Builds both viewer mounts and deploys them together to GitHub Pages.
-#
-# Requires Pages to be enabled on the `math` repo with "GitHub Actions" as the
-# source (Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
-#
-# The private repo runs check.yml instead; this job gates on the repo name so it
-# only deploys from the public mirror.
+# Build locally with tools/publish_pages_local.sh; Actions only verifies and deploys.
 name: deploy-pages
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      artifact_tag:
+        description: Release tag containing pages.tar.gz
+        required: true
+        type: string
+      sha256:
+        description: SHA-256 of pages.tar.gz
+        required: true
+        type: string
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# One deploy at a time; let an in-flight deploy finish rather than cancel it.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -31,73 +29,24 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
-    # GITHUB_TOKEN lifts mise's GitHub API rate limit, used when resolving
-    # github-backed tools — including the ghcup plugin that backs ghc/cabal
-    # (registered by setup.sh; see its comment for why conda is avoided).
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Make room for mathlib's olean cache + TeX Live + toolchains (see check.yml).
-      - name: Free disk space
+      - name: Download locally built site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ARTIFACT_TAG: ${{ inputs.artifact_tag }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
-          df -h / | tail -1
-
-      # Provision the mise binary + PATH and cache the tool installs. install:
-      # false defers `mise install` to setup.sh below, so its ghcup-backed
-      # ghc/cabal plugins are registered before tools install — mise's default
-      # conda GHC backend has no linux-64 candidate for the pinned 9.14.1.
-      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5.2.3
-        with:
-          cache: true
-          install: false
-
-      - name: Cache TeX Live snapshot
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .texlive
-          key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
-
-      - name: Cache mathlib build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/mathlib
-          key: mathlib-${{ runner.os }}-${{ hashFiles('**/lake-manifest.json', 'lean-toolchain') }}
-
-      # mise is on PATH from the step above; setup.sh installs the mise.toml tools
-      # (registering the ghcup ghc/cabal plugins first), the repo-local TeX Live
-      # snapshot, and the Lean toolchain.
-      - name: Provision toolchain (mise tools + TeX Live + Lean)
-        run: ./setup.sh --run
-
-      # Each static export owns its destination. Keep the excerpt's existing
-      # root redirect, then add the English book at the QR code's /polish-space/
-      # mount. Each build includes the corresponding release PDF.
-      #
-      # No --base-path and no CNAME: sunaemon.dev is the custom domain of the
-      # user site (sunaemon.github.io), so this repo is served as a project page
-      # at sunaemon.dev/math/ automatically — the /math/ prefix comes from the
-      # repo name. The viewer derives that prefix from the URL at runtime
-      # (util.ts mountPrefix), so the dist needs no prefix baked in. Passing
-      # --base-path math would double it (sunaemon.dev/math/math/...), and a
-      # CNAME here would clash with the user site that owns the domain.
-      - name: Build both English viewer editions
-        run: |
-          make dist BOOKLINK_PROJECT=polish-space-ch1
-          if test -f polish-space/src/polish-space-book.json; then
-            make lean LAKE_PROJECTS=polish-space
-            make dist BOOKLINK_PROJECT=polish-space BOOKLINK_DIST_DIR=build/pages-full BOOKLINK_DIST_FLAGS=--no-lake-build
-            mv build/pages-full/polish-space dist/polish-space
-          fi
-
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          gh release download "$ARTIFACT_TAG" --pattern pages.tar.gz --dir .
+          printf '%s  pages.tar.gz\n' "$EXPECTED_SHA256" | sha256sum --check
+          mkdir dist
+          tar -xzf pages.tar.gz -C dist
+          test -f dist/polish-space/index.html
+          test -f dist/polish-space-ch1/index.html
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: dist
-
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
