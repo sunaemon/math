@@ -302,22 +302,26 @@ export async function generate(
       const lines = text.split("\n");
       const started = Date.now();
       log(`lsp-cache: elaborating ${rel} (${lines.length} lines)...`);
-      await server.openAndElaborate(uri, text, elabTimeout);
-      log(`lsp-cache: sampling ${rel}...`);
-      const tables: [unknown[], unknown[], unknown[]] = [[], [], []];
-      const indexes: [Map<string, number>, Map<string, number>, Map<string, number>] = [
-        new Map(),
-        new Map(),
-        new Map(),
-      ];
-      const samples = await sampleFile(server, uri, lines, tables, indexes);
-      const diagnostics = server.diagnosticsFor(uri);
-      const cache = buildCache(rel, key, lines, samples, diagnostics, tables);
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      atomicWrite(outPath, JSON.stringify(cache));
-      const elapsed = (Date.now() - started) / 1000;
-      log(`lsp-cache: wrote ${path.relative(root, outPath)} (${samples.size} samples, ${elapsed.toFixed(1)}s)`);
-      generated.push(rel);
+      try {
+        await server.openAndElaborate(uri, text, elabTimeout);
+        log(`lsp-cache: sampling ${rel}...`);
+        const tables: [unknown[], unknown[], unknown[]] = [[], [], []];
+        const indexes: [Map<string, number>, Map<string, number>, Map<string, number>] = [
+          new Map(),
+          new Map(),
+          new Map(),
+        ];
+        const samples = await sampleFile(server, uri, lines, tables, indexes);
+        const diagnostics = server.diagnosticsFor(uri);
+        const cache = buildCache(rel, key, lines, samples, diagnostics, tables);
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        atomicWrite(outPath, JSON.stringify(cache));
+        const elapsed = (Date.now() - started) / 1000;
+        log(`lsp-cache: wrote ${path.relative(root, outPath)} (${samples.size} samples, ${elapsed.toFixed(1)}s)`);
+        generated.push(rel);
+      } finally {
+        server.closeDocument(uri);
+      }
     }
   } finally {
     await server.shutdown();
