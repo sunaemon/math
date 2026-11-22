@@ -1,4 +1,28 @@
-import { initHighlighter, computeHighlights, languageForPath, leanFolds } from "./highlight.js";
+import { t, localizeStaticUI, uiLanguagePreference } from "./i18n.js";
+import { initCorrespondence, refreshCorrespondence } from "./correspondence.js";
+import { initFormulaOverlays, refreshFormulaOverlays } from "./formula-overlays.js";
+import { setHTML } from "./safe-html.js";
+import { initViewerAgent } from "./viewer-agent.js";
+import { searchNavigation } from "./search-navigation.js";
+import { initSearch } from "./search.js";
+import { initOffline } from "./offline.js";
+import { initChat } from "./chat.js";
+import { pdfOverlayAtPoint } from "./pdf-text-layer.js";
+import { splitMathSource } from "./math-source.js";
+import { listWindow, MARKER_ROW_HEIGHT } from "./virtual-list.js";
+import { openingProseClause, markerProseSource } from "./prose.js";
+import { dismissTermPopup, setOpenDefinitionUse } from "./term-preview.js";
+import { startupStep, startupDetail, finishStartup, pdfLoadStatus, paneLoadStatus } from "./loading-progress.js";
+import {
+  setDocumentPane,
+  paneScrollTop,
+  paneViewportTop,
+  paneViewportHeight,
+  paneScrollHeight,
+  scrollPane,
+} from "./pane-scroll.js";
+import { applySplitFlex, buildLayoutNode, resizePair } from "./layout-dom.js";
+import { languageForPath, parseHighlightData, type HighlightData } from "./highlight.js";
 import {
   connectLeanLsp,
   openDocument as lspOpenDocument,
@@ -10,6 +34,7 @@ import {
 } from "./lean-lsp.js";
 import { connectFileWatch } from "./file-watch.js";
 import { installReloadGuard, checkForNewBuild } from "./reload-guard.js";
+import { attachBuildLog } from "./build-log.js";
 import { connectBuildStatus, reportSelectedPdf } from "./build-status.js";
 import type { BuildStatus } from "./build-status.js";
 import {
@@ -29,18 +54,40 @@ import type { LayoutNode } from "./layout-tree.js";
 import { state, els, project, setProject } from "./state.js";
 import { reportError, logEvent, repoPath, mountPrefix, repoUrl, displayPath, escapeHtml, safeHref } from "./util.js";
 import { renderInfoview } from "./infoview.js";
-import { enhanceSelect } from "./select-dropdown.js";
+import { enhanceSelect, enterSearchFromList } from "./select-dropdown.js";
 import { renderSource, markerStyle, buildLineStarts } from "./source-render.js";
+import { spanText } from "./source-offsets.js";
+import { copyTexSource } from "./copy-tex.js";
+import { skipSyncLocation } from "./skip-bands.js";
 import {
   setActive,
+  setSkipActive,
   syncFromScroll,
+  syncCurrentLocation,
   visiblePaneNames,
   isPaneSuppressed,
+  suppressPaneSync,
   registerPaneSync,
   setActivateHook,
+  setLocationHook,
 } from "./sync.js";
+import { markerId, markerIndex, readLocationParams, withLocationParams, type PdfScrollAnchor } from "./permalink.js";
+import {
+  removeUrlManagedStorage,
+  readSession,
+  writeSession,
+  sessionKey,
+  browserStorage,
+  readPreference,
+  writePreference,
+  withSharedPreferences,
+  replaceSharedUrl,
+  PDF_MODE_KEY,
+} from "./session-store.js";
+import type { ViewerSession } from "./session-store.js";
 import {
   setPdf,
+  currentPdfLoad,
   clearPdfViewer,
   renderPdfChoices,
   pdfChoices,
@@ -49,19 +96,167 @@ import {
   updatePdfPageFromScroll,
   scrollPdfToEntry,
   nearestEntryFromPdfScroll,
+  nearestSkipFromPdfScroll,
+  scrollPdfToSkip,
   resolvePdfTargets,
-  updatePdfStatus,
   refreshPdfLayoutGeometry,
   observePdfBandGeometry,
   reloadPdf,
+  capturePdfScrollAnchor,
+  restorePdfScrollAnchor,
+  invalidateReferenceDocuments,
   setOnPdfTargetsResolved,
   setOnPdfSelected,
+  pdfPathForMode,
   setOnPdfLoadFailed,
+  renderPdfPage,
 } from "./pdf.js";
+import {
+  initParallelPdf,
+  parallelPdfSearchState,
+  captureParallelScrollAnchor,
+  restoreParallelScrollAnchor,
+  nearestEntryFromParallelPdfScroll,
+  nearestSkipFromParallelPdfScroll,
+  parallelSkipTexMatch,
+  parallelTexMatch,
+  scrollParallelPdfToEntry,
+  scrollParallelPdfToSkip,
+  setOnParallelPdfLoadFailed,
+  parallelDocumentPath,
+} from "./parallel-pdf.js";
 
-const KATEX_MODULE_URL = new URL("../vendor/katex/katex.mjs", import.meta.url).toString();
+import { initAppearance, initPdfLayout, renderedPdfPath } from "./appearance.js";
+import { lightPdfPath } from "./pdf-theme.js";
+import { installChapterPull, type ChapterDirection } from "./chapter-pull.js";
+
+localizeStaticUI();
+removeUrlManagedStorage(browserStorage());
+
 const LAYOUT_STORAGE_KEY = "formalization-viewer-layout-v2";
 const LINE_NUMBERS_STORAGE_KEY = "formalization-viewer-line-numbers";
+const HIGHLIGHTS_STORAGE_KEY = "formalization-viewer-highlights";
+const LINKS_STORAGE_KEY = "formalization-viewer-links";
+const SYNC_STORAGE_KEY = "formalization-viewer-scroll-sync";
+// Passive scrolling navigates continuously, so the address bar and the stored
+// session are written from a trailing timer rather than per navigation.
+const LOCATION_RECORD_MS = 250;
+const RELOAD_POSITION_KEY = "formalization-viewer-reload-position";
+
+interface SourcePosition {
+  path: string;
+  line: number;
+  text: string;
+  fraction: number;
+  left: number;
+}
+interface ViewPosition {
+  url: string;
+  pdfPath: string | null;
+  pdf: PdfScrollAnchor | null;
+  peer: PdfScrollAnchor | null;
+  sources: Partial<Record<"md" | "lean" | "tex", SourcePosition>>;
+}
+
+function captureViewPosition(): ViewPosition {
+  const sources: ViewPosition["sources"] = {};
+  for (const kind of ["md", "lean", "tex"] as const) {
+    const pane = state.panes[kind];
+    const path = state.selectedSources[kind];
+    if (!pane || !path || !paneViewportHeight(pane)) continue;
+    const lines = pane.querySelectorAll<HTMLElement>(".line");
+    if (!lines.length) continue;
+    const top = paneViewportTop(pane);
+    let first = 0;
+    let last = lines.length - 1;
+    while (first < last) {
+      const middle = Math.floor((first + last) / 2);
+      if (lines[middle].getBoundingClientRect().bottom <= top) first = middle + 1;
+      else last = middle;
+    }
+    const rect = lines[first].getBoundingClientRect();
+    sources[kind] = {
+      path,
+      line: first,
+      text: lines[first].textContent ?? "",
+      fraction: (top - rect.top) / Math.max(1, rect.height),
+      left: pane.scrollLeft,
+    };
+  }
+  return {
+    url: window.location.href,
+    pdfPath: state.pdf.path,
+    pdf: paneViewportHeight(els.pdfViewer) ? capturePdfScrollAnchor() : null,
+    peer: paneViewportHeight(els.pdfPeerViewer) ? captureParallelScrollAnchor() : null,
+    sources,
+  };
+}
+
+function restoreViewPosition(position: ViewPosition): void {
+  for (const kind of ["md", "lean", "tex"] as const) {
+    const saved = position.sources?.[kind];
+    const pane = state.panes[kind];
+    if (
+      !saved ||
+      saved.path !== state.selectedSources[kind] ||
+      !pane?.clientHeight ||
+      !Number.isFinite(saved.line) ||
+      !Number.isFinite(saved.fraction)
+    )
+      continue;
+    const lines = pane.querySelectorAll<HTMLElement>(".line");
+    const at = Math.min(Math.max(0, Math.floor(saved.line)), lines.length - 1);
+    let line = lines[at];
+    // Insertions before the reading line should move its number, not the
+    // reader. Match the same source line near its old position when possible.
+    if (line?.textContent !== saved.text) {
+      for (let distance = 1; distance <= 500; distance += 1) {
+        const match = [lines[at - distance], lines[at + distance]].find(
+          (candidate) => candidate && candidate.textContent === saved.text,
+        );
+        if (match) {
+          line = match;
+          break;
+        }
+      }
+    }
+    if (!line) continue;
+    const rect = line.getBoundingClientRect();
+    suppressPaneSync(kind);
+    scrollPane(pane, {
+      top: paneScrollTop(pane) + rect.top - paneViewportTop(pane) + saved.fraction * rect.height,
+      left: Number.isFinite(saved.left) ? saved.left : 0,
+      behavior: "auto",
+    });
+  }
+  if (position.pdfPath === state.pdf.path) {
+    if (position.pdf && Number.isFinite(position.pdf.pageNumber) && Number.isFinite(position.pdf.fraction))
+      restorePdfScrollAnchor(position.pdf);
+    if (position.peer && Number.isFinite(position.peer.pageNumber) && Number.isFinite(position.peer.fraction))
+      restoreParallelScrollAnchor(position.peer);
+  }
+}
+
+function saveReloadPosition(): void {
+  if (document.body.dataset.viewerReady !== "1") return;
+  flushLocation();
+  try {
+    sessionStorage.setItem(RELOAD_POSITION_KEY, JSON.stringify(captureViewPosition()));
+  } catch {
+    /* Storage may be disabled. */
+  }
+}
+
+function reloadPosition(): ViewPosition | null {
+  const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+  if (navigation?.type !== "reload") return null;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(RELOAD_POSITION_KEY) || "null");
+    return saved?.url === window.location.href ? saved : null;
+  } catch {
+    return null;
+  }
+}
 
 // Fill the About dialog from the project manifest: name, the build version the
 // server/dist stamped in, and the license summary + per-scope breakdown.
@@ -74,7 +269,7 @@ function populateAbout(): void {
   const base = version.rev || (version.describe || "").replace(/-dirty$/, "");
   const dirty = (version.describe || "").endsWith("-dirty");
   const parts = [base ? `commit ${base}` : "", dirty ? "dirty" : "", version.date || ""].filter(Boolean);
-  els.aboutVersionText.textContent = parts.length ? parts.join(" · ") : "unknown";
+  els.aboutVersionText.textContent = parts.length ? parts.join(" · ") : t("unknown");
   if (els.aboutCopy) els.aboutCopy.dataset.copy = version.rev || version.describe || "";
 
   if (els.aboutRepo) {
@@ -85,49 +280,69 @@ function populateAbout(): void {
   }
 
   const license = project.license || {};
-  els.aboutLicenseSummary.textContent = license.summary || "";
-  els.aboutLicenseList.innerHTML = (license.items || [])
-    .map((item, i) => {
-      const scope = escapeHtml(item.scope || "");
-      const spdx = escapeHtml(item.spdx || "");
-      const name = item.file ? escapeHtml(item.file.split("/").pop() || item.file) : "";
-      // Vendored components carry a version and an upstream repository link; the
-      // repo's own license scopes (MIT / CC BY 4.0) carry neither.
-      const version = item.version ? ` <span class="about-license-version">${escapeHtml(item.version)}</span>` : "";
-      const sourceHref = item.source ? safeHref(item.source) : "";
-      const source = sourceHref
-        ? ` · <a class="about-license-source" href="${escapeHtml(sourceHref)}" target="_blank" rel="noreferrer">repository ↗</a>`
+  els.aboutLicenseSummary.textContent = t(license.summary || "");
+  const items = (license.items || []).map((item, i) => {
+    const scope = escapeHtml(t(item.scope || ""));
+    const spdx = escapeHtml(item.spdx || "");
+    const name = item.file ? escapeHtml(item.file.split("/").pop() || item.file) : "";
+    // Vendored components carry a version and an upstream repository link; the
+    // repo's own license scopes (MIT / CC BY 4.0) carry neither.
+    const version = item.version ? ` <span class="about-license-version">${escapeHtml(item.version)}</span>` : "";
+    const sourceHref = item.source ? safeHref(item.source) : "";
+    const source = sourceHref
+      ? ` · <a class="about-license-source" href="${escapeHtml(sourceHref)}" target="_blank" rel="noreferrer">${t("repository ↗")}</a>`
+      : "";
+    // Lead with the thing being licensed (component name / scope); the license
+    // is secondary. Consistent across the project's own scopes and the vendored
+    // components: "<name> <version> — <SPDX> · repository ↗".
+    const head = `<div class="about-license-head"><span class="about-license-name">${scope}</span>${version} — <span class="about-license-spdx">${spdx}</span>${source}</div>`;
+    // The license text is inlined in the manifest; the filename below is a
+    // disclosure toggle (the triangle implies the action).
+    const view = item.text
+      ? `<button type="button" class="about-license-view" data-license="${i}" aria-expanded="false">${name}</button>`
+      : name
+        ? `<div class="about-license-file">${name}</div>`
         : "";
-      // Lead with the thing being licensed (component name / scope); the license
-      // is secondary. Consistent across the project's own scopes and the vendored
-      // components: "<name> <version> — <SPDX> · repository ↗".
-      const head = `<div class="about-license-head"><span class="about-license-name">${scope}</span>${version} — <span class="about-license-spdx">${spdx}</span>${source}</div>`;
-      // The license text is inlined in the manifest; the filename below is a
-      // disclosure toggle (the triangle implies the action).
-      const view = item.text
-        ? `<button type="button" class="about-license-view" data-license="${i}" aria-expanded="false">${name}</button>`
-        : name
-          ? `<div class="about-license-file">${name}</div>`
-          : "";
-      const pre = item.text
-        ? `<pre class="about-license-text" id="about-license-text-${i}" hidden>${escapeHtml(item.text)}</pre>`
-        : "";
-      return `<li>${head}${view}${pre}</li>`;
-    })
-    .join("");
+    const pre = item.text
+      ? `<pre class="about-license-text" id="about-license-text-${i}" hidden>${escapeHtml(item.text)}</pre>`
+      : "";
+    return `<li>${head}${view}${pre}</li>`;
+  });
+  setHTML(els.aboutLicenseList, items.join(""));
+}
+
+// The viewer's popups are real popovers / a modal dialog where the platform
+// provides them (top layer, light dismiss, focus return); these helpers keep
+// the call sites working where the Popover API is unavailable, in which case
+// the elements fall back to their `hidden` toggling.
+function popoverSupported(el: HTMLElement): boolean {
+  return typeof (el as any).showPopover === "function";
+}
+function showPopover(el: HTMLElement): void {
+  if (popoverSupported(el) && !el.matches(":popover-open")) (el as any).showPopover();
+}
+function hidePopover(el: HTMLElement): void {
+  if (popoverSupported(el) && el.matches(":popover-open")) (el as any).hidePopover();
+}
+function closeSettingsMenu(): void {
+  if (popoverSupported(els.settingsMenu)) hidePopover(els.settingsMenu);
+  else {
+    els.settingsMenu.hidden = true;
+    els.settingsToggle.setAttribute("aria-expanded", "false");
+  }
 }
 
 function openAbout(): void {
   populateAbout();
-  // Close the menu the About item lives in, then show the dialog.
-  els.settingsMenu.hidden = true;
-  els.settingsToggle.setAttribute("aria-expanded", "false");
-  els.aboutOverlay.hidden = false;
-  els.aboutClose?.focus();
+  // Close the menu the About item lives in, then show the dialog. showModal
+  // focuses the first control (the close button) and returns focus to the
+  // invoker on close, replacing the hand-rolled trap/restore.
+  closeSettingsMenu();
+  els.aboutOverlay.showModal();
 }
 
 function closeAbout(): void {
-  els.aboutOverlay.hidden = true;
+  els.aboutOverlay.close();
 }
 
 function swapLeaves(a: string, b: string): void {
@@ -156,22 +371,141 @@ function splitAt(dragged: string, target: string, zone: string): void {
   state.layout.tree = flattenSameDir(tree);
 }
 
+function defaultLayoutTree(): LayoutNode | null {
+  let tree = defaultTree();
+  if (project.parallelPdf)
+    tree = replaceLeaf(tree, "pdf", {
+      dir: "row",
+      children: [{ pane: "pdf" }, { pane: "pdf-peer" }],
+      ratios: [1, 1],
+    });
+  return flattenSameDir(tree);
+}
+
+function layoutDefaults(): Record<string, string> {
+  return { [LAYOUT_STORAGE_KEY]: JSON.stringify({ tree: defaultLayoutTree() }) };
+}
+
 function loadLayout(): void {
   let stored: any = {};
   try {
-    stored = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || "{}");
+    stored = JSON.parse(readPreference(LAYOUT_STORAGE_KEY) || "{}");
   } catch (_error) {
     stored = {};
   }
-  state.layout = { tree: validateTree(stored.tree) || defaultTree() };
+  let tree = validateTree(stored.tree) || defaultLayoutTree();
+  if (!project.parallelPdf) tree = removeLeaf(tree, "pdf-peer");
+  state.layout = { tree: flattenSameDir(tree) };
+  if (typeof stored.maximized === "string" && treeLeaves(tree).includes(stored.maximized))
+    state.layout.maximized = stored.maximized;
 }
 
 function saveLayout(): void {
-  localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(state.layout));
+  writePreference(LAYOUT_STORAGE_KEY, JSON.stringify(state.layout), layoutDefaults()[LAYOUT_STORAGE_KEY]);
 }
 
 function loadLineNumbers(): void {
-  state.lineNumbers = localStorage.getItem(LINE_NUMBERS_STORAGE_KEY) === "on";
+  state.lineNumbers = readPreference(LINE_NUMBERS_STORAGE_KEY) === "on";
+}
+
+// Scroll sync defaults to on, so only an explicit "off" is stored.
+function loadSync(): void {
+  state.sync = readPreference(SYNC_STORAGE_KEY) !== "off";
+}
+
+// --- Reading position: address bar + stored session -------------------------
+// The position lives in the URL (so a copied link reopens it) and in the
+// project's stored session (so a reload — including the automatic one after a
+// viewer rebuild — resumes where the reader was). The session additionally
+// holds the documents the panes were showing; the pane layout and the view
+// toggles stay in their own book-independent keys above.
+
+// Set once the manifest has loaded, since the session is scoped to the mount.
+let storeKey = sessionKey("");
+
+function storedSession(): ViewerSession {
+  return readSession(browserStorage(), storeKey);
+}
+
+function recordSession(patch: ViewerSession): void {
+  writeSession(browserStorage(), storeKey, patch);
+}
+
+let locationTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushLocation(): void {
+  const location = state.location;
+  const marker = location.kind === "entry" ? markerId(state.entries, location.index) || null : null;
+  const skip = location.kind === "skip" ? location.key : null;
+  const search = withSharedPreferences(withLocationParams(window.location.search, { marker, skip }), {});
+  if (search !== window.location.search) {
+    try {
+      window.history.replaceState(null, "", `${window.location.pathname}${search}${window.location.hash}`);
+    } catch (_error) {
+      // A static export opened straight off disk (file://) refuses history
+      // writes; the session below still records the position.
+    }
+  }
+  // Navigation selects the sources the position lives in, so store them with it
+  // and the stored session always describes one coherent view.
+  recordSession({
+    marker,
+    skip,
+    skipProgress: location.kind === "skip" ? location.progress : null,
+    md: state.selectedSources.md,
+    lean: state.selectedSources.lean,
+  });
+}
+
+function recordLocation(): void {
+  if (locationTimer) return;
+  locationTimer = setTimeout(() => {
+    locationTimer = null;
+    flushLocation();
+  }, LOCATION_RECORD_MS);
+}
+
+// Where to open: an explicit ?marker=/?skip= link wins, then the stored session,
+// then the first marker. A link whose marker the book no longer has falls
+// through to the stored position with a console warning rather than silently
+// landing somewhere else.
+async function navigateToInitialLocation(): Promise<void> {
+  const linked = readLocationParams(window.location.search);
+  if (linked.marker) {
+    const index = markerIndex(state.entries, linked.marker);
+    if (index !== null) return setActive(index, null, true);
+    reportError(new Error(`?marker=${linked.marker} matches no marker in this book; using the stored position`));
+  } else if (linked.skip) {
+    if (state.skips?.some((skip: any) => skip.key === linked.skip)) {
+      return setSkipActive({ key: linked.skip, progress: 0 }, null, true);
+    }
+    reportError(new Error(`?skip=${linked.skip} matches no skipped region in this book; using the stored position`));
+  }
+  const session = storedSession();
+  if (session.marker) {
+    const index = markerIndex(state.entries, session.marker);
+    if (index !== null) return setActive(index, null, true);
+  } else if (session.skip && state.skips?.some((skip: any) => skip.key === session.skip)) {
+    return setSkipActive({ key: session.skip, progress: session.skipProgress ?? 0 }, null, true);
+  }
+  return setActive(0);
+}
+
+// Restore the documents the reader had open, for the panes the navigation above
+// did not already point somewhere deliberate: a reader who browsed to a chapter
+// that holds no marker gets that chapter back. A ?marker= link is authoritative
+// about what to show, so it is left untouched.
+async function restoreSessionSources(): Promise<void> {
+  if (readLocationParams(window.location.search).marker) return;
+  const session = storedSession();
+  const pick = (kind: "md" | "lean", stored: string | null | undefined): string | null =>
+    stored && stored !== state.selectedSources[kind] && state.fileChoices[kind].includes(stored) ? stored : null;
+  const md = pick("md", session.md);
+  const lean = pick("lean", session.lean);
+  if (!md && !lean) return;
+  if (md) state.selectedSources.md = md;
+  if (lean) state.selectedSources.lean = lean;
+  await renderSelectedSources();
 }
 
 // Mark the button whose data-value matches `activeValue` as pressed (the rest
@@ -188,12 +522,114 @@ function applyLineNumbers(): void {
   updateSegmented(els.linenumSeg, state.lineNumbers ? "on" : "off");
 }
 
+// Preserve an explicit choice from the old per-pane settings until the reader
+// chooses a global value: any hidden marker pane means off; any outlined PDF
+// pane means on. Unset or malformed preferences retain the existing defaults.
+function overlayPreference(key: string, legacyKey: string, defaultOn: boolean, panes: string[]): boolean {
+  const value = readPreference(key);
+  if (value === "on" || value === "off") return value === "on";
+  try {
+    const legacy: unknown = JSON.parse(readPreference(legacyKey) || "[]");
+    if (Array.isArray(legacy) && legacy.some((pane) => panes.includes(pane))) return !defaultOn;
+  } catch (_error) {
+    // Ignore damaged stored preferences.
+  }
+  return defaultOn;
+}
+
+function loadMarkHighlights(): void {
+  state.markHighlights = overlayPreference(HIGHLIGHTS_STORAGE_KEY, "formalization-viewer-marks-off", true, [
+    "pdf",
+    "pdf-peer",
+    "md",
+    "lean",
+    "tex",
+  ]);
+}
+
+function loadLinkHighlights(): void {
+  state.linkHighlights = overlayPreference(LINKS_STORAGE_KEY, "formalization-viewer-links-on", false, [
+    "pdf",
+    "pdf-peer",
+  ]);
+}
+
+function applyLinkHighlights(): void {
+  document.body.classList.toggle("links-on", state.linkHighlights);
+  updateSegmented(els.linksSeg, state.linkHighlights ? "on" : "off");
+  updateOverlayButtons("links", state.linkHighlights, t("link outlines"));
+}
+
+// Hide every pane's booklink visuals together; keep their spans for scroll sync
+// and navigation through the marker palette.
+function updateMarkKeyboardAccess(): void {
+  for (const mark of document.querySelectorAll<HTMLElement>("[data-mark-control]")) {
+    mark.tabIndex = state.markHighlights ? 0 : -1;
+    if (state.markHighlights) mark.setAttribute("role", "button");
+    else mark.removeAttribute("role");
+  }
+}
+
+function applyMarkHighlights(): void {
+  updateMarkKeyboardAccess();
+  document.body.classList.toggle("marks-off", !state.markHighlights);
+  updateSegmented(els.highlightsSeg, state.markHighlights ? "on" : "off");
+  updateOverlayButtons("highlights", state.markHighlights, "highlights");
+}
+
+function updateOverlayButtons(kind: string, enabled: boolean, label: string): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>(`.overlay-toggle[data-overlay="${kind}"]`)) {
+    button.setAttribute("aria-pressed", String(enabled));
+    button.title = enabled ? t("Hide {0}", t(label)) : t("Show {0}", t(label));
+    button.setAttribute("aria-label", button.title);
+  }
+}
+
+function setMarkHighlights(enabled: boolean): void {
+  state.markHighlights = enabled;
+  writePreference(HIGHLIGHTS_STORAGE_KEY, enabled ? "on" : "off");
+  applyMarkHighlights();
+}
+
+function setLinkHighlights(enabled: boolean): void {
+  state.linkHighlights = enabled;
+  writePreference(LINKS_STORAGE_KEY, enabled ? "on" : "off");
+  applyLinkHighlights();
+}
+
+function addOverlayButtons(container: Element, before: Element): void {
+  const icons = {
+    highlights: "M4 10l6-6 3 3-6 6H4ZM9 3l2-2 4 4-2 2M2 15h8",
+    links: "M7 5l1.5-1.5a3 3 0 0 1 4.25 4.25L11 9M9 11l-1.5 1.5a3 3 0 0 1-4.25-4.25L5 7M6 10l4-4",
+  };
+  for (const kind of ["highlights", "links"] as const) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "icon-button overlay-toggle";
+    button.dataset.overlay = kind;
+    setHTML(
+      button,
+      `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="${icons[kind]}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    );
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (kind === "highlights") setMarkHighlights(!state.markHighlights);
+      else setLinkHighlights(!state.linkHighlights);
+    });
+    button.addEventListener("dragstart", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    container.insertBefore(button, before);
+  }
+}
+
 function checkedPaneNames(): string[] {
   return els.paneChecks.filter((input) => input.checked).map((input) => input.value);
 }
 
 function syncPaneChecksFromLayout(): void {
-  const visible = new Set(visiblePaneNames());
+  const visible = new Set(treeLeaves(state.layout.tree));
   for (const input of els.paneChecks) {
     input.checked = visible.has(input.value);
     input.disabled = false;
@@ -205,7 +641,7 @@ function syncLayoutSelect(): void {
   const kind = treeKind(state.layout.tree);
   // A custom (dragged) arrangement is "others" — leave both presets unpressed.
   updateSegmented(els.layoutSeg, kind === "columns" || kind === "rows" ? kind : null);
-  const disabled = visiblePaneNames().length < 2;
+  const disabled = treeLeaves(state.layout.tree).length < 2;
   for (const btn of Array.from(els.layoutSeg.querySelectorAll("button"))) {
     (btn as HTMLButtonElement).disabled = disabled;
   }
@@ -213,7 +649,9 @@ function syncLayoutSelect(): void {
 
 function applyPaneCheckboxes(): void {
   const checked = new Set(checkedPaneNames());
-  const current = visiblePaneNames();
+  const current = treeLeaves(state.layout.tree);
+  delete state.layout.maximized;
+  maximizedPosition = null;
   let tree = state.layout.tree;
   for (const pane of current) {
     if (!checked.has(pane)) tree = removeLeaf(tree, pane);
@@ -224,17 +662,19 @@ function applyPaneCheckboxes(): void {
   state.layout.tree = tree;
   saveLayout();
   applyPaneLayout();
-  setActive(state.activeIndex).catch(reportError);
+  syncCurrentLocation().catch(reportError);
 }
 
 function setLayoutKind(kind: string): void {
-  const panes = visiblePaneNames();
+  const panes = treeLeaves(state.layout.tree);
   if (kind === "columns") state.layout.tree = makeSplit("row", panes);
   else if (kind === "rows") state.layout.tree = makeSplit("col", panes);
   else return;
+  delete state.layout.maximized;
+  maximizedPosition = null;
   saveLayout();
   applyPaneLayout();
-  setActive(state.activeIndex).catch(reportError);
+  syncCurrentLocation().catch(reportError);
 }
 
 function paneParking(): HTMLElement {
@@ -249,50 +689,23 @@ function paneParking(): HTMLElement {
 }
 
 // Live flex sizing for the (interleaved with splitters) children of a split.
-function applySplitFlex(container: HTMLElement, node: LayoutNode): void {
-  const ratios = node.ratios ?? [];
-  const total = ratios.reduce((sum, ratio) => sum + ratio, 0) || (node.children ?? []).length;
-  const slots = [...container.children].filter((child) => !child.classList.contains("splitter")) as HTMLElement[];
-  slots.forEach((slot, i) => {
-    slot.style.flex = `${ratios[i] / total} 1 0`;
-  });
-}
-
-function buildSplitter(node: LayoutNode, leftIndex: number): HTMLElement {
-  const splitter = document.createElement("div");
-  splitter.className = `splitter splitter-${node.dir === "row" ? "vertical" : "horizontal"}`;
-  splitter.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    state.resizing = { node, leftIndex, container: splitter.parentElement };
-    splitter.classList.add("dragging");
-    document.body.classList.add("is-resizing");
-  });
-  return splitter;
-}
-
-function buildLayoutNode(node: LayoutNode | null): HTMLElement | null {
-  if (!node) return null;
-  if (node.pane) {
-    const section = state.paneSections?.[node.pane];
-    if (!section) return null;
-    section.hidden = false;
-    section.classList.remove("pane-hidden");
-    section.style.display = "";
-    return section;
-  }
-  const container = document.createElement("div");
-  container.className = "split";
-  container.dataset.dir = node.dir;
-  (node.children ?? []).forEach((child, i) => {
-    if (i > 0) container.append(buildSplitter(node, i - 1));
-    const childEl = buildLayoutNode(child);
-    if (childEl) container.append(childEl);
-  });
-  applySplitFlex(container, node);
-  return container;
-}
-
 function applyPaneLayout(): void {
+  document.body.classList.toggle("is-pane-maximized", !!state.layout.maximized);
+  document.documentElement.classList.toggle("is-pane-maximized", !!state.layout.maximized);
+  const name = state.layout.maximized;
+  const focusedSearch = document.getElementById("pane-search-focused");
+  if (focusedSearch) focusedSearch.hidden = !["md", "lean", "tex", "pdf", "pdf-peer"].includes(name ?? "");
+  setDocumentPane(
+    name === "pdf"
+      ? els.pdfViewer
+      : name === "pdf-peer"
+        ? els.pdfPeerViewer
+        : name === "infoview"
+          ? els.infoviewBody
+          : name
+            ? state.panes[name]
+            : null,
+  );
   const visible = new Set(visiblePaneNames());
   const workspace = els.workspace;
   const parking = paneParking();
@@ -300,7 +713,7 @@ function applyPaneLayout(): void {
     const section = state.paneSections?.[name];
     if (section && section.parentNode) section.parentNode.removeChild(section);
   }
-  workspace.innerHTML = "";
+  setHTML(workspace, "");
   workspace.append(parking);
   for (const name of PANE_NAMES) {
     if (!visible.has(name)) {
@@ -312,28 +725,148 @@ function applyPaneLayout(): void {
       }
     }
   }
-  const root = buildLayoutNode(state.layout.tree);
-  if (root) workspace.append(root);
+  const displayTree = state.layout.maximized ? { pane: state.layout.maximized } : state.layout.tree;
+  const root = buildLayoutNode(displayTree, { save: saveLayout, refresh: refreshPdfLayoutGeometry });
+  if (root) {
+    // A surviving leaf may still carry its former sibling share (e.g. 0.5).
+    // The root always owns the whole workspace, irrespective of old splits.
+    root.style.flex = "1 1 0";
+    workspace.append(root);
+  }
   workspace.append(dropOverlayElement());
   edgeZoneElements().forEach((zone) => workspace.append(zone));
   syncLayoutSelect();
   syncPaneChecksFromLayout();
+  updateMaximizeButtons();
   refreshPdfLayoutGeometry();
   // Source panes rewrap at their new size, so their rail ticks must be
   // recomputed; defer a frame so flex layout has settled.
   window.requestAnimationFrame(() => updateAllMarkRails());
+  if (paneContentEnabled) void ensureVisiblePaneContent().catch(reportError);
+  document.dispatchEvent(new Event("pane-layout-changed"));
 }
 
-function resizePair(ratios: number[], index: number, pointerRatio: number): number[] {
-  const total = ratios.reduce((sum, ratio) => sum + ratio, 0);
-  const before = ratios.slice(0, index).reduce((sum, ratio) => sum + ratio, 0);
-  const pairTotal = ratios[index] + ratios[index + 1];
-  const boundary = pointerRatio * total;
-  const first = Math.min(pairTotal - 0.25, Math.max(0.25, boundary - before));
-  const next = [...ratios];
-  next[index] = first;
-  next[index + 1] = pairTotal - first;
-  return next;
+let maximizedPosition: ViewPosition | null = null;
+let maximizeRevision = 0;
+const MAXIMIZE_ICON =
+  '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6 2H2v4m8-4h4v4M2 10v4h4m8-4v4h-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CLOSE_ICON =
+  '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const RESTORE_ICON =
+  '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M3 6h3V3m4 0v3h3M3 10h3v3m4 0v-3h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function updateMaximizeButtons(): void {
+  els.paneRestore.hidden = !state.layout.maximized;
+  els.paneTools.hidden = !state.layout.maximized;
+  // Keep at least one pane open; the menu's pane checkboxes can reopen others.
+  const lastPane = treeLeaves(state.layout.tree).length < 2;
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".pane-close")) {
+    button.disabled = lastPane;
+    button.title = lastPane ? t("The last pane cannot be closed") : t("Close pane");
+  }
+  for (const name of PANE_NAMES) {
+    const button = state.paneSections?.[name]?.querySelector<HTMLButtonElement>(".pane-maximize");
+    if (!button) continue;
+    const maximized = state.layout.maximized === name;
+    const label = maximized ? t("Restore pane layout") : t("Maximize pane");
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-pressed", String(maximized));
+    button.title = label;
+    setHTML(button, maximized ? RESTORE_ICON : MAXIMIZE_ICON);
+  }
+}
+
+function togglePaneMaximize(name: string): void {
+  const revision = ++maximizeRevision;
+  let position = captureViewPosition();
+  if (state.layout.maximized === name) {
+    const previous = maximizedPosition;
+    const samePdf = previous?.pdfPath === position.pdfPath;
+    position = {
+      ...position,
+      sources: { ...previous?.sources, ...position.sources },
+      pdf: position.pdf ?? (samePdf ? (previous?.pdf ?? null) : null),
+      peer: position.peer ?? (samePdf ? (previous?.peer ?? null) : null),
+    };
+    delete state.layout.maximized;
+    maximizedPosition = null;
+  } else {
+    maximizedPosition ??= position;
+    state.layout.maximized = name;
+  }
+  saveLayout();
+  applyPaneLayout();
+  const settle = () =>
+    window.requestAnimationFrame(() => {
+      if (revision !== maximizeRevision) return;
+      restoreViewPosition(position);
+      const button = state.layout.maximized
+        ? els.paneRestore
+        : state.paneSections?.[name]?.querySelector<HTMLButtonElement>(".pane-maximize");
+      button?.focus({ preventScroll: true });
+    });
+  settle();
+}
+
+function closePane(name: string): void {
+  if (treeLeaves(state.layout.tree).length < 2) return;
+  const input = els.paneChecks.find((check) => check.value === name);
+  if (!input) return;
+  input.checked = false;
+  applyPaneCheckboxes();
+}
+
+function paneCloseButton(name: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button pane-close";
+  button.setAttribute("aria-label", t("Close pane"));
+  button.title = t("Close pane");
+  setHTML(button, CLOSE_ICON);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closePane(name);
+  });
+  button.addEventListener("dragstart", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  return button;
+}
+
+function wirePaneMaximize(): void {
+  setHTML(els.paneRestore, RESTORE_ICON);
+  addOverlayButtons(els.paneTools, els.paneRestore);
+  els.paneRestore.addEventListener("click", () => {
+    if (state.layout.maximized) togglePaneMaximize(state.layout.maximized);
+  });
+  for (const name of PANE_NAMES) {
+    const header = state.paneSections?.[name]?.querySelector(".pane-header");
+    if (!header) continue;
+    let actions = header.querySelector(".pane-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "pane-actions";
+      header.append(actions);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "icon-button pane-maximize";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      togglePaneMaximize(name);
+    });
+    button.addEventListener("dragstart", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    actions.append(button);
+    if (name === "pdf" || name === "pdf-peer") addOverlayButtons(actions, button);
+    actions.append(paneCloseButton(name));
+  }
+  applyMarkHighlights();
+  applyLinkHighlights();
+  updateMaximizeButtons();
 }
 
 function applyResizeFromPointer(event: MouseEvent): void {
@@ -410,7 +943,7 @@ function applyDrop(dragged: string | null, target: string, zone: string): void {
   else splitAt(dragged, target, zone);
   saveLayout();
   applyPaneLayout();
-  setActive(state.activeIndex).catch(reportError);
+  syncCurrentLocation().catch(reportError);
 }
 
 // ===== Dock-to-edge: drop on a window border to split the whole layout =====
@@ -476,7 +1009,7 @@ function dockToRoot(dragged: string, edge: string): void {
   }
   saveLayout();
   applyPaneLayout();
-  setActive(state.activeIndex).catch(reportError);
+  syncCurrentLocation().catch(reportError);
 }
 
 // Order the PDF dropdown so the debug render comes first, then everything else.
@@ -497,26 +1030,49 @@ async function loadCachedText(path: string | null): Promise<string> {
   return state.sourceCache.get(normalized) ?? "";
 }
 
-async function loadCachedHighlights(path: string | null, text: string): Promise<any[]> {
-  const lang = languageForPath(repoPath(path));
-  if (!lang) return [];
-  const highlighter = await initHighlighter();
-  if (!highlighter) return [];
+const highlightDataPromises = new Map<string, Promise<HighlightData | null>>();
+
+// Precomputed tree-sitter highlight data for one source file, generated on
+// the Node side: the live server computes it on demand and a static
+// distribution ships it as a file, both under `highlight-cache/<path>.json`.
+// Null when unavailable; the pane then renders as plain text.
+function loadHighlightData(path: string | null): Promise<HighlightData | null> {
   const normalized = repoPath(path);
+  if (!normalized || !languageForPath(normalized)) return Promise.resolve(null);
+  if (!highlightDataPromises.has(normalized)) {
+    highlightDataPromises.set(
+      normalized,
+      (async () => {
+        try {
+          const response = await fetch(repoUrl(`highlight-cache/${normalized}.json`), { cache: "no-store" });
+          if (!response.ok) return null;
+          return parseHighlightData(await response.json());
+        } catch {
+          return null;
+        }
+      })(),
+    );
+  }
+  return highlightDataPromises.get(normalized)!;
+}
+
+async function loadCachedHighlights(path: string | null): Promise<any[]> {
+  const normalized = repoPath(path);
+  if (!languageForPath(normalized)) return [];
   if (!state.highlightCache.has(normalized)) {
-    state.highlightCache.set(normalized, computeHighlights(highlighter, text, lang));
+    const data = await loadHighlightData(path);
+    state.highlightCache.set(normalized, data?.spans ?? []);
   }
   return state.highlightCache.get(normalized) ?? [];
 }
 
 // Ranges of `/-@ … -/` machine-metadata comments to fold (Lean panes only).
-async function loadCachedLeanFolds(path: string | null, text: string): Promise<any[]> {
-  if (languageForPath(repoPath(path)) !== "lean") return [];
-  const highlighter = await initHighlighter();
-  if (!highlighter) return [];
+async function loadCachedLeanFolds(path: string | null): Promise<any[]> {
   const normalized = repoPath(path);
+  if (languageForPath(normalized) !== "lean") return [];
   if (!state.foldCache.has(normalized)) {
-    state.foldCache.set(normalized, leanFolds(highlighter, text));
+    const data = await loadHighlightData(path);
+    state.foldCache.set(normalized, data?.folds ?? []);
   }
   return state.foldCache.get(normalized) ?? [];
 }
@@ -576,9 +1132,12 @@ function leanChoices(map: any, mdPaths: string[]): string[] {
 }
 
 function populateFileSelect(select: HTMLSelectElement, paths: string[]): void {
-  select.innerHTML = paths
-    .map((path) => `<option value="${escapeHtml(path)}">${escapeHtml(displayPath(path))}</option>`)
-    .join("");
+  setHTML(
+    select,
+    paths
+      .map((path) => `<option value="${escapeHtml(path)}">${escapeHtml(path.split("/").pop() || path)}</option>`)
+      .join(""),
+  );
 }
 
 function correspondingLeanForMd(mdPath: string): string | null {
@@ -597,55 +1156,83 @@ function sourceMatchesSelected(span: any, kind: "md" | "lean" | "tex"): boolean 
 }
 
 let renderGeneration = 0;
+let paneContentEnabled = false;
+let infoviewStarted = false;
+const renderedSources: Partial<Record<"md" | "lean" | "tex", string | null>> = {};
+
+function startVisibleInfoview(): void {
+  const visible = new Set(visiblePaneNames());
+  if ((visible.has("lean") || visible.has("infoview")) && !infoviewStarted) {
+    infoviewStarted = true;
+    void connectInfoview().catch(reportError);
+  }
+}
+
+async function ensureVisiblePaneContent(): Promise<void> {
+  const visible = new Set(visiblePaneNames());
+  startVisibleInfoview();
+  const work: Promise<unknown>[] = [];
+  if (visible.has("pdf") && state.pdf.path && state.pdf.deferred)
+    work.push(setPdf(state.pdf.path, { preserveScroll: true }));
+  if (visible.has("pdf-peer") && (peerDirty || peerPdfDoc()?.url !== peerLoadedUrl)) loadPeerPdf();
+  if (
+    ["md", "lean", "tex"].some(
+      (kind) =>
+        visible.has(kind) &&
+        renderedSources[kind as "md" | "lean" | "tex"] !== state.selectedSources[kind as "md" | "lean" | "tex"],
+    )
+  )
+    work.push(renderSelectedSources().then(() => syncCurrentLocation()));
+  await Promise.all(work);
+}
 
 async function renderSelectedSources(): Promise<void> {
-  // Each call renders the source set selected at its start; concurrent calls can
-  // overlap (a select-change render racing a watcher-driven reloadMap, or a fast
-  // A->B->A switch). Bump a generation at entry and bail after each await once a
-  // newer render has superseded this one, so the last writer cannot paint one
-  // file's body under another file's overlays. Snapshot the selection so this
-  // call is internally consistent even as state.selectedSources moves on.
   const generation = ++renderGeneration;
   const selected = { ...state.selectedSources };
-  // Guard each load: loadText throws on a non-2xx (e.g. a stale/renamed 404),
-  // and one failure must not blank every pane.
-  const sources = {
-    md: await loadCachedText(selected.md).catch(() => ""),
-    lean: await loadCachedText(selected.lean).catch(() => ""),
-    tex: await loadCachedText(selected.tex).catch(() => ""),
-  };
-  if (generation !== renderGeneration) return;
-
-  const [mdHighlights, leanHighlights, leanFoldRanges] = await Promise.all([
-    loadCachedHighlights(selected.md, sources.md),
-    loadCachedHighlights(selected.lean, sources.lean),
-    loadCachedLeanFolds(selected.lean, sources.lean),
-  ]);
-  if (generation !== renderGeneration) return;
-
-  state.sources = sources;
-  els.mdSelect.value = state.selectedSources.md ?? "";
-  els.leanSelect.value = state.selectedSources.lean ?? "";
-  if (els.mdMeta) els.mdMeta.textContent = displayPath(state.selectedSources.md);
-  if (els.leanMeta) els.leanMeta.textContent = displayPath(state.selectedSources.lean);
-  if (els.texMeta) els.texMeta.textContent = displayPath(state.selectedSources.tex);
-
-  renderSource(
-    els.mdSource,
-    state.sources.md,
-    collectSpans("md"),
-    "md",
-    mdHighlights,
-    [],
-    "codepoint",
-    collectSkipSpans(),
+  const visible = new Set(visiblePaneNames());
+  const kinds = (["md", "lean", "tex"] as const).filter((kind) => visible.has(kind));
+  const needed = visible.has("infoview") && !kinds.includes("lean") ? [...kinds, "lean" as const] : kinds;
+  if (!needed.length) return;
+  startupDetail("sources", t("Loading visible source documents…"));
+  state.sources ??= { md: "", lean: "", tex: "" };
+  els.mdSelect.value = selected.md ?? "";
+  els.leanSelect.value = selected.lean ?? "";
+  if (els.texMeta) els.texMeta.textContent = displayPath(selected.tex);
+  await Promise.all(
+    needed.map(async (kind) => {
+      if (visible.has(kind))
+        paneLoadStatus(
+          state.panes[kind],
+          t("Loading {0}…", kind === "md" ? "Markdown" : kind === "lean" ? "Lean" : "TeX"),
+        );
+      const text = await loadCachedText(selected[kind]).catch(() => "");
+      if (generation !== renderGeneration) return;
+      state.sources![kind] = text;
+      if (kind === "lean") syncLeanDocument();
+      if (!visible.has(kind)) return;
+      const highlights = kind === "tex" ? [] : await loadCachedHighlights(selected[kind]);
+      const folds = kind === "lean" ? await loadCachedLeanFolds(selected.lean) : [];
+      if (generation !== renderGeneration || !visiblePaneNames().includes(kind)) return;
+      renderSource(
+        state.panes[kind],
+        text,
+        collectSpans(kind),
+        kind,
+        highlights,
+        folds,
+        kind === "lean" ? "utf16" : "codepoint",
+        kind === "md" ? collectSkipSpans() : [],
+      );
+      renderedSources[kind] = selected[kind];
+      paneLoadStatus(state.panes[kind], null);
+      applyActiveState();
+      updateMarkRail(kind);
+    }),
   );
-  renderSource(els.leanSource, state.sources.lean, collectSpans("lean"), "lean", leanHighlights, leanFoldRanges);
-  renderSource(els.texSource, state.sources.tex, collectSpans("tex"), "tex", [], [], "codepoint");
-  syncLeanDocument();
-  renderInfoview();
-  applyActiveState(state.activeIndex);
-  updateAllMarkRails();
+  if (generation !== renderGeneration) return;
+  refreshCorrespondence();
+  refreshFormulaOverlays();
+  if (visible.has("infoview")) renderInfoview();
 }
 
 async function syncSelectedSourcesForEntry(entry: any): Promise<boolean> {
@@ -667,6 +1254,7 @@ async function syncSelectedSourcesForEntry(entry: any): Promise<boolean> {
 
 interface MarkerInfo {
   title: string; // plain-text primary label (for search / fallback)
+  titleHtml?: string;
   titleSource: string; // the title's TeX source, rendered via KaTeX for display
   id: string; // Lean declaration name (muted secondary)
   kind: string; // "prose" | "statement" — shown as a chip
@@ -687,7 +1275,7 @@ function stripTermDefine(s: string): string {
 // Strip the common TeX so an excerpt reads as prose: \termdefine{t}/{display}
 // becomes its term, \cmd{arg} -> arg, $math$ -> math, bare \cmd dropped.
 function cleanProse(s: string): string {
-  return stripTermDefine(s)
+  return stripTermDefine(markerProseSource(s))
     .replace(/§\{[^}]*\}/g, "") // §{sec:...} section references
     .replace(/\\[a-zA-Z]+\*?\{([^}]*)\}/g, "$1") // \cmd{arg} -> arg
     .replace(/\$([^$]*)\$/g, "$1") // $math$ -> math
@@ -705,7 +1293,7 @@ function sentenceCase(s: string): string {
 // Clean a TEXT segment (outside $...$): term macros -> their term, section refs
 // and other bare \commands dropped. Math is handled separately by KaTeX.
 function cleanTextSegment(s: string): string {
-  return stripTermDefine(s)
+  return stripTermDefine(markerProseSource(s))
     .replace(/§\{[^}]*\}/g, "")
     .replace(/\\[a-zA-Z]+\*?\{([^}]*)\}/g, "$1")
     .replace(/\\[a-zA-Z]+\*?/g, "")
@@ -717,29 +1305,13 @@ function cleanTextSegment(s: string): string {
 // (escaped), $...$ via KaTeX with the book's macros. Falls back to plain text
 // before KaTeX has loaded or on a render error.
 function renderMath(source: string): string {
-  let out = "";
-  let last = 0;
-  const re = /\$([^$]+)\$/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(source)) !== null) {
-    out += escapeHtml(cleanTextSegment(source.slice(last, m.index)));
-    if (state.katex) {
-      try {
-        out += state.katex.renderToString(m[1], {
-          macros: state.katexMacros || {},
-          throwOnError: false,
-          displayMode: false,
-        });
-      } catch (_error) {
-        out += escapeHtml(m[1]);
-      }
-    } else {
-      out += escapeHtml(m[1]);
-    }
-    last = re.lastIndex;
-  }
-  out += escapeHtml(cleanTextSegment(source.slice(last)));
-  return out.trim();
+  return splitMathSource(source)
+    .map((part) => {
+      if (part.kind === "text") return escapeHtml(cleanTextSegment(part.source));
+      return project.fixedMath?.[part.source] ?? escapeHtml(part.source);
+    })
+    .join("")
+    .trim();
 }
 
 // markerInfo is pure in (entry, index) and runs several regexes; the marker
@@ -759,13 +1331,13 @@ function computeMarkerInfo(entry: any, index: number): MarkerInfo {
   const lean = entry.lean || {};
   const link = entry.booklink || {};
   const id = String(lean.declName || "");
-  const rawExcerpt = link.excerpt ? String(link.excerpt) : "";
+  const rawExcerpt = link.excerpt ? markerProseSource(String(link.excerpt)) : "";
   // The TeX source we render (math kept): the human title, else the defined
   // term's display form, else the excerpt's opening clause.
   let titleSource = String(link.title || "").trim();
   if (!titleSource && rawExcerpt) {
     const term = rawExcerpt.match(TERM_DEFINE_RE);
-    titleSource = term ? (term[2] || term[1]).trim() : rawExcerpt.split(/[.;:]/)[0].trim();
+    titleSource = term ? (term[2] || term[1]).trim() : openingProseClause(rawExcerpt);
   }
   // Plain text for search/fallback: prefer the canonical term, sort key dropped.
   let title = link.title ? cleanProse(String(link.title)) : "";
@@ -773,7 +1345,7 @@ function computeMarkerInfo(entry: any, index: number): MarkerInfo {
     const term = rawExcerpt.match(TERM_DEFINE_RE);
     title = term
       ? sentenceCase(cleanProse(term[1].split("@")[0]))
-      : sentenceCase(cleanProse(rawExcerpt).split(/[.;:]/)[0].split(" ").slice(0, 8).join(" "));
+      : sentenceCase(cleanProse(openingProseClause(rawExcerpt)).split(" ").slice(0, 8).join(" "));
   }
   if (!title) title = id || `Marker ${index + 1}`;
   if (!titleSource) titleSource = title;
@@ -786,61 +1358,118 @@ function computeMarkerInfo(entry: any, index: number): MarkerInfo {
 let markerFilter = "";
 let markerHighlight = -1; // position within the currently filtered list
 
+let markerFilterCache: { entries: any[]; query: string; indices: number[] } | null = null;
 function filteredMarkerIndices(): number[] {
   const q = markerFilter.trim().toLowerCase();
+  if (markerFilterCache?.entries === state.entries && markerFilterCache.query === q) return markerFilterCache.indices;
   const all = state.entries.map((_entry, i) => i);
-  if (!q) return all;
-  return all.filter((i) => {
-    const m = markerInfo(state.entries[i], i);
-    return `${m.title} ${m.id} ${m.kind} ${m.snippet}`.toLowerCase().includes(q);
-  });
+  const indices = !q
+    ? all
+    : all.filter((i) => {
+        const m = markerInfo(state.entries[i], i);
+        return `${m.title} ${m.id} ${m.kind} ${m.snippet}`.toLowerCase().includes(q);
+      });
+  markerFilterCache = { entries: state.entries, query: q, indices };
+  return indices;
 }
 
-function renderMarkerList(): void {
+let markerWindow: { indices: number[]; start: number; end: number } | null = null;
+let markerScrollFrame = 0;
+function renderMarkerList(focusPosition?: number): void {
   const filtered = filteredMarkerIndices();
   if (markerHighlight < 0 || markerHighlight >= filtered.length) markerHighlight = 0;
-  els.markerList.innerHTML = filtered.length
-    ? filtered
-        .map((i, pos) => {
-          const m = markerInfo(state.entries[i], i);
-          const selected = i === state.activeIndex;
-          const chip = m.kind
-            ? ` <span class="marker-chip" data-kind="${escapeHtml(m.kind)}">${escapeHtml(m.kind)}</span>`
-            : "";
-          const id = m.id && m.id !== m.title ? `<span class="marker-id">${escapeHtml(m.id)}</span>` : "";
-          const snip = m.snippet ? `<span class="marker-snip">${escapeHtml(m.snippet)}</span>` : "";
-          const meta = id || snip ? `<div class="marker-row-meta">${id}${snip}</div>` : "";
-          return `<li class="marker-row${selected ? " is-selected" : ""}${pos === markerHighlight ? " is-highlight" : ""}" role="option" aria-selected="${selected}" data-index="${i}"><div class="marker-row-head"><span class="marker-title" title="${escapeHtml(m.title)}">${renderMath(m.titleSource)}</span>${chip}</div>${meta}</li>`;
-        })
-        .join("")
-    : `<li class="marker-empty">No markers match “${escapeHtml(markerFilter.trim())}”.</li>`;
+  const height = els.markerList.clientHeight || Math.max(52, Math.min(320, window.innerHeight * 0.45 - 80));
+  const requested =
+    focusPosition === undefined
+      ? els.markerList.scrollTop
+      : Math.max(0, focusPosition * MARKER_ROW_HEIGHT - height / 2);
+  const rowWindow = listWindow(filtered.length, requested, height);
+  const changed =
+    focusPosition !== undefined ||
+    markerWindow?.indices !== filtered ||
+    markerWindow.start !== rowWindow.start ||
+    markerWindow.end !== rowWindow.end;
+  if (changed) {
+    markerWindow = { indices: filtered, start: rowWindow.start, end: rowWindow.end };
+    els.markerList.style.setProperty("--marker-row-height", `${MARKER_ROW_HEIGHT}px`);
+    const spacer = (height: number) => `<li role="presentation" aria-hidden="true" style="height:${height}px"></li>`;
+    setHTML(
+      els.markerList,
+      filtered.length
+        ? spacer(rowWindow.before) +
+            filtered
+              .slice(rowWindow.start, rowWindow.end)
+              .map((i, offset) => {
+                const pos = rowWindow.start + offset;
+                const m = markerInfo(state.entries[i], i);
+                const selected = i === state.activeIndex;
+                const chip = m.kind
+                  ? ` <span class="marker-chip" data-kind="${escapeHtml(m.kind)}">${escapeHtml(m.kind)}</span>`
+                  : "";
+                const id = m.id && m.id !== m.title ? `<span class="marker-id">${escapeHtml(m.id)}</span>` : "";
+                const snip = m.snippet ? `<span class="marker-snip">${escapeHtml(m.snippet)}</span>` : "";
+                const meta = id || snip ? `<div class="marker-row-meta">${id}${snip}</div>` : "";
+                return `<li class="marker-row${selected ? " is-selected" : ""}${pos === markerHighlight ? " is-highlight" : ""}" id="marker-option-${i}" role="option" aria-selected="${selected}" aria-posinset="${pos + 1}" aria-setsize="${filtered.length}" data-position="${pos}" data-index="${i}"><div class="marker-row-head"><span class="marker-title" title="${escapeHtml(m.title)}">${(m.titleHtml ??= renderMath(m.titleSource))}</span>${chip}</div>${meta}</li>`;
+              })
+              .join("") +
+            spacer(rowWindow.after)
+        : `<li class="marker-empty">No markers match “${escapeHtml(markerFilter.trim())}”.</li>`,
+    );
+    els.markerList.scrollTop = rowWindow.top;
+  }
+  for (const row of els.markerList.querySelectorAll<HTMLElement>(".marker-row")) {
+    row.classList.toggle("is-highlight", Number(row.dataset.position) === markerHighlight);
+    const selected = Number(row.dataset.index) === state.activeIndex;
+    row.classList.toggle("is-selected", selected);
+    row.setAttribute("aria-selected", String(selected));
+  }
+  for (const control of [els.markerSearch, els.markerList]) {
+    if (
+      filtered[markerHighlight] !== undefined &&
+      markerHighlight >= rowWindow.start &&
+      markerHighlight < rowWindow.end
+    )
+      control.setAttribute("aria-activedescendant", `marker-option-${filtered[markerHighlight]}`);
+    else control.removeAttribute("aria-activedescendant");
+  }
 }
 
 function updateMarkerField(): void {
   const i = state.activeIndex;
   const m = state.entries[i] ? markerInfo(state.entries[i], i) : null;
-  els.markerFieldLabel.innerHTML = m ? renderMath(m.titleSource) : "—";
+  setHTML(
+    els.markerFieldLabel,
+    m ? (m.titleHtml ??= renderMath(m.titleSource)) : state.location.kind === "skip" ? t("Skipped passage") : "—",
+  );
   els.markerFieldLabel.title = m ? m.title : "";
 }
 
 function scrollHighlightedMarkerIntoView(): void {
+  const top = markerHighlight * MARKER_ROW_HEIGHT;
+  if (top < els.markerList.scrollTop) els.markerList.scrollTop = top;
+  else if (top + MARKER_ROW_HEIGHT > els.markerList.scrollTop + els.markerList.clientHeight)
+    els.markerList.scrollTop = top + MARKER_ROW_HEIGHT - els.markerList.clientHeight;
+  renderMarkerList();
   const row = els.markerList.querySelector(".marker-row.is-highlight") as HTMLElement | null;
   row?.scrollIntoView({ block: "nearest" });
 }
 
-function openMarkerPopover(): void {
+function openMarkerPopover(keyboard = false): void {
   markerFilter = "";
   els.markerSearch.value = "";
   markerHighlight = Math.max(0, filteredMarkerIndices().indexOf(state.activeIndex));
-  renderMarkerList();
   els.markerPopover.hidden = false;
+  showPopover(els.markerPopover);
+  markerWindow = null;
+  renderMarkerList(markerHighlight);
   els.markerField.setAttribute("aria-expanded", "true");
-  els.markerSearch.focus();
+  (keyboard ? els.markerSearch : els.markerList).focus({ preventScroll: true });
   scrollHighlightedMarkerIntoView();
 }
 
 function closeMarkerPopover(): void {
   if (els.markerPopover.hidden) return;
+  hidePopover(els.markerPopover);
   els.markerPopover.hidden = true;
   els.markerField.setAttribute("aria-expanded", "false");
 }
@@ -849,6 +1478,126 @@ function chooseMarker(index: number): void {
   closeMarkerPopover();
   els.markerField.focus();
   setActive(index, null, true).catch(reportError);
+}
+
+// Ctrl/Cmd+C with no text selection copies the active marker's TeX source (the
+// booklink span between its BOOKLINK-START/END markers, marker lines excluded).
+// Pointing at a `formalization: skip` band instead copies that skipped
+// passage's TeX — the band under the cursor is what the reader means.
+// Feedback flashes the marker field: accent on success, error hue when the
+// marker has no resolved TeX span.
+let copyFlashTimer: number | null = null;
+
+function flashMarkerField(ok: boolean, title: string): void {
+  const cls = ok ? "is-copied" : "is-copy-failed";
+  if (copyFlashTimer != null) window.clearTimeout(copyFlashTimer);
+  els.markerField.classList.remove("is-copied", "is-copy-failed");
+  els.markerField.classList.add(cls);
+  els.markerField.setAttribute("title", title);
+  copyFlashTimer = window.setTimeout(() => {
+    copyFlashTimer = null;
+    els.markerField.classList.remove("is-copied", "is-copy-failed");
+    els.markerField.setAttribute("title", t("Jump to linked passage"));
+  }, 1200);
+}
+
+// Fetch cache for the peer document's tex — it lives under the peer mount, so
+// loadCachedText (which resolves against the project's own mount) does not
+// apply.
+const peerTextCache = new Map<string, string>();
+
+async function loadPeerText(url: string): Promise<string> {
+  if (!peerTextCache.has(url)) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+    peerTextCache.set(url, await response.text());
+  }
+  return peerTextCache.get(url) ?? "";
+}
+
+async function copyTexSpan(text: string, match: any, what: string): Promise<void> {
+  // texMatch offsets are codepoint offsets into the debug tex (produced by the
+  // Python sourcemap), the same space collectSpans passes to renderSource.
+  const tex = spanText(text, match, "codepoint");
+  if (!tex) {
+    flashMarkerField(false, t("No {0} for this marker", what));
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(tex);
+    flashMarkerField(true, t("Copied {0}", what));
+  } catch (_error) {
+    // Clipboard unavailable (e.g. non-secure context).
+    flashMarkerField(false, t("Clipboard unavailable"));
+  }
+}
+
+async function copyHoveredSkipTex(key: string): Promise<void> {
+  // The project's own skip with this key wins; skip keys are offset-derived
+  // slugs, so the peer document's keys don't collide with the project's, and a
+  // key found only in the peer map identifies a band hovered in the peer pane.
+  const skip = (state.skips || []).find((candidate: any) => candidate?.key === key);
+  if (skip) {
+    const match = skip.texMatch;
+    if (!match || match.status !== "matched") {
+      flashMarkerField(false, t("No TeX source for this skip"));
+      return;
+    }
+    await copyTexSpan(await loadCachedText(match.source), match, "skip TeX");
+    return;
+  }
+  const what = `${project.parallelPdf?.label || "peer PDF"} skip TeX`;
+  const peer = parallelSkipTexMatch(key);
+  if (!peer) {
+    flashMarkerField(false, t("No {0} for this band", what));
+    return;
+  }
+  let text: string;
+  try {
+    text = await loadPeerText(peer.url);
+  } catch (_error) {
+    flashMarkerField(false, `${what} unavailable`);
+    return;
+  }
+  await copyTexSpan(text, peer.match, what);
+}
+
+async function copyActiveMarkerTex(): Promise<void> {
+  // A skip band under the cursor takes precedence over the active marker.
+  if (state.hoveredSkip != null) {
+    await copyHoveredSkipTex(state.hoveredSkip);
+    return;
+  }
+  // Copy from the document whose pane the reader last selected a marker in: a
+  // marker picked in the peer PDF pane (e.g. the English PDF beside a
+  // translated book) copies the peer document's TeX, a marker picked anywhere
+  // else copies the project's own — the contract copyTexSource pins in
+  // copy-tex.test.ts.
+  if (copyTexSource(Boolean(project.parallelPdf?.mapPath), state.copyTexOrigin, visiblePaneNames()) === "peer") {
+    const what = `${project.parallelPdf?.label || "peer PDF"} TeX`;
+    const peer = parallelTexMatch(state.activeIndex);
+    if (!peer) {
+      flashMarkerField(false, t("No {0} for this marker", what));
+      return;
+    }
+    let text: string;
+    try {
+      text = await loadPeerText(peer.url);
+    } catch (_error) {
+      flashMarkerField(false, `${what} unavailable`);
+      return;
+    }
+    await copyTexSpan(text, peer.match, what);
+    return;
+  }
+  const entry = state.entries[state.activeIndex];
+  const match = entry?.texMatch;
+  if (!match || match.status !== "matched") {
+    flashMarkerField(false, t("No TeX source for this marker"));
+    return;
+  }
+  const text = await loadCachedText(match.source);
+  await copyTexSpan(text, match, t("TeX source"));
 }
 
 // Overlay a custom dropdown (matching the marker palette) on a native <select>:
@@ -878,8 +1627,9 @@ function collectSkipSpans(): any[] {
   return (state.skips || []).filter((span) => repoPath(span?.source) === state.selectedSources.md);
 }
 
-function applyActiveState(index: number): void {
-  state.activeIndex = index;
+function applyActiveState(): void {
+  updateMarkKeyboardAccess();
+  const index = state.activeIndex;
   updateMarkerField();
   if (!els.markerPopover.hidden) renderMarkerList();
   document.querySelectorAll(".mark.active, .pdf-mark.active").forEach((node) => node.classList.remove("active"));
@@ -890,7 +1640,6 @@ function applyActiveState(index: number): void {
   document
     .querySelectorAll(`.mark-rail-tick[data-entry="${index}"]`)
     .forEach((node) => node.classList.add("is-active"));
-  updatePdfStatus();
 }
 
 // The pane the reader last interacted with renders the active marker at full
@@ -899,7 +1648,9 @@ function applyActiveState(index: number): void {
 function setFocusPane(pane: string | null): void {
   const sections = state.paneSections || {};
   const visible = new Set(visiblePaneNames());
-  let next = pane && pane !== "pdf" && visible.has(pane) ? pane : state.focusedPane;
+  // The PDF panes are valid pick origins but never the focus pane: focus
+  // strength is a source-pane affair.
+  let next = pane && pane !== "pdf" && pane !== "pdf-peer" && visible.has(pane) ? pane : state.focusedPane;
   if (!next || !visible.has(next)) {
     next = ["md", "lean", "tex"].find((name) => visible.has(name)) || "md";
   }
@@ -949,6 +1700,25 @@ function setHoveredSkip(key: string | null): void {
       .querySelectorAll(`.skip-mark[data-skip-key="${key}"], .pdf-skip-band[data-skip-key="${key}"]`)
       .forEach((node) => node.classList.add("is-hover"));
   }
+}
+
+function skipLocationFromClick(pane: HTMLElement, key: string, clientY: number): { key: string; progress: number } {
+  // Source panes render a skip as .skip-mark line fragments, the PDF panes as
+  // .pdf-skip-band page overlays; both carry data-skip-key and both reduce to
+  // the same on-screen extent for the progress computation.
+  const fragments = Array.from(
+    pane.querySelectorAll(`.skip-mark[data-skip-key="${key}"], .pdf-skip-band[data-skip-key="${key}"]`),
+  );
+  let start = Infinity;
+  let end = -Infinity;
+  for (const fragment of fragments) {
+    const rect = fragment.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    start = Math.min(start, rect.top);
+    end = Math.max(end, rect.bottom);
+  }
+  const progress = Number.isFinite(start) && end > start ? (clientY - start) / (end - start) : 0;
+  return { key, progress: Math.min(1, Math.max(0, progress)) };
 }
 
 // The Lean-pane highlight for a booklink. A theorem's statement and proof are
@@ -1029,19 +1799,70 @@ function scrollPaneToEntry(paneName: string, index: number): void {
   if (!pane) return;
   const mark = pane.querySelector(`.mark[data-entry="${index}"]`);
   if (!mark) return;
-  const paneRect = pane.getBoundingClientRect();
+  const paneTop = paneViewportTop(pane);
   const markRect = mark.getBoundingClientRect();
-  const markTop = markRect.top - paneRect.top + pane.scrollTop;
-  const top = markTop - Math.max(0, pane.clientHeight * 0.35);
+  const markTop = markRect.top - paneTop + paneScrollTop(pane);
+  const top = markTop - Math.max(0, paneViewportHeight(pane) * 0.35);
   logEvent("scrollTo", {
     paneName,
     index,
-    currentTop: Math.round(pane.scrollTop),
+    currentTop: Math.round(paneScrollTop(pane)),
     nextTop: Math.round(Math.max(0, top)),
     markTop: Math.round(markTop),
-    paneHeight: pane.clientHeight,
+    paneHeight: paneViewportHeight(pane),
   });
-  pane.scrollTo({ top: Math.max(0, top), left: pane.scrollLeft, behavior: "auto" });
+  scrollPane(pane, { top: Math.max(0, top), left: pane.scrollLeft, behavior: "auto" });
+}
+
+function sourceSkipRanges(pane: HTMLElement): Array<{ key: string; start: number; end: number }> {
+  const paneTop = paneViewportTop(pane);
+  const byKey = new Map<string, { key: string; start: number; end: number }>();
+  for (const fragment of Array.from(pane.querySelectorAll(".skip-mark")) as HTMLElement[]) {
+    const key = fragment.dataset.skipKey;
+    if (!key) continue;
+    const rect = fragment.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    const start = rect.top - paneTop + paneScrollTop(pane);
+    const end = rect.bottom - paneTop + paneScrollTop(pane);
+    const range = byKey.get(key);
+    if (range) {
+      range.start = Math.min(range.start, start);
+      range.end = Math.max(range.end, end);
+    } else {
+      byKey.set(key, { key, start, end });
+    }
+  }
+  return [...byKey.values()];
+}
+
+async function scrollMarkdownToSkip(location: { key: string; progress: number }): Promise<void> {
+  const skip = (state.skips || []).find((candidate) => candidate?.key === location.key);
+  const source = repoPath(skip?.source);
+  if (source && source !== state.selectedSources.md) {
+    state.selectedSources.md = source;
+    state.selectedSources.lean = correspondingLeanForMd(source);
+    await renderSelectedSources();
+  }
+  const pane = state.panes.md;
+  if (!pane) return;
+  const range = sourceSkipRanges(pane).find((candidate) => candidate.key === location.key);
+  if (!range) return;
+  const progress = Math.min(1, Math.max(0, location.progress));
+  const target = range.start + progress * (range.end - range.start);
+  const top = Math.max(0, target - paneViewportHeight(pane) * 0.35);
+  scrollPane(pane, { top, left: pane.scrollLeft, behavior: "auto" });
+}
+
+function nearestSkipFromMarkdownScroll(): { key: string; progress: number } | null {
+  const pane = state.panes.md;
+  if (!pane) return null;
+  const target = paneScrollTop(pane) + paneViewportHeight(pane) * 0.35;
+  const paneTop = paneViewportTop(pane);
+  let firstEntry = Infinity;
+  for (const mark of Array.from(pane.querySelectorAll(".mark")) as HTMLElement[]) {
+    firstEntry = Math.min(firstEntry, mark.getBoundingClientRect().top - paneTop + paneScrollTop(pane));
+  }
+  return skipSyncLocation(target, firstEntry, sourceSkipRanges(pane));
 }
 
 // Overview ruler: a thin lane on the right of each pane (its own grid column, so
@@ -1059,20 +1880,21 @@ function railTickFractions(paneName: string): { index: number; frac: number }[] 
   const clamp = (v: number) => Math.min(1, Math.max(0, v));
   if (paneName === "pdf") {
     const viewer = els.pdfViewer;
-    const height = viewer?.scrollHeight || 0;
+    const height = viewer ? paneScrollHeight(viewer) : 0;
     if (!height) return [];
     const out: { index: number; frac: number }[] = [];
     for (const [index, target] of state.pdf.targets.entries()) {
       const pageState = state.pdf.pageStates.get(target.pageNumber);
       if (!pageState) continue;
-      out.push({ index, frac: clamp((pageState.el.offsetTop + target.y) / height) });
+      out.push({ index, frac: clamp((pageState.el.offsetTop + target.fraction * pageState.el.offsetHeight) / height) });
     }
     return out.sort((a, b) => a.frac - b.frac);
   }
   const pre = state.panes[paneName];
-  const height = pre?.scrollHeight || 0;
+  const height = pre ? paneScrollHeight(pre) : 0;
   if (!pre || !height) return [];
-  const preTop = pre.getBoundingClientRect().top;
+  const preTop = paneViewportTop(pre);
+  const scrollTop = paneScrollTop(pre);
   const seen = new Set<string>();
   const out: { index: number; frac: number }[] = [];
   // One tick per booklink: take the first rendered fragment of each data-entry.
@@ -1080,13 +1902,33 @@ function railTickFractions(paneName: string): { index: number; frac: number }[] 
     const entry = node.dataset.entry;
     if (!entry || seen.has(entry)) continue;
     seen.add(entry);
-    const top = node.getBoundingClientRect().top - preTop + pre.scrollTop;
+    const top = node.getBoundingClientRect().top - preTop + scrollTop;
     out.push({ index: Number(entry), frac: clamp(top / height) });
   }
   return out;
 }
 
+const pendingMarkRails = new Set<string>();
+let markRailFrame = 0;
 function updateMarkRail(paneName: string): void {
+  // Reserve the gutter before restoring reading positions; only its ticks
+  // are deferred. Changing the gutter later would change line wrapping.
+  const section = state.paneSections?.[paneName];
+  const hasMarks = paneName === "pdf" ? state.pdf.targets.size > 0 : !!state.panes[paneName]?.querySelector(".mark");
+  section?.classList.toggle("has-mark-rail", hasMarks);
+  pendingMarkRails.add(paneName);
+  if (markRailFrame) return;
+  markRailFrame = window.requestAnimationFrame(() => {
+    markRailFrame = 0;
+    const names = [...pendingMarkRails];
+    pendingMarkRails.clear();
+    // Measure every pane before modifying any rail or gutter.
+    const measured = names.map((name) => ({ name, fractions: railTickFractions(name) }));
+    for (const { name, fractions } of measured) paintMarkRail(name, fractions);
+  });
+}
+
+function paintMarkRail(paneName: string, fractions: { index: number; frac: number }[]): void {
   const section = state.paneSections?.[paneName];
   if (!section) return;
   let rail = section.querySelector(":scope > .mark-rail") as HTMLElement | null;
@@ -1097,7 +1939,11 @@ function updateMarkRail(paneName: string): void {
     section.appendChild(rail);
     rail.addEventListener("click", (event) => {
       const tick = (event.target as Element | null)?.closest(".mark-rail-tick") as HTMLElement | null;
-      if (tick) setActive(Number(tick.dataset.entry), null, true).catch(reportError);
+      // Rails belong to source panes, so a tick click selects the project side.
+      if (tick) {
+        state.copyTexOrigin = "project";
+        setActive(Number(tick.dataset.entry), null, true).catch(reportError);
+      }
     });
     rail.addEventListener("mouseover", (event) => {
       const tick = (event.target as Element | null)?.closest(".mark-rail-tick") as HTMLElement | null;
@@ -1106,7 +1952,7 @@ function updateMarkRail(paneName: string): void {
     rail.addEventListener("mouseleave", () => setHoveredEntry(null));
   }
 
-  const ticks = railTickFractions(paneName).map(({ index, frac }) => {
+  const ticks = fractions.map(({ index, frac }) => {
     const info = state.entries[index] ? markerInfo(state.entries[index], index) : null;
     const kind = info?.kind ? ` · ${info.kind}` : "";
     const tip = info ? `${info.title}${kind}` : "";
@@ -1120,8 +1966,7 @@ function updateMarkRail(paneName: string): void {
       ` title="${escapeHtml(tip)}"></button>`
     );
   });
-  rail.innerHTML = ticks.join("");
-  section.classList.toggle("has-mark-rail", ticks.length > 0);
+  setHTML(rail, ticks.join(""));
 }
 
 function updateAllMarkRails(): void {
@@ -1131,8 +1976,8 @@ function updateAllMarkRails(): void {
 function nearestEntryFromScroll(paneName: string): number | null {
   const pane = state.panes[paneName];
   if (!pane) return null;
-  const paneTop = pane.getBoundingClientRect().top;
-  const target = paneTop + pane.clientHeight * 0.35;
+  const paneTop = paneViewportTop(pane);
+  const target = paneTop + paneViewportHeight(pane) * 0.35;
   let best: number | null = null;
   let bestDistance = Infinity;
   for (const mark of pane.querySelectorAll(".mark")) {
@@ -1154,6 +1999,10 @@ function wirePaneDrag(): void {
     if (!header) continue;
     header.draggable = true;
     header.addEventListener("dragstart", (event) => {
+      if (state.layout.maximized) {
+        event.preventDefault();
+        return;
+      }
       state.dragPane = name;
       pane.classList.add("dragging");
       els.workspace.classList.add("dragging-active");
@@ -1201,6 +2050,8 @@ function wirePaneDrag(): void {
 }
 
 function wireEvents(): void {
+  window.addEventListener("beforeunload", saveReloadPosition);
+  window.addEventListener("pagehide", saveReloadPosition);
   const segButton = (group: HTMLElement | null, event: Event): HTMLElement | null => {
     const btn = (event.target as Element | null)?.closest("button") as HTMLElement | null;
     return btn && group && group.contains(btn) && !(btn as HTMLButtonElement).disabled ? btn : null;
@@ -1209,30 +2060,48 @@ function wireEvents(): void {
     const btn = segButton(els.syncSeg, event);
     if (!btn) return;
     state.sync = btn.dataset.value === "on";
+    writePreference(SYNC_STORAGE_KEY, state.sync ? "on" : "off");
     updateSegmented(els.syncSeg, state.sync ? "on" : "off");
   });
   els.linenumSeg?.addEventListener("click", (event) => {
     const btn = segButton(els.linenumSeg, event);
     if (!btn) return;
     state.lineNumbers = btn.dataset.value === "on";
-    localStorage.setItem(LINE_NUMBERS_STORAGE_KEY, state.lineNumbers ? "on" : "off");
+    writePreference(LINE_NUMBERS_STORAGE_KEY, state.lineNumbers ? "on" : "off");
     applyLineNumbers();
+  });
+  els.highlightsSeg?.addEventListener("click", (event) => {
+    const btn = segButton(els.highlightsSeg, event);
+    if (!btn) return;
+    setMarkHighlights(btn.dataset.value === "on");
+  });
+  els.linksSeg?.addEventListener("click", (event) => {
+    const btn = segButton(els.linksSeg, event);
+    if (!btn) return;
+    setLinkHighlights(btn.dataset.value === "on");
   });
   els.layoutSeg?.addEventListener("click", (event) => {
     const btn = segButton(els.layoutSeg, event);
     if (!btn) return;
     setLayoutKind(btn.dataset.value as string);
   });
-  els.markerField.addEventListener("click", () => {
-    if (els.markerPopover.hidden) openMarkerPopover();
+  els.markerField.addEventListener("click", (event) => {
+    if (els.markerPopover.hidden) openMarkerPopover(event.isTrusted && event.detail === 0);
     else closeMarkerPopover();
+  });
+  els.markerField.addEventListener("keydown", (event) => {
+    if (els.markerPopover.hidden && ["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      openMarkerPopover(true);
+    }
   });
   els.markerSearch.addEventListener("input", () => {
     markerFilter = els.markerSearch.value;
     markerHighlight = 0;
-    renderMarkerList();
+    renderMarkerList(0);
   });
-  els.markerSearch.addEventListener("keydown", (event) => {
+  const navigateMarkers = (event: KeyboardEvent) => {
+    if (enterSearchFromList(event, els.markerList, els.markerSearch)) return;
     const filtered = filteredMarkerIndices();
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -1244,7 +2113,7 @@ function wireEvents(): void {
       markerHighlight = Math.max(0, markerHighlight - 1);
       renderMarkerList();
       scrollHighlightedMarkerIntoView();
-    } else if (event.key === "Enter") {
+    } else if (event.key === "Enter" || (event.currentTarget === els.markerList && event.key === " ")) {
       event.preventDefault();
       if (filtered[markerHighlight] !== undefined) chooseMarker(filtered[markerHighlight]);
     } else if (event.key === "Escape") {
@@ -1252,15 +2121,31 @@ function wireEvents(): void {
       closeMarkerPopover();
       els.markerField.focus();
     }
-  });
+  };
+  els.markerSearch.addEventListener("keydown", navigateMarkers);
+  els.markerList.addEventListener("keydown", navigateMarkers);
   els.markerList.addEventListener("click", (event) => {
     const row = (event.target as Element | null)?.closest(".marker-row") as HTMLElement | null;
     if (row?.dataset.index) chooseMarker(Number(row.dataset.index));
   });
+  els.markerList.addEventListener(
+    "scroll",
+    () => {
+      if (markerScrollFrame) return;
+      markerScrollFrame = requestAnimationFrame(() => {
+        markerScrollFrame = 0;
+        if (!els.markerPopover.hidden) renderMarkerList();
+      });
+    },
+    { passive: true },
+  );
+  new ResizeObserver(() => {
+    if (!els.markerPopover.hidden) renderMarkerList();
+  }).observe(els.markerList);
   els.markerList.addEventListener("mousemove", (event) => {
     const row = (event.target as Element | null)?.closest(".marker-row") as HTMLElement | null;
     if (!row?.dataset.index) return;
-    const pos = filteredMarkerIndices().indexOf(Number(row.dataset.index));
+    const pos = Number(row.dataset.position);
     if (pos >= 0 && pos !== markerHighlight) {
       markerHighlight = pos;
       renderMarkerList();
@@ -1269,12 +2154,13 @@ function wireEvents(): void {
   document.addEventListener("click", (event) => {
     if (!(event.target as Element | null)?.closest("#marker-combo")) closeMarkerPopover();
   });
-  els.prev.addEventListener("click", () =>
-    setActive(Math.max(0, state.activeIndex - 1), null, true).catch(reportError),
-  );
-  els.next.addEventListener("click", () =>
-    setActive(Math.min(state.entries.length - 1, state.activeIndex + 1), null, true).catch(reportError),
-  );
+  const adjacentMarker = (step: number) => {
+    const index =
+      state.activeIndex >= 0 ? state.activeIndex : (nearestEntryFromScroll("md") ?? nearestEntryFromPdfScroll() ?? 0);
+    return setActive(Math.max(0, Math.min(state.entries.length - 1, index + step)), null, true);
+  };
+  els.prev.addEventListener("click", () => adjacentMarker(-1).catch(reportError));
+  els.next.addEventListener("click", () => adjacentMarker(1).catch(reportError));
   // Let the reader browse to any chapter file. renderSelectedSources already
   // re-applies the active entry's highlight (applyActiveState) for whichever
   // file is shown; do NOT call setActive here — it re-navigates to the active
@@ -1283,21 +2169,33 @@ function wireEvents(): void {
   els.mdSelect.addEventListener("change", async () => {
     state.selectedSources.md = repoPath(els.mdSelect.value);
     state.selectedSources.lean = correspondingLeanForMd(state.selectedSources.md);
+    recordSession({ md: state.selectedSources.md, lean: state.selectedSources.lean });
     await renderSelectedSources();
   });
   els.leanSelect.addEventListener("change", async () => {
     state.selectedSources.lean = repoPath(els.leanSelect.value);
+    recordSession({ lean: state.selectedSources.lean });
     await renderSelectedSources();
   });
-  els.settingsToggle.addEventListener("click", () => {
-    const nextOpen = els.settingsMenu.hidden;
-    els.settingsMenu.hidden = !nextOpen;
-    els.settingsToggle.setAttribute("aria-expanded", String(nextOpen));
-  });
-  document.addEventListener("click", (event) => {
-    if ((event.target as Element | null)?.closest(".settings")) return;
+  if (!popoverSupported(els.settingsMenu)) {
     els.settingsMenu.hidden = true;
-    els.settingsToggle.setAttribute("aria-expanded", "false");
+    els.settingsToggle.removeAttribute("popovertarget");
+    els.settingsToggle.addEventListener("click", () => {
+      const nextOpen = els.settingsMenu.hidden;
+      els.settingsMenu.hidden = !nextOpen;
+      els.settingsToggle.setAttribute("aria-expanded", String(nextOpen));
+    });
+    document.addEventListener("click", (event) => {
+      if ((event.target as Element | null)?.closest(".settings")) return;
+      closeSettingsMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeSettingsMenu();
+    });
+  }
+  els.settingsMenu.addEventListener("toggle", (event) => {
+    const open = (event as { newState?: string }).newState === "open";
+    els.settingsToggle.setAttribute("aria-expanded", String(open));
   });
   els.aboutOpen?.addEventListener("click", openAbout);
   els.aboutClose?.addEventListener("click", closeAbout);
@@ -1307,10 +2205,10 @@ function wireEvents(): void {
     try {
       await navigator.clipboard.writeText(text);
       els.aboutCopy!.classList.add("is-copied");
-      els.aboutCopy!.setAttribute("title", "Copied");
+      els.aboutCopy!.setAttribute("title", t("Copied"));
       window.setTimeout(() => {
         els.aboutCopy?.classList.remove("is-copied");
-        els.aboutCopy?.setAttribute("title", "Copy version");
+        els.aboutCopy?.setAttribute("title", t("Copy version"));
       }, 1200);
     } catch (_error) {
       // Clipboard unavailable (e.g. non-secure context); ignore.
@@ -1330,7 +2228,17 @@ function wireEvents(): void {
     if (event.target === els.aboutOverlay) closeAbout();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && els.aboutOverlay && !els.aboutOverlay.hidden) closeAbout();
+    // Ctrl/Cmd+C copies the active marker's TeX source — but only when it
+    // cannot be a real copy: no text selection, and not inside an editable
+    // element (the marker search box keeps its native behavior).
+    if (event.key.toLowerCase() === "c" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      const target = event.target as Element | null;
+      if (target?.closest("input, textarea, select, [contenteditable]")) return;
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      event.preventDefault();
+      copyActiveMarkerTex().catch(reportError);
+    }
   });
   for (const input of els.paneChecks) {
     input.addEventListener("change", () => applyPaneCheckboxes());
@@ -1360,23 +2268,43 @@ function wireEvents(): void {
 
   for (const paneName of ["md", "lean", "tex"]) {
     const pane = state.panes[paneName];
+    pane.addEventListener("keydown", (event) => {
+      const mark = (event.target as Element)?.closest<HTMLElement>("[data-mark-control]");
+      if (!mark || !state.markHighlights || event.repeat || !["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      state.copyTexOrigin = "project";
+      setActive(Number(mark.dataset.entry), paneName, true).catch(reportError);
+    });
     pane.addEventListener("click", (event) => {
-      const mark = (event.target as Element | null)?.closest(".mark") as HTMLElement | null;
+      if (window.getSelection()?.isCollapsed === false) return;
+      const target = event.target as Element | null;
+      const mark = target?.closest(".mark") as HTMLElement | null;
+      const skip = target?.closest(".skip-mark") as HTMLElement | null;
       // A direct click is explicit "go here" navigation: scroll every linked
-      // pane to the entry even when scroll-sync is off.
-      if (mark) setActive(Number(mark.dataset.entry), paneName, true).catch(reportError);
+      // pane to the entry even when scroll-sync is off. With the
+      // highlights hidden the marks are invisible, so a click must not navigate.
+      if (mark && state.markHighlights) {
+        state.copyTexOrigin = "project";
+        setActive(Number(mark.dataset.entry), paneName, true).catch(reportError);
+      } else if (skip?.dataset.skipKey && state.markHighlights) {
+        const clientY = event instanceof MouseEvent ? event.clientY : skip.getBoundingClientRect().top;
+        setSkipActive(skipLocationFromClick(pane, skip.dataset.skipKey, clientY), paneName, true).catch(reportError);
+      }
       if (paneName === "lean") inspectLeanClick(event);
     });
     // Hover a marker -> highlight every fragment of that booklink. mouseover
     // bubbles (unlike mouseenter), so one delegated listener per pane covers
-    // all marks; leaving the pane clears it.
+    // all marks; leaving the pane clears it. Hidden highlights don't hover:
+    // an invisible mark must not light up the other panes.
     pane.addEventListener("mouseover", (event) => {
       const target = event.target as Element | null;
-      const mark = target?.closest(".mark") as HTMLElement | null;
+      const mark = state.markHighlights ? (target?.closest(".mark") as HTMLElement | null) : null;
       setHoveredEntry(mark?.dataset.entry ?? null);
       // Skip overlays only render in the md pane, but the lookup is harmless on
       // the others (no .skip-mark to find), so one handler covers every pane.
-      const skip = target?.closest(".skip-mark") as HTMLElement | null;
+      // Gated like the marks: an invisible skip must not light the PDF band.
+      const skip = state.markHighlights ? (target?.closest(".skip-mark") as HTMLElement | null) : null;
       setHoveredSkip(skip?.dataset.skipKey ?? null);
     });
     pane.addEventListener("mouseleave", () => {
@@ -1396,7 +2324,7 @@ function wireEvents(): void {
         if (paneName === "lean") hideHover();
         logEvent("scroll:event", {
           paneName,
-          scrollTop: Math.round(pane.scrollTop),
+          scrollTop: Math.round(paneScrollTop(pane)),
           sync: state.sync,
           suppressed: isPaneSuppressed(paneName),
         });
@@ -1414,21 +2342,70 @@ function wireEvents(): void {
   // The PDF pane's booklink overlays (.pdf-mark) are the canvas counterpart of
   // the source-pane .mark spans: clicking one navigates every linked pane to that
   // entry, hovering mirrors the in-text highlight across panes. Delegated on the
-  // viewer so it covers overlays added lazily as pages rasterize.
+  // viewer so it covers overlays added lazily as pages rasterize. The PDF is the
+  // origin pane of the pick, so it keeps its own reading position while every
+  // other pane (sources and the peer PDF alike) scrolls to the entry.
   els.pdfViewer.addEventListener("click", (event) => {
-    const mark = (event.target as Element | null)?.closest(".pdf-mark") as HTMLElement | null;
-    // Like a rail-tick click, drive the sync hub with no origin pane (the PDF is
-    // never the focus pane), so every source pane scrolls to the entry.
-    if (mark) setActive(Number(mark.dataset.entry), null, true).catch(reportError);
+    if (window.getSelection()?.isCollapsed === false) return;
+    const target = event.target as Element | null;
+    const mark = state.markHighlights ? pdfOverlayAtPoint(target, ".pdf-mark", event.clientX, event.clientY) : null;
+    const skip = state.markHighlights
+      ? pdfOverlayAtPoint(target, ".pdf-skip-band", event.clientX, event.clientY)
+      : null;
+    if (mark && state.markHighlights) {
+      state.copyTexOrigin = "project";
+      setActive(Number(mark.dataset.entry), "pdf", true).catch(reportError);
+    } else if (skip?.dataset.skipKey && state.markHighlights) {
+      const clientY = event instanceof MouseEvent ? event.clientY : skip.getBoundingClientRect().top;
+      setSkipActive(skipLocationFromClick(els.pdfViewer, skip.dataset.skipKey, clientY), "pdf", true).catch(
+        reportError,
+      );
+    }
   });
   els.pdfViewer.addEventListener("mouseover", (event) => {
     const target = event.target as Element | null;
-    const mark = target?.closest(".pdf-mark") as HTMLElement | null;
+    const mark = state.markHighlights ? pdfOverlayAtPoint(target, ".pdf-mark", event.clientX, event.clientY) : null;
     setHoveredEntry(mark?.dataset.entry ?? null);
-    const skip = target?.closest(".pdf-skip-band") as HTMLElement | null;
+    const skip = state.markHighlights
+      ? pdfOverlayAtPoint(target, ".pdf-skip-band", event.clientX, event.clientY)
+      : null;
     setHoveredSkip(skip?.dataset.skipKey ?? null);
   });
   els.pdfViewer.addEventListener("mouseleave", () => {
+    setHoveredEntry(null);
+    setHoveredSkip(null);
+  });
+  // Like the primary PDF pane: the peer keeps its own position as the origin of
+  // the pick while the other panes scroll to it.
+  els.pdfPeerViewer.addEventListener("click", (event) => {
+    if (window.getSelection()?.isCollapsed === false) return;
+    const target = event.target as Element | null;
+    const mark = state.markHighlights ? pdfOverlayAtPoint(target, ".pdf-mark", event.clientX, event.clientY) : null;
+    const skip = state.markHighlights
+      ? pdfOverlayAtPoint(target, ".pdf-skip-band", event.clientX, event.clientY)
+      : null;
+    // Selecting a marker in the peer PDF makes it the copy-TeX source until a
+    // marker is selected in another pane.
+    if (mark && state.markHighlights) {
+      state.copyTexOrigin = "peer";
+      setActive(Number(mark.dataset.entry), "pdf-peer", true).catch(reportError);
+    } else if (skip?.dataset.skipKey && state.markHighlights) {
+      const clientY = event instanceof MouseEvent ? event.clientY : skip.getBoundingClientRect().top;
+      setSkipActive(skipLocationFromClick(els.pdfPeerViewer, skip.dataset.skipKey, clientY), "pdf-peer", true).catch(
+        reportError,
+      );
+    }
+  });
+  els.pdfPeerViewer.addEventListener("mouseover", (event) => {
+    const target = event.target as Element | null;
+    const mark = state.markHighlights ? pdfOverlayAtPoint(target, ".pdf-mark", event.clientX, event.clientY) : null;
+    setHoveredEntry(mark?.dataset.entry ?? null);
+    const skip = state.markHighlights
+      ? pdfOverlayAtPoint(target, ".pdf-skip-band", event.clientX, event.clientY)
+      : null;
+    setHoveredSkip(skip?.dataset.skipKey ?? null);
+  });
+  els.pdfPeerViewer.addEventListener("mouseleave", () => {
     setHoveredEntry(null);
     setHoveredSkip(null);
   });
@@ -1658,6 +2635,7 @@ const watchTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // A watched file changed on disk; debounce per path so a burst of native FS
 // events (or a multi-write build) collapses into a single reload.
 function onWatchedFileChanged(path: string): void {
+  if (path.endsWith(".md")) document.dispatchEvent(new Event("book-search-invalidated"));
   if (watchTimers.has(path)) window.clearTimeout(watchTimers.get(path));
   watchTimers.set(
     path,
@@ -1672,7 +2650,7 @@ function onWatchedFileChanged(path: string): void {
 // be repo-relative (e.g. "polish-space/build/…debug.pdf") to match the builder's
 // per-project target prefixes; repoPath() strips the project dir, so prepend it.
 function reportPdfSelection(path: string | null | undefined): void {
-  const rel = repoPath(path);
+  const rel = repoPath(path ? renderedPdfPath(path) : path);
   reportSelectedPdf(rel ? `${project.dir}/${rel}` : "");
 }
 
@@ -1693,8 +2671,7 @@ function previewUrlForChapter(chapter: string): string {
   // The whole-book master source is not a chapter and has no preview.
   return stem && chapter && chapter !== stem ? repoUrl(`build/${stem}-preview-${chapter}.pdf`) : "";
 }
-// One preview option per chapter source. Labels are the raw preview file names,
-// matching the other PDF options.
+// One preview option per chapter source, labelled with its book heading.
 function chapterPreviewChoices(): { key: string; label: string; path: string }[] {
   const seen = new Set<string>();
   const choices: { key: string; label: string; path: string }[] = [];
@@ -1705,6 +2682,15 @@ function chapterPreviewChoices(): { key: string; label: string; path: string }[]
     seen.add(chapter);
     choices.push({ key: `preview:${chapter}`, label: pdfLabel(path), path });
   }
+  for (const [unit, label] of Object.entries(project.previewSections ?? {})) {
+    if (!/^[A-Za-z0-9_-]+$/.test(unit) || seen.has(unit)) continue;
+    const path = previewUrlForChapter(unit);
+    if (path) {
+      const choice = { key: `preview:${unit}`, label, path };
+      if (unit === "_contents") choices.unshift(choice);
+      else choices.push(choice);
+    }
+  }
   return choices;
 }
 function isPreviewPath(path: string): boolean {
@@ -1712,46 +2698,182 @@ function isPreviewPath(path: string): boolean {
   return !!stem && path.includes(`${stem}-preview-`);
 }
 
-// Books currently auto-building on the server. The "Building…" indicator in the
-// PDF pane header shows while the set is non-empty; a failed build flashes
-// briefly. The server's build channel carries every project's events, so ignore
-// any whose dir is not the project this tab is viewing.
-const buildingBooks = new Set<string>();
-let buildFailedTimer: ReturnType<typeof setTimeout> | null = null;
+let chapterLanding: {
+  path: string;
+  direction: ChapterDirection;
+  primaryDone: boolean;
+  peerDone: boolean;
+  finishing: boolean;
+} | null = null;
+
+function adjacentChapter(direction: ChapterDirection): { path: string; label: string } | null {
+  if (state.pdfMode !== "chapter") return null;
+  const choices = Array.from(els.pdfSelect.options);
+  const index = choices.findIndex((choice) => choice.value === state.pdf.path);
+  const next = index >= 0 ? choices[index + direction] : null;
+  return next && !next.disabled ? { path: next.value, label: next.textContent || next.value } : null;
+}
+
+function landAtChapterEdge(viewer: HTMLElement, direction: ChapterDirection): void {
+  suppressPaneSync(viewer === els.pdfViewer ? "pdf" : "pdf-peer");
+  scrollPane(viewer, { top: direction > 0 ? 0 : paneScrollHeight(viewer), behavior: "auto" });
+}
+
+// Keep the landing request until each PDF actually arrives. A newly requested
+// chapter can initially 404 while its build runs, including the translated peer.
+async function finishChapterLanding(): Promise<void> {
+  const landing = chapterLanding;
+  if (
+    !landing ||
+    landing.finishing ||
+    landing.primaryDone ||
+    state.pdf.loadedPath !== landing.path ||
+    !state.pdf.document
+  )
+    return;
+  landing.finishing = true;
+  try {
+    landAtChapterEdge(els.pdfViewer, landing.direction);
+    updatePdfPageFromScroll();
+    const skip = nearestSkipFromPdfScroll();
+    const index = nearestEntryFromPdfScroll();
+    // Chapter navigation updates the same canonical location as marker picks.
+    if (skip) await setSkipActive(skip, "pdf");
+    else if (index !== null) await setActive(index, "pdf");
+    if (state.pdf.path !== landing.path || chapterLanding !== landing) return;
+    landAtChapterEdge(els.pdfViewer, landing.direction);
+    updatePdfPageFromScroll();
+    if (landing.peerDone && project.parallelPdf) landAtChapterEdge(els.pdfPeerViewer, landing.direction);
+    landing.primaryDone = true;
+    if (landing.peerDone) chapterLanding = null;
+  } finally {
+    landing.finishing = false;
+  }
+}
+
+function wireChapterPull(): void {
+  for (const viewer of [els.pdfViewer, els.pdfPeerViewer]) {
+    installChapterPull(viewer, {
+      target: adjacentChapter,
+      enabled: () => state.pdfMode === "chapter" && (!chapterLanding || chapterLanding.primaryDone),
+      navigate: async (direction) => {
+        const next = adjacentChapter(direction);
+        if (!next) return;
+        chapterLanding = {
+          path: next.path,
+          direction,
+          primaryDone: false,
+          peerDone: !project.parallelPdf,
+          finishing: false,
+        };
+        await setPdf(next.path, { scrollToActive: false });
+        await state.pdf.targetPromise;
+        await finishChapterLanding();
+      },
+      onError: reportError,
+    });
+  }
+}
+
+// URL mode owns the initial render. Reader positions may choose the chapter,
+// but a stale local full-book selection must never override the chapter default.
+function initialPdfPath(choices: { path: string }[], params: URLSearchParams, fallback: string): string {
+  if (params.get("pdf")) return fallback;
+  if (state.pdfMode === "full")
+    return choices.find((choice) => choice.path === repoUrl(project.pdf ?? ""))?.path ?? fallback;
+  const session = storedSession();
+  const linkedSkip = params.get("skip");
+  const marker = params.get("marker") || (!linkedSkip ? session.marker : null);
+  const index = marker ? markerIndex(state.entries, marker) : null;
+  const skipKey = linkedSkip || (!marker ? session.skip : null);
+  const skip = skipKey ? state.skips?.find((item) => item.key === skipKey) : null;
+  const source =
+    index !== null
+      ? state.entries[index]?.match?.source
+      : skip?.match?.source || skip?.source || session.md || state.selectedSources.md;
+  const wanted = previewUrlForChapter(chapterStemOf(source));
+  return (
+    choices.find((choice) => choice.path === wanted)?.path ??
+    choices.find((choice) => /-preview-(?!_)[^/]+\.pdf$/.test(choice.path))?.path ??
+    choices.find((choice) => isPreviewPath(choice.path))?.path ??
+    fallback
+  );
+}
+
+// Build-log icons in the PDF pane headers: the primary pane tracks this
+// project's builds, the peer pane its peer project's. Each shows while its
+// project has an in-flight build; a failed build flashes briefly. The server's
+// build channel carries every project's events; onBuildStatus dispatches them.
+function makeBuildIndicator(el: () => HTMLElement | null): (status: BuildStatus) => void {
+  const building = new Set<string>();
+  let logAttached = false;
+  let logDir = "";
+  return (status) => {
+    if (status.state === "building") building.add(status.dir);
+    else building.delete(status.dir);
+    const node = el();
+    if (!node) return;
+    logDir = status.dir;
+    if (!logAttached) {
+      attachBuildLog(node, () => logDir);
+      logAttached = true;
+    }
+    const indicatorState = building.size > 0 ? "building" : status.state === "failed" ? "failed" : "done";
+    const label =
+      indicatorState === "building" ? t("Building…") : indicatorState === "failed" ? t("Build failed") : t("Build log");
+    node.hidden = false;
+    node.dataset.state = indicatorState;
+    node.title = indicatorState === "done" ? t("Show build log") : `${label} — ${t("Show build log")}`;
+    node.setAttribute("aria-label", node.title);
+    const text = node.querySelector(".build-status-text");
+    if (text) text.textContent = label;
+  };
+}
+const primaryBuildIndicator = makeBuildIndicator(() => els.pdfBuildStatus);
+const peerBuildIndicator = makeBuildIndicator(() => els.pdfPeerBuildStatus);
+const buildingProjects = new Set<string>();
+const pendingBuildArtifacts = new Map<string, Set<string>>();
 
 function onBuildStatus(status: BuildStatus): void {
+  const wasBuilding = buildingProjects.has(status.dir);
+  if (status.state === "building") buildingProjects.add(status.dir);
+  else buildingProjects.delete(status.dir);
+  const artifacts = pendingBuildArtifacts.get(status.dir);
+  if (status.state !== "building") pendingBuildArtifacts.delete(status.dir);
+  if (project.parallelPdf?.dir === status.dir) {
+    peerBuildIndicator(status);
+    if (status.state === "building")
+      pdfLoadStatus(els.pdfPeerViewer, t("Building PDF… Current PDF remains available."));
+    else if (status.state === "done" && (wasBuilding || artifacts?.size)) schedulePeerPdfReload();
+    else if (status.state === "failed")
+      pdfLoadStatus(els.pdfPeerViewer, t("PDF build failed. Current PDF remains available — see build log."));
+  }
   if (status.dir !== project.dir) return;
-  if (status.state === "building") buildingBooks.add(status.dir);
-  else buildingBooks.delete(status.dir);
-  // When the viewed PDF is a chapter preview the server is still rendering (its
-  // file 404'd on selection, so nothing is loaded), show the build state in the
+  // When the viewed PDF has not been built yet, show the build state in the
   // pane body and load it once the build lands, instead of a stale 404 error.
-  if (!state.pdf.document && isPreviewPath(state.pdf.path ?? "")) {
-    if (status.state === "building") clearPdfViewer("Building chapter preview…");
-    else if (status.state === "failed") clearPdfViewer("Chapter preview build failed — see the terminal.");
-    else if (status.state === "done") reloadPdf();
+  const selected = state.pdf.path ?? "";
+  if (isPreviewPath(selected) || repoPath(selected) === project.pdf) {
+    if (status.state === "building") {
+      if (!state.pdf.document) clearPdfViewer(t("Building PDF…"));
+      pdfLoadStatus(
+        els.pdfViewer,
+        state.pdf.document ? t("Building PDF… Current PDF remains available.") : t("Building PDF…"),
+      );
+    } else if (status.state === "failed") {
+      if (!state.pdf.document) clearPdfViewer(t("PDF build failed — see build log."));
+      pdfLoadStatus(els.pdfViewer, t("PDF build failed — see build log."));
+    } else if (status.state === "done" && (wasBuilding || artifacts?.size || !state.pdf.document)) {
+      const mapChanged = [...(artifacts ?? [])].some((path) => repoPath(path) === repoPath(state.mapPath));
+      if (mapChanged)
+        void reloadMap({ refreshPdf: false })
+          .then(() => {
+            if (!buildingProjects.has(status.dir)) reloadPdf();
+          })
+          .catch(reportError);
+      else reloadPdf();
+    }
   }
-  const el = els.pdfBuildStatus;
-  if (!el) return;
-  if (buildFailedTimer) {
-    window.clearTimeout(buildFailedTimer);
-    buildFailedTimer = null;
-  }
-  if (buildingBooks.size > 0) {
-    el.hidden = false;
-    el.dataset.state = "building";
-    el.textContent = "Building…";
-  } else if (status.state === "failed") {
-    el.hidden = false;
-    el.dataset.state = "failed";
-    el.textContent = "Build failed";
-    buildFailedTimer = window.setTimeout(() => {
-      if (buildingBooks.size === 0 && els.pdfBuildStatus) els.pdfBuildStatus.hidden = true;
-    }, 6000);
-  } else {
-    el.hidden = true;
-    el.dataset.state = "done";
-  }
+  primaryBuildIndicator(status);
 }
 
 const VIEWER_ASSET = /^tools\/formalization-viewer\/[^?]*\.(?:js|css|html)$/;
@@ -1771,8 +2893,145 @@ function scheduleReload(): void {
   }, 250);
 }
 
+// "…/<stem>-preview-<chapter>.pdf" -> "<chapter>"; null for any other path.
+// The chapter feeds a peer-book file name, so it passes the same
+// plain-identifier guard as the server's preview targets.
+function previewChapterOf(path: string | null | undefined): string | null {
+  const stem = bookStem();
+  const name = (path ?? "").replace(/^.*\//, "");
+  const prefix = `${stem}-preview-`;
+  if (!stem || !name.startsWith(prefix) || !name.endsWith(".pdf")) return null;
+  const chapter = name.slice(prefix.length, -".pdf".length);
+  return /^[A-Za-z0-9_-]+$/.test(chapter) ? chapter : null;
+}
+
+// The peer pane's document, derived from the manifest's parallelPdf block and
+// the primary selection: with a chapter preview shown in the Rendered PDF pane
+// the peer mirrors it with the peer book's preview of the same chapter,
+// otherwise it shows the peer debug PDF. Returns repo-relative paths alongside
+// the fetch URLs so watch events can be matched against whichever document is
+// currently mirrored. Null when the project has no peer or the block is
+// incomplete.
+function peerPdfDoc(): { url: string; mapUrl: string | null; repoPdf: string; repoMap: string | null } | null {
+  const peer = project.parallelPdf;
+  if (!peer) return null;
+  const mount = peer.mount?.replace(/\/$/, "") || "";
+  const debugPath = peer.path?.replace(/^\/+/, "") || "";
+  if (!mount || !debugPath) return null;
+  const mapPath = peer.mapPath?.replace(/^\/+/, "") || "";
+  const chapter = previewChapterOf(state.pdf.path);
+  const pdfPath =
+    chapter && debugPath.endsWith("-debug.pdf")
+      ? `${debugPath.slice(0, -"-debug.pdf".length)}-preview-${chapter}.pdf`
+      : debugPath;
+  return {
+    url: renderedPdfPath(`${mountPrefix()}${mount}/${pdfPath}`),
+    mapUrl: mapPath ? `${mountPrefix()}${mount}/${mapPath}` : null,
+    repoPdf: renderedPdfPath(`${peer.dir}/${pdfPath}`),
+    repoMap: mapPath ? `${peer.dir}/${mapPath}` : null,
+  };
+}
+
+// (Re)load the peer pane onto the document peerPdfDoc() currently names. A
+// same-document reload may preserve the reading position; switching documents
+// starts fresh at the active entry.
+let peerLoadedUrl: string | null = null;
+let peerDirty = false;
+let peerLoadPromise: Promise<void> | null = null;
+
+function loadPeerPdf(options: { preserveScroll?: boolean } = {}): void {
+  if (!visiblePaneNames().includes("pdf-peer")) {
+    peerDirty = true;
+    return;
+  }
+  peerDirty = false;
+  const doc = peerPdfDoc();
+  if (!doc) return;
+  const sameDoc = lightPdfPath(doc.url) === lightPdfPath(peerLoadedUrl ?? "");
+  const themeChange = sameDoc && doc.url !== peerLoadedUrl;
+  peerLoadedUrl = doc.url;
+  els.pdfPeerLink.href = doc.url;
+  peerLoadPromise = initParallelPdf(
+    doc.url,
+    doc.mapUrl ?? undefined,
+    sameDoc
+      ? {
+          ...options,
+          preserveScroll: options.preserveScroll || themeChange,
+        }
+      : {},
+  )
+    .then(() => {
+      const landing = chapterLanding;
+      if (
+        !landing ||
+        state.pdf.path !== landing.path ||
+        peerLoadedUrl !== doc.url ||
+        parallelDocumentPath() !== doc.url ||
+        !els.pdfPeerViewer.querySelector(".pdf-page")
+      )
+        return;
+      landAtChapterEdge(els.pdfPeerViewer, landing.direction);
+      landing.peerDone = true;
+      if (landing.primaryDone) chapterLanding = null;
+    })
+    .catch(reportError);
+}
+
+// The peer PDF and its map land in one build burst; debounce so the pair of
+// watch events re-initializes the peer pane once, with both files fresh.
+let peerReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePeerPdfReload(): void {
+  if (peerReloadTimer != null) window.clearTimeout(peerReloadTimer);
+  peerReloadTimer = window.setTimeout(() => {
+    peerReloadTimer = null;
+    // The peer tex backing the copy shortcut was rebuilt with the PDF.
+    peerTextCache.clear();
+    loadPeerPdf({ preserveScroll: true });
+  }, 400);
+}
+
+let definitionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let definitionRefreshToken = 0;
+function refreshDefinitions(): void {
+  if (project.static) return;
+  const token = ++definitionRefreshToken;
+  clearTimeout(definitionRefreshTimer);
+  definitionRefreshTimer = setTimeout(() => {
+    void fetch("manifest.json", { cache: "no-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`manifest.json: ${response.status}`);
+        return response.json();
+      })
+      .then((next) => {
+        if (token !== definitionRefreshToken) return;
+        project.definitionRegistry = next.definitionRegistry;
+        project.chapterTitles = next.chapterTitles;
+        state.katexMacros = next.katexMacros ?? {};
+        project.fixedMath = next.fixedMath ?? {};
+        for (const info of markerInfoCache.values()) delete info.titleHtml;
+        markerWindow = null;
+        updateMarkerField();
+        if (!els.markerPopover.hidden) renderMarkerList();
+        dismissTermPopup();
+      })
+      .catch(reportError);
+  }, 250);
+}
+
 function applyWatchedChange(path: string): void {
   const changed = repoPath(path);
+  if (
+    /\.(?:md|aux)$/.test(changed) ||
+    /(?:^|\/)tex\/macros\.tex$/.test(changed) ||
+    changed === project.bookManifest ||
+    changed === repoPath(state.mapPath)
+  )
+    refreshDefinitions();
+  const fullPeer = project.parallelPdf;
+  if (lightPdfPath(changed) === project.pdf || (fullPeer && lightPdfPath(path) === `${fullPeer.dir}/${fullPeer.path}`))
+    invalidateReferenceDocuments();
   // Any rebuild may have rewritten the viewer's own bundle (editing pdf.ts/app.ts
   // → build/*.js; the book filter change in this same session rebuilt the PDF in
   // one burst). A single build/*.js watch event can be coalesced or missed,
@@ -1782,23 +3041,42 @@ function applyWatchedChange(path: string): void {
   // reliably-delivered PDF/map events thus act as a backstop for the asset event.
   scheduleReload();
   if (VIEWER_ASSET.test(changed)) return;
+  // TeX writes PDFs and maps repeatedly during a build. Do not expose those
+  // intermediate files; a done event loads the completed pair in the background.
+  const owner = [...buildingProjects].find(
+    (dir) =>
+      path.replace(/^\/+/, "").startsWith(`${dir}/build/`) || (dir === project.dir && changed.startsWith("build/")),
+  );
+  if (owner && /\.(?:pdf|json)$/.test(changed)) {
+    const artifacts = pendingBuildArtifacts.get(owner) ?? new Set<string>();
+    artifacts.add(path);
+    pendingBuildArtifacts.set(owner, artifacts);
+    return;
+  }
   if (changed === repoPath(state.mapPath) || changed === project.bookManifest) {
     reloadMap().catch(reportError);
     return;
   }
+  if (changed === repoPath(state.selectedSources.md) || changed.endsWith(".lean")) refreshCorrespondence(true);
+  if (changed === repoPath(state.selectedSources.md) || changed.endsWith(".lean")) refreshFormulaOverlays(true);
   if (changed === repoPath(state.selectedSources.md)) refreshSource("md").catch(reportError);
   if (changed === repoPath(state.selectedSources.lean)) refreshSource("lean").catch(reportError);
   if (changed === repoPath(state.selectedSources.tex)) refreshSource("tex").catch(reportError);
-  if (state.pdf.path && changed === repoPath(state.pdf.path)) reloadPdf();
+  if (state.pdf.path && changed === repoPath(renderedPdfPath(state.pdf.path))) reloadPdf();
+  // The peer pane's current document (debug or mirrored chapter preview) or
+  // its sourcemap was rebuilt (the peer repo lives outside this mount, so
+  // compare against dir-prefixed repo paths).
+  const peerDoc = peerPdfDoc();
+  if (peerDoc && (changed === peerDoc.repoPdf || changed === peerDoc.repoMap)) schedulePeerPdfReload();
 }
 
 // The booklink source map (or chapter manifest) was regenerated: reload it,
 // rebuild the entry list and file choices, re-render the source panes, and
 // re-resolve PDF targets so markers track the new entries.
-async function reloadMap(): Promise<void> {
+async function reloadMap(options: { refreshPdf?: boolean } = {}): Promise<void> {
   let map: any;
   try {
-    map = await fetch(state.mapPath ?? "", { cache: "no-store" }).then((response) => {
+    map = await fetch(state.mapPath ?? "", { cache: "no-cache" }).then((response) => {
       if (!response.ok) throw new Error(`${state.mapPath}: HTTP ${response.status}`);
       return response.json();
     });
@@ -1806,6 +3084,12 @@ async function reloadMap(): Promise<void> {
     reportError(error);
     return;
   }
+  // An edit anywhere earlier in the book shifts every later entry index, so
+  // follow the active marker by its permalink id instead of its position.
+  flushLocation();
+  const position = captureViewPosition();
+  const location = state.location;
+  const activeMarker = readLocationParams(window.location.search).marker || markerId(state.entries, state.activeIndex);
   state.map = map;
   state.entries = map.entries || [];
   state.skips = map.skips || [];
@@ -1827,14 +3111,24 @@ async function reloadMap(): Promise<void> {
   populateFileSelect(els.mdSelect, state.fileChoices.md);
   populateFileSelect(els.leanSelect, state.fileChoices.lean);
   updateMarkerField();
-  state.activeIndex = Math.min(state.activeIndex, Math.max(0, state.entries.length - 1));
+  state.location =
+    location.kind === "skip" && state.skips?.some((skip: any) => skip.key === location.key)
+      ? location
+      : {
+          kind: "entry",
+          index:
+            markerIndex(state.entries, activeMarker) ??
+            Math.min(location.kind === "entry" ? location.index : 0, Math.max(0, state.entries.length - 1)),
+        };
   await renderSelectedSources();
-  if (state.pdf.document) {
-    state.pdf.targetPromise = resolvePdfTargets(state.pdf.renderToken).catch((error) => {
+  if (state.pdf.document && options.refreshPdf !== false) {
+    state.pdf.targetPromise = resolvePdfTargets(state.pdf.renderToken, false).catch((error) => {
       console.error("[booklink] Failed to resolve PDF targets:", error);
     });
+    await state.pdf.targetPromise;
   }
-  applyActiveState(state.activeIndex);
+  applyActiveState();
+  restoreViewPosition(position);
 }
 
 // Re-fetch and re-render one source pane in place, preserving its scroll
@@ -1847,6 +3141,11 @@ async function refreshSource(kind: "md" | "lean" | "tex"): Promise<void> {
   state.sourceCache.delete(normalized);
   state.highlightCache.delete(normalized);
   state.foldCache.delete(normalized);
+  highlightDataPromises.delete(normalized);
+  if (!visiblePaneNames().includes(kind) && !(kind === "lean" && visiblePaneNames().includes("infoview"))) {
+    delete renderedSources[kind];
+    return;
+  }
   let text: string;
   try {
     text = await loadText(path);
@@ -1856,10 +3155,11 @@ async function refreshSource(kind: "md" | "lean" | "tex"): Promise<void> {
   }
   state.sourceCache.set(normalized, text);
   state.sources[kind] = text;
-  const highlights = await loadCachedHighlights(path, text);
-  const folds = kind === "lean" ? await loadCachedLeanFolds(path, text) : [];
+  const highlights = await loadCachedHighlights(path);
+  const folds = kind === "lean" ? await loadCachedLeanFolds(path) : [];
   const pane = state.panes[kind];
-  const prevScroll = pane ? pane.scrollTop : 0;
+  const prevScroll = pane ? paneScrollTop(pane) : 0;
+  const position = captureViewPosition();
   renderSource(
     els[SOURCE_ELEMENT[kind] as "mdSource" | "leanSource" | "texSource"],
     text,
@@ -1870,8 +3170,11 @@ async function refreshSource(kind: "md" | "lean" | "tex"): Promise<void> {
     kind === "lean" ? "utf16" : "codepoint",
     kind === "md" ? collectSkipSpans() : [],
   );
-  applyActiveState(state.activeIndex);
-  if (pane) pane.scrollTop = prevScroll;
+  applyActiveState();
+  if (pane) scrollPane(pane, { top: prevScroll, behavior: "auto" });
+  if (position.sources[kind])
+    restoreViewPosition({ ...position, pdf: null, peer: null, sources: { [kind]: position.sources[kind] } });
+  renderedSources[kind] = path;
   if (kind === "lean" && lspIsReady()) {
     lspChangeDocument(normalized, text);
     if (state.lsp.position) {
@@ -1894,14 +3197,23 @@ async function initBookSelect(): Promise<void> {
     projects = null;
   }
   if (!Array.isArray(projects) || projects.length < 2) return;
-  bookSelect.innerHTML = projects
-    .map(
-      (entry: any) =>
-        `<option value="${escapeHtml(entry.mount)}"${entry.dir === project.dir ? " selected" : ""}>${escapeHtml(entry.name || entry.dir)}</option>`,
-    )
-    .join("");
+  setHTML(
+    bookSelect,
+    projects
+      .map(
+        (entry: any) =>
+          `<option value="${escapeHtml(entry.mount)}"${entry.dir === project.dir ? " selected" : ""}>${escapeHtml(entry.selectorLabel || entry.name || entry.dir)}</option>`,
+      )
+      .join(""),
+  );
   bookSelect.addEventListener("change", () => {
-    window.location.href = `${mountPrefix()}${bookSelect.value}/`;
+    const layout = JSON.stringify(state.layout);
+    const search = withSharedPreferences(
+      "",
+      { [LAYOUT_STORAGE_KEY]: layout, [PDF_MODE_KEY]: state.pdfMode },
+      layoutDefaults(),
+    );
+    window.location.href = `${mountPrefix()}${bookSelect.value}/${search}`;
   });
   const label = document.getElementById("book-select-label");
   if (label) label.hidden = false;
@@ -1912,17 +3224,26 @@ async function initBookSelect(): Promise<void> {
 // handlers with the sync hub, so sync.setActive / sync.syncFromScroll can drive
 // the panes without app and the pane modules importing each other.
 function wireActiveSync(): void {
-  setActivateHook(async (index, originPane, mode) => {
+  // Every navigation, explicit or by scroll, updates the address bar and the
+  // stored position.
+  setLocationHook(() => {
+    applyActiveState();
+    recordLocation();
+  });
+  setActivateHook(async (index, originPane, mode, current) => {
     if (mode === "navigate" && originPane) setFocusPane(originPane);
     await syncSelectedSourcesForEntry(state.entries[index]);
-    applyActiveState(index);
+    if (!current()) return;
+    refreshFormulaOverlays();
+    applyActiveState();
     // When a chapter preview is shown, follow an activated marker to its
     // chapter's preview, so the PDF jumps to it even when the marker lives in a
     // different chapter than the one displayed. (Debug/release show the whole
     // book, so no switch is needed.)
     if (mode === "navigate" && isPreviewPath(state.pdf.path ?? "")) {
       const url = previewUrlForChapter(chapterStemOf(state.selectedSources.md));
-      if (url && url !== state.pdf.path) setPdf(url).catch(reportError);
+      if (url && url !== state.pdf.path) await setPdf(url);
+      if (!current()) return;
     }
     if (mode === "navigate" && lspIsReady() && state.lsp.uri) {
       const pos = leanEntryPosition(state.entries[index]);
@@ -1931,43 +3252,97 @@ function wireActiveSync(): void {
   });
   for (const paneName of ["md", "lean", "tex"]) {
     registerPaneSync(paneName, {
-      scrollToEntry: (index) => scrollPaneToEntry(paneName, index),
-      nearestEntry: () => nearestEntryFromScroll(paneName),
+      supports: (location) => location.kind === "entry" || paneName === "md",
+      scrollTo: (location) =>
+        location.kind === "entry" ? scrollPaneToEntry(paneName, location.index) : scrollMarkdownToSkip(location),
+      nearest: () => {
+        if (paneName === "md") {
+          const skip = nearestSkipFromMarkdownScroll();
+          if (skip) return { kind: "skip", ...skip };
+        }
+        const index = nearestEntryFromScroll(paneName);
+        return index === null ? null : { kind: "entry", index };
+      },
     });
   }
-  registerPaneSync("pdf", { scrollToEntry: scrollPdfToEntry, nearestEntry: nearestEntryFromPdfScroll });
+  registerPaneSync("pdf", {
+    supports: () => true,
+    scrollTo: (location) => (location.kind === "entry" ? scrollPdfToEntry(location.index) : scrollPdfToSkip(location)),
+    nearest: () => {
+      const skip = nearestSkipFromPdfScroll();
+      if (skip) return { kind: "skip", ...skip };
+      const index = nearestEntryFromPdfScroll();
+      return index === null ? null : { kind: "entry", index };
+    },
+  });
+  if (project.parallelPdf) {
+    registerPaneSync("pdf-peer", {
+      supports: () => true,
+      scrollTo: (location) =>
+        location.kind === "entry" ? scrollParallelPdfToEntry(location.index) : scrollParallelPdfToSkip(location),
+      nearest: () => {
+        const skip = nearestSkipFromParallelPdfScroll();
+        if (skip) return { kind: "skip", ...skip };
+        const index = nearestEntryFromParallelPdfScroll();
+        return index === null ? null : { kind: "entry", index };
+      },
+    });
+  }
   // pdf.ts resolved its entry targets; redraw the PDF overview rail, which reads
   // them. (pdf.ts cannot call the rail code in app.ts directly.)
-  setOnPdfTargetsResolved(() => updateMarkRail("pdf"));
+  setOnPdfTargetsResolved(() => {
+    updateMarkRail("pdf");
+    // Wait for pdf.ts's final anchor restoration before positioning the edge.
+    if (chapterLanding) void Promise.resolve(state.pdf.targetPromise).then(finishChapterLanding).catch(reportError);
+  });
 }
 
 async function init(): Promise<void> {
+  startupStep("manifest", t("Loading book settings…"));
+  // Offline support is auxiliary: registration failure cannot break startup.
+  await initOffline().catch(reportError);
+  const language = document.querySelector<HTMLSelectElement>("#ui-language")!;
+  language.value = uiLanguagePreference();
+  language.addEventListener("change", () => {
+    writePreference("formalization-viewer-ui-language", language.value);
+    if (uiLanguagePreference() !== language.value) {
+      language.value = uiLanguagePreference();
+      return;
+    }
+    saveReloadPosition();
+    location.reload();
+  });
+  initAppearance((modeChanged) => {
+    window.requestAnimationFrame(updateAllMarkRails);
+    if (!modeChanged) return;
+    invalidateReferenceDocuments();
+    if (state.pdf.path) void setPdf(state.pdf.path, { preserveScroll: true, scrollToActive: false }).catch(reportError);
+  });
+  state.pdfMode = readPreference(PDF_MODE_KEY) === "full" ? "full" : "chapter";
+  window.history.scrollRestoration = "manual";
+  const savedPosition = reloadPosition();
   const params = new URLSearchParams(window.location.search);
   setProject(
-    await fetch("manifest.json", { cache: "no-store" }).then((response) => {
+    await fetch("manifest.json", { cache: "no-cache" }).then((response) => {
       if (!response.ok) throw new Error(`manifest.json: HTTP ${response.status}`);
       return response.json();
     }),
   );
-  // Load KaTeX lazily with the book's macros; marker titles re-render with real
-  // math once it's ready (they show plain text until then).
+  document.getElementById("md-source")?.setAttribute("lang", String(project.dir).includes("ja") ? "ja" : "en");
+  // The reading session is per book, so it can only be keyed once the manifest
+  // names the mount this page is serving.
+  storeKey = sessionKey(project.mount || project.dir || "");
+  // Fixed formulas arrive as precomputed MathML; chat alone loads a converter.
   state.katexMacros = project.katexMacros || {};
-  import(KATEX_MODULE_URL)
-    .then((mod) => {
-      state.katex = (mod as any).default || mod;
-      updateMarkerField();
-      if (!els.markerPopover.hidden) renderMarkerList();
-    })
-    .catch(() => {});
   initBookSelect().catch(reportError);
-  initHighlighter().catch(reportError);
-  connectInfoview().catch(reportError);
   // Keep the PDF band overlays aligned whenever the pane geometry settles, so a
   // band drawn against not-yet-final geometry self-corrects without a reload.
   observePdfBandGeometry();
   // A static dist has no watcher endpoint; skip the EventSource retry loop.
   if (!project.static) {
     connectFileWatch(onWatchedFileChanged);
+    if (project.dir) primaryBuildIndicator({ dir: project.dir, state: "done" });
+    if (project.parallelPdf?.dir) peerBuildIndicator({ dir: project.parallelPdf.dir, state: "done" });
     connectBuildStatus(onBuildStatus, () => reportPdfSelection(state.pdf.path));
     // Safety net: reload if a rebuild landed while a watch event was missed.
     installReloadGuard();
@@ -1975,6 +3350,11 @@ async function init(): Promise<void> {
   loadLayout();
   loadLineNumbers();
   applyLineNumbers();
+  loadMarkHighlights();
+  applyMarkHighlights();
+  loadLinkHighlights();
+  applyLinkHighlights();
+  loadSync();
   updateSegmented(els.syncSeg, state.sync ? "on" : "off");
   const defaults = {
     map: repoUrl(project.sourceMap ?? ""),
@@ -1989,9 +3369,10 @@ async function init(): Promise<void> {
   // guarded fetch) so a yet-to-be-built map never leaves the whole viewer — pane
   // drag, menus, selects, keyboard — dead. The watcher re-renders once the build
   // produces the map.
+  startupStep("map", t("Loading source map…"));
   let map: any;
   try {
-    map = await fetch(mapPath, { cache: "no-store" }).then((response) => {
+    map = await fetch(mapPath, { cache: "no-cache" }).then((response) => {
       if (!response.ok) throw new Error(`${mapPath}: HTTP ${response.status}`);
       return response.json();
     });
@@ -2003,6 +3384,7 @@ async function init(): Promise<void> {
   state.map = map;
   state.entries = map.entries || [];
   state.skips = map.skips || [];
+  startupStep("files", t("Finding Markdown and Lean documents…"));
   state.fileChoices.md = await mdChoices(map);
   state.fileChoices.lean = leanChoices(map, state.fileChoices.md);
   state.fileChoices.tex = uniquePaths([map.texFile]);
@@ -2011,6 +3393,17 @@ async function init(): Promise<void> {
     map.leanFile || correspondingLeanForMd(state.selectedSources.md) || state.fileChoices.lean[0],
   );
   state.selectedSources.tex = repoPath(map.texFile || state.fileChoices.tex[0]);
+  // Select linked/stored documents before any pane starts downloading them.
+  const initialLocation = readLocationParams(window.location.search);
+  const session = storedSession();
+  const initialIndex = markerIndex(state.entries, initialLocation.marker || session.marker || "");
+  const initialEntry = initialIndex !== null ? state.entries[initialIndex] : null;
+  if (initialEntry) {
+    state.location = { kind: "entry", index: initialIndex! };
+    state.selectedSources.md = repoPath(initialEntry.match?.source) || state.selectedSources.md;
+    state.selectedSources.lean = repoPath(initialEntry.lean?.source) || state.selectedSources.lean;
+    state.selectedSources.tex = repoPath(initialEntry.texMatch?.source) || state.selectedSources.tex;
+  }
 
   state.panes = {
     md: els.mdSource,
@@ -2023,6 +3416,20 @@ async function init(): Promise<void> {
   }
   setFocusPane(state.focusedPane || "md");
 
+  if (project.parallelPdf && peerPdfDoc()) {
+    const peerLabel = project.parallelPdf.label ? t(project.parallelPdf.label) : t("Parallel PDF");
+    state.paneSections["pdf-peer"]?.setAttribute("aria-label", peerLabel);
+    els.pdfPeerViewer.setAttribute("aria-label", t("{0} preview", peerLabel));
+    const optionLabel = els.pdfPeerPaneOption.querySelector("span");
+    if (optionLabel) optionLabel.textContent = peerLabel;
+    els.pdfPeerLink.href = peerPdfDoc()!.url;
+    els.pdfPeerPaneOption.hidden = false;
+    const checkbox = els.pdfPeerPaneOption.querySelector("input") as HTMLInputElement | null;
+    if (checkbox) checkbox.checked = treeLeaves(state.layout.tree).includes("pdf-peer");
+  }
+
+  startupStep("panes", t("Preparing pane layout and controls…"));
+  wirePaneMaximize();
   applyPaneLayout();
 
   // Populate the native selects and wire every UI event handler (pane drag,
@@ -2030,41 +3437,176 @@ async function init(): Promise<void> {
   // fetches/renders below are guarded, so a corrupt source or sourcemap blanks
   // one pane instead of throwing out of init() and leaving the whole UI — pane
   // drag included — unwired.
-  // Report the viewed PDF to the server so the auto-build tracks it; set before
-  // the first setPdf below so the initial selection is reported too.
+  // Remember which render the reader was viewing, and report it to the server so
+  // the auto-build tracks it. Set before the first setPdf below so the initial
+  // selection is both stored and reported.
+  setOnPdfSelected((path) => {
+    if (chapterLanding?.path !== path) chapterLanding = null;
+    writePreference(PDF_MODE_KEY, state.pdfMode);
+    if (!project.static && visiblePaneNames().some((name) => name === "pdf" || name === "pdf-peer"))
+      reportPdfSelection(path);
+    // The peer pane mirrors the selection's document kind (debug PDF vs the
+    // same chapter's preview); follow a kind switch with the peer document.
+    if (peerPdfDoc()?.url !== peerLoadedUrl) loadPeerPdf();
+  });
   if (!project.static) {
-    setOnPdfSelected(reportPdfSelection);
-    // A freshly selected preview 404s until the server renders it; show build
+    // A missing debug PDF or preview 404s until the server renders it; show build
     // progress in the pane rather than the raw error.
-    setOnPdfLoadFailed((path) => (isPreviewPath(path) ? "Building chapter preview…" : null));
+    setOnPdfLoadFailed((path, error) =>
+      (error as { status?: number })?.status === 404 && (isPreviewPath(path) || repoPath(path) === project.pdf)
+        ? t("Building PDF…")
+        : null,
+    );
+    // Same for the peer pane: mirroring a fresh preview selection loads the
+    // peer book's preview before its build lands; the watch event for the
+    // built file reloads the pane.
+    setOnParallelPdfLoadFailed((path, error) =>
+      (error as { status?: number })?.status === 404 &&
+      /-(?:debug|preview-[A-Za-z0-9_-]+)\.pdf$/.test(path.replace(/\?.*$/, ""))
+        ? t("Building PDF…")
+        : null,
+    );
   }
-  // List every chapter's preview (the live bridge builds the selected one on
-  // demand); debug stays the default initial view.
-  if (!project.static) pdfChoiceList.unshift(...chapterPreviewChoices());
-  await renderPdfChoices(pdfChoiceList, pdfPath).catch(reportError);
+  const chapters = chapterPreviewChoices().filter(
+    (choice) => !project.static || project.pdfs?.includes(repoPath(choice.path)),
+  );
+  pdfChoiceList.unshift(...chapters);
+  const modeGroup = document.getElementById("pdf-mode-seg")!;
+  initPdfLayout(() => {
+    invalidateReferenceDocuments();
+    // Reflow changes page numbers; return to the active source anchor instead
+    // of carrying an old physical page offset into the new layout.
+    if (state.pdf.path) {
+      const path = isPreviewPath(state.pdf.path) ? state.pdf.path : repoUrl(project.pdf ?? "");
+      if (path) setPdf(path).catch(reportError);
+    }
+  });
+  modeGroup.querySelector<HTMLButtonElement>('button[data-value="chapter"]')!.disabled = chapters.length === 0;
+  const savedPdf = savedPosition?.pdfPath;
+  startupStep("pdf", t("Loading PDF and preparing pages…"));
+  const initialPdfLoad = renderPdfChoices(
+    pdfChoiceList,
+    savedPdf &&
+      isPreviewPath(savedPdf) === (state.pdfMode === "chapter") &&
+      pdfChoiceList.some((choice) => choice.path === savedPdf)
+      ? savedPdf
+      : initialPdfPath(pdfChoiceList, params, pdfPath),
+  ).catch(reportError);
+  // The onPdfSelected hook above already loaded the peer document mirroring the
+  // restored selection; this only covers the case where no PDF got selected.
+  if (peerLoadedUrl === null) loadPeerPdf();
   populateFileSelect(els.mdSelect, state.fileChoices.md);
   populateFileSelect(els.leanSelect, state.fileChoices.lean);
 
   wireActiveSync();
   wireEvents();
+  wireChapterPull();
+  for (const button of modeGroup.querySelectorAll<HTMLButtonElement>("button[data-value]")) {
+    button.addEventListener("click", () => {
+      const path = pdfPathForMode(button.dataset.value!);
+      if (path) setPdf(path).catch(reportError);
+    });
+  }
   els.pdfSelect.addEventListener("change", () => setPdf(els.pdfSelect.value).catch(reportError));
-  // Give the native pane/PDF selects the same custom popover as the marker palette.
-  enhanceSelect(els.pdfSelect);
-  enhanceSelect(els.mdSelect);
-  enhanceSelect(els.leanSelect);
+  // Every dropdown owns its label and caret through the same component.
+  document.querySelectorAll<HTMLSelectElement>("select").forEach((select) => enhanceSelect(select));
+
+  // Chat is auxiliary: isolate its startup like the content load below, so
+  // a failure to build its UI is reported instead of reaching init's catch
+  // and replacing the whole viewer.
+  try {
+    initChat();
+  } catch (error) {
+    reportError(error);
+  }
+  paneContentEnabled = true;
+  startVisibleInfoview();
+  // The layout and controls are usable now. Each visible pane owns its loading
+  // status; an unrelated pane cannot cover the reader with a startup screen.
+  const navigateToSearchResult = searchNavigation({
+    togglePaneMaximize,
+    applyPaneLayout,
+    setActive,
+    correspondingLeanForMd,
+    renderSelectedSources,
+    setFocusPane,
+    recordSession,
+  });
+  initCorrespondence(navigateToSearchResult);
+  initFormulaOverlays(
+    (index) => setActive(index, "md", true),
+    async (source) => {
+      if (!state.fileChoices.lean.includes(source) || state.selectedSources.lean === source) return;
+      state.selectedSources.lean = source;
+      await renderSelectedSources();
+    },
+    renderPdfPage,
+  );
+  // Definition previews list where a term or section is used; a use opens the
+  // source pane at that file and line, exactly like a search result.
+  setOpenDefinitionUse((use) => void navigateToSearchResult(use.file, use.line));
+  const searchApi = initSearch(navigateToSearchResult, async (name) => {
+    if (!visiblePaneNames().includes(name)) {
+      if (!treeLeaves(state.layout.tree).includes(name)) state.layout.tree = addLeaf(state.layout.tree, name);
+      if (state.layout.maximized && state.layout.maximized !== name) togglePaneMaximize(state.layout.maximized);
+      applyPaneLayout();
+    }
+    await ensureVisiblePaneContent();
+    if (name === "pdf") {
+      await currentPdfLoad();
+      if (!state.pdf.document && state.pdf.path) await setPdf(state.pdf.path, { scrollToActive: false });
+    } else {
+      await peerLoadPromise;
+      if (!parallelPdfSearchState().document) {
+        loadPeerPdf();
+        await peerLoadPromise;
+      }
+    }
+  });
+  const searchSource = params.get("searchSource");
+  const searchLine = Number(params.get("searchLine"));
+  finishStartup();
 
   // Content load: guarded so one bad source/highlight/sourcemap cannot abort
   // init() and leave the panes unwired.
   try {
+    startupStep("sources", t("Loading source documents…"));
     await renderSelectedSources();
     updateMarkerField();
-    await setActive(0);
+    startupStep("position", t("Restoring reading position and synchronized panes…"));
+    await navigateToInitialLocation();
+    await restoreSessionSources();
+    await Promise.allSettled([initialPdfLoad, visiblePaneNames().includes("pdf-peer") ? peerLoadPromise : null]);
+    if (savedPosition) {
+      for (const kind of ["md", "lean", "tex"] as const) {
+        const path = savedPosition.sources?.[kind]?.path;
+        if (path && state.fileChoices[kind].includes(path)) state.selectedSources[kind] = path;
+      }
+      await renderSelectedSources();
+      await Promise.allSettled([state.pdf.targetPromise, peerLoadPromise]);
+      restoreViewPosition(savedPosition);
+    }
   } catch (error) {
     reportError(error);
   }
+  if (searchSource && searchLine > 0) await navigateToSearchResult(searchSource, searchLine);
+  // Startup is done, position restored: the panes now show what they will keep
+  // showing until the reader moves. Browser automation waits on this rather than
+  // on the first rendered mark, which is still the pre-restore first entry.
+  replaceSharedUrl(
+    withSharedPreferences(
+      window.location.search,
+      { [LAYOUT_STORAGE_KEY]: JSON.stringify(state.layout), [PDF_MODE_KEY]: state.pdfMode },
+      layoutDefaults(),
+    ),
+  );
+  await initViewerAgent(visiblePaneNames, loadText, setActive, searchApi.searchBook);
+  document.body.dataset.viewerReady = "1";
+  finishStartup();
 }
 
 init().catch((error) => {
-  if (els.status) els.status.textContent = error.message;
+  finishStartup();
+  els.workspace.textContent = t("Unable to initialize viewer: {0}", error.message);
   console.error(error);
 });

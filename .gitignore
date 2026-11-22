@@ -9,11 +9,12 @@ dist/
 dist-newstyle/
 .lake/
 .texlive/
+.perllib/
 
 # esbuild output for the formalization viewer (transpiled from src/*.ts)
 /tools/formalization-viewer/build/
 
-# @types/node symlink for the viewer server's tsc type-checking (see Makefile)
+# npm dependencies for the viewer server's tsc type-checking (see Makefile)
 /tools/formalization-viewer/server/node_modules
 
 # Environment

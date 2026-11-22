@@ -68,7 +68,13 @@ export class EventStream {
     if (!this.source || this.attachedChannels.has(channel)) return;
     this.attachedChannels.add(channel);
     this.source.addEventListener(channel, (event) => {
-      for (const handler of this.handlers.get(channel) || []) handler(event.data);
+      for (const handler of this.handlers.get(channel) || []) {
+        try {
+          handler(event.data);
+        } catch (error) {
+          console.warn("[booklink] event handler failed", error);
+        }
+      }
     });
   }
 

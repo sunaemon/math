@@ -15,10 +15,13 @@ export const VIEWER_DIR = "/tools/formalization-viewer";
 export interface Manifest {
   mount: string;
   dir: string;
+  lspDir?: string;
   name?: string;
+  selectorLabel?: string;
   served?: Record<string, string[]>;
   flat?: string[];
   license?: unknown;
+  parallelPdf?: { label?: string; dir?: string; mount?: string; path?: string; mapPath?: string; texPath?: string };
   [key: string]: unknown;
 }
 
@@ -89,7 +92,7 @@ function isFile(p: string): boolean {
 
 // Walk a directory tree following symlinks, guarding against cycles by skipping
 // already-visited real directories. Yields absolute file paths.
-function* walkFiles(top: string): Generator<string> {
+export function* walkFiles(top: string, descend: (name: string) => boolean = () => true): Generator<string> {
   const seen = new Set<string>();
   const stack = [top];
   while (stack.length) {
@@ -111,7 +114,7 @@ function* walkFiles(top: string): Generator<string> {
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory() || (entry.isSymbolicLink() && isDir(full))) {
-        stack.push(full);
+        if (descend(entry.name)) stack.push(full);
       } else if (entry.isFile() || (entry.isSymbolicLink() && isFile(full))) {
         yield full;
       }
@@ -121,21 +124,49 @@ function* walkFiles(top: string): Generator<string> {
 
 // --- manifest validation/discovery -----------------------------------------
 
-function validateManifest(p: string, meta: unknown): asserts meta is Manifest {
+export function isTopLevelName(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && value !== "." && value !== "..";
+}
+
+function isRelativePath(value: unknown): value is string {
+  return typeof value === "string" && value.split("/").every(isTopLevelName);
+}
+
+export function validateManifest(p: string, meta: unknown): asserts meta is Manifest {
   if (meta === null || typeof meta !== "object" || Array.isArray(meta)) {
     throw new Error(`${p}: expected a JSON object at the top level.`);
   }
   const mount = (meta as Manifest).mount;
-  if (typeof mount !== "string" || !mount.startsWith("/") || mount.replace(/\/+$/, "") === "") {
+  if (typeof mount !== "string" || !mount.startsWith("/") || !isRelativePath(mount.slice(1))) {
     throw new Error(`${p}: missing or invalid string field "mount".`);
   }
   const served = (meta as Manifest).served;
   if (served !== undefined && (served === null || typeof served !== "object" || Array.isArray(served))) {
     throw new Error(`${p}: "served" must be an object of subdir -> extensions.`);
   }
+  for (const [subdir, extensions] of Object.entries(served ?? {})) {
+    if (
+      !isRelativePath(subdir) ||
+      !Array.isArray(extensions) ||
+      !extensions.every((ext) => typeof ext === "string" && /^[A-Za-z0-9_-]+$/.test(ext))
+    ) {
+      throw new Error(`${p}: "served" must map safe relative subdirectories to extension arrays.`);
+    }
+  }
+  const flat = (meta as Manifest).flat;
+  if (flat !== undefined && (!Array.isArray(flat) || !flat.every(isRelativePath))) {
+    throw new Error(`${p}: "flat" must be an array of safe relative subdirectories.`);
+  }
+  for (const field of ["dir", "lspDir"] as const) {
+    const value = (meta as Manifest)[field];
+    if (value !== undefined && !isTopLevelName(value)) {
+      throw new Error(`${p}: "${field}" must name a top-level project directory.`);
+    }
+  }
 }
 
-function readProject(root: string, dirname: string): Manifest {
+export function readProject(root: string, dirname: string): Manifest {
+  if (!isTopLevelName(dirname)) throw new Error("project must name a top-level directory");
   const p = path.join(root, dirname, "manifest.json");
   let meta: unknown;
   try {
@@ -145,6 +176,7 @@ function readProject(root: string, dirname: string): Manifest {
   }
   validateManifest(p, meta);
   if (meta.dir === undefined) meta.dir = dirname;
+  if (meta.dir !== dirname) throw new Error(`${p}: "dir" must match the containing project directory.`);
   return meta;
 }
 
@@ -198,7 +230,7 @@ export class Projects {
     this.mounts = new Set(this.projects.map((meta) => meta.mount));
     this.defaultMount = this.defaultProject.mount;
 
-    this.lspRoots = new Map(this.projects.map((meta) => [meta.dir, path.join(root, meta.dir)]));
+    this.lspRoots = new Map(this.projects.map((meta) => [meta.dir, path.join(root, meta.lspDir ?? meta.dir)]));
     this.defaultLspRoot = this.lspRoots.get(this.defaultProject.dir)!;
     this.manifestUrls = new Set(this.projects.map((meta) => `/${meta.dir}/manifest.json`));
 
@@ -215,21 +247,30 @@ export class Projects {
       }
       for (const sub of meta.flat ?? []) this.flatPrefixes.add(`/${meta.dir}/${sub}/`);
     }
-    this.watchDirs = [...[...watchDirs].sort(), "tools/formalization-viewer"];
     this.watchAliases = this.computeWatchAliases();
+    // Watch the realpath side of every symlinked served tree/file as well: in a
+    // checkout where only the symlinking project is present as a watch root
+    // (per-file chapter/Lean links, or a shared tree no other project serves),
+    // the canonical files would otherwise change unwatched. The watcher dedups
+    // by realpath, so this adds nothing when the real tree is already covered.
+    for (const real of this.watchAliases.keys()) {
+      watchDirs.add(real.endsWith("/") ? real.slice(0, -1) : path.dirname(real));
+    }
+    this.watchDirs = [...[...watchDirs].sort(), "tools/formalization-viewer"];
   }
 
   // Map realpath prefixes of symlinked served trees back to their project-local
   // form. File-watch events report real paths; tabs of a project that shares
-  // another book's trees via symlinks name those files by the symlinked path, so
-  // each event is also broadcast under that alias.
+  // another book's trees via symlinks — whole dirs or individual files — name
+  // those files by the symlinked path, so each event is also broadcast under
+  // that alias.
   private computeWatchAliases(): Map<string, string> {
     const aliases = new Map<string, string>();
     for (const meta of this.projects) {
       for (const sub of Object.keys(meta.served ?? {})) {
         const top = path.join(this.root, meta.dir, sub);
         if (!isDir(top)) continue;
-        const candidates = [top, ...this.collectSubdirs(top)];
+        const candidates = [top, ...this.collectEntries(top)];
         for (const candidate of candidates) {
           let isLink = false;
           try {
@@ -237,9 +278,18 @@ export class Projects {
           } catch {
             continue;
           }
-          if (isLink && isDir(candidate)) {
-            const real = `${path.relative(this.root, fs.realpathSync(candidate))}/`;
-            aliases.set(real, `${path.relative(this.root, candidate)}/`);
+          if (!isLink) continue;
+          let real: string;
+          try {
+            real = path.relative(this.root, fs.realpathSync(candidate));
+          } catch {
+            continue;
+          }
+          if (real === "" || real.startsWith("..") || path.isAbsolute(real)) continue;
+          if (isDir(candidate)) {
+            aliases.set(`${real}/`, `${path.relative(this.root, candidate)}/`);
+          } else {
+            aliases.set(real, path.relative(this.root, candidate));
           }
         }
       }
@@ -247,8 +297,9 @@ export class Projects {
     return aliases;
   }
 
-  private collectSubdirs(top: string): string[] {
-    const dirs: string[] = [];
+  // Subdirectories plus symlinked files under `top`, for alias detection.
+  private collectEntries(top: string): string[] {
+    const found: string[] = [];
     const seen = new Set<string>();
     const stack = [top];
     while (stack.length) {
@@ -268,17 +319,19 @@ export class Projects {
           } catch {
             continue;
           }
-          dirs.push(full);
+          found.push(full);
           if (!seen.has(real)) {
             seen.add(real);
             // Only descend into real directories, but still record symlinked
             // dirs (above) so they can be detected as aliases.
             if (entry.isDirectory()) stack.push(full);
           }
+        } else if (entry.isSymbolicLink()) {
+          found.push(full);
         }
       }
     }
-    return dirs;
+    return found;
   }
 
   isAllowedPath(urlPath: string): boolean {

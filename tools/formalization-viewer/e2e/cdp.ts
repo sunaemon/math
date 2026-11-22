@@ -51,7 +51,7 @@ export class CdpBrowser {
     ws.onmessage = (event: MessageEvent) => this.dispatch(String(event.data));
   }
 
-  static async launch(): Promise<CdpBrowser> {
+  static async launch(extraArgs: readonly string[] = []): Promise<CdpBrowser> {
     const chrome = findChrome();
     const port = await freePort();
     const userDataDir = mkdtempSync(path.join(os.tmpdir(), "viewer-e2e-chrome-"));
@@ -69,6 +69,7 @@ export class CdpBrowser {
         "--disable-gpu",
         "--disable-dev-shm-usage",
         "--disable-extensions",
+        ...extraArgs,
         "about:blank",
       ],
       { stdio: "ignore" },
@@ -110,7 +111,20 @@ export class CdpBrowser {
   send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<CdpResult> {
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP command timed out: ${method}`));
+      }, 60000);
+      this.pending.set(id, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.ws.send(JSON.stringify({ id, method, params, sessionId }));
     });
   }
@@ -120,7 +134,7 @@ export class CdpBrowser {
     const { sessionId } = (await this.send("Target.attachToTarget", { targetId, flatten: true })) as {
       sessionId: string;
     };
-    const page = new CdpPage(this, sessionId);
+    const page = new CdpPage(this, sessionId, targetId);
     this.pages.set(sessionId, page);
     await page.init();
     return page;
@@ -149,10 +163,16 @@ export class CdpPage {
   private readonly requestUrls: string[] = [];
   private readonly browser: CdpBrowser;
   private readonly sessionId: string;
+  private readonly targetId: string;
 
-  constructor(browser: CdpBrowser, sessionId: string) {
+  constructor(browser: CdpBrowser, sessionId: string, targetId: string) {
     this.browser = browser;
     this.sessionId = sessionId;
+    this.targetId = targetId;
+  }
+
+  async close(): Promise<void> {
+    await this.browser.send("Target.closeTarget", { targetId: this.targetId });
   }
 
   async init(): Promise<void> {
@@ -171,6 +191,96 @@ export class CdpPage {
   async navigate(url: string): Promise<void> {
     await this.browser.send("Page.navigate", { url }, this.sessionId);
     await this.waitFor("document.readyState === 'complete'", { timeout: 20000 });
+  }
+
+  async setViewport(width: number, height: number, deviceScaleFactor = 1): Promise<void> {
+    await this.browser.send(
+      "Emulation.setDeviceMetricsOverride",
+      { width, height, deviceScaleFactor, mobile: false },
+      this.sessionId,
+    );
+  }
+
+  async blockRequests(urls: string[]): Promise<void> {
+    await this.browser.send("Network.setBlockedURLs", { urls }, this.sessionId);
+  }
+
+  async hover(selector: string): Promise<void> {
+    const point = await this.evaluate<{ x: number; y: number }>(`(() => {
+      const element=document.querySelector(${JSON.stringify(selector)});
+      if(!element) throw new Error('Missing hover target');
+      const rect=element.getBoundingClientRect();
+      return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+    })()`);
+    await this.browser.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point }, this.sessionId);
+  }
+
+  async click(selector: string): Promise<void> {
+    const point = await this.evaluate<{ x: number; y: number }>(`(() => {
+      const element=document.querySelector(${JSON.stringify(selector)});
+      if(!element) throw new Error('Missing click target');
+      const rect=element.getBoundingClientRect();
+      return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+    })()`);
+    for (const type of ["mousePressed", "mouseReleased"])
+      await this.browser.send(
+        "Input.dispatchMouseEvent",
+        { type, ...point, button: "left", clickCount: 1 },
+        this.sessionId,
+      );
+  }
+
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+    await this.browser.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...from }, this.sessionId);
+    await this.browser.send(
+      "Input.dispatchMouseEvent",
+      { type: "mousePressed", ...from, button: "left", buttons: 1, clickCount: 1 },
+      this.sessionId,
+    );
+    for (let i = 1; i <= 12; i++)
+      await this.browser.send(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseMoved",
+          x: from.x + ((to.x - from.x) * i) / 12,
+          y: from.y + ((to.y - from.y) * i) / 12,
+          button: "left",
+          buttons: 1,
+        },
+        this.sessionId,
+      );
+    await this.browser.send(
+      "Input.dispatchMouseEvent",
+      { type: "mouseReleased", ...to, button: "left", clickCount: 1 },
+      this.sessionId,
+    );
+  }
+
+  async tap(selector: string): Promise<void> {
+    await this.browser.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 }, this.sessionId);
+    const point = await this.evaluate<{ x: number; y: number }>(`(() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) throw new Error('Missing tap target');
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    await this.browser.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] }, this.sessionId);
+    await this.browser.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }, this.sessionId);
+  }
+
+  async pressKey(key: string): Promise<void> {
+    const codes: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, " ": 32 };
+    const windowsVirtualKeyCode = codes[key] ?? key.toUpperCase().charCodeAt(0);
+    await this.browser.send(
+      "Input.dispatchKeyEvent",
+      { type: "keyDown", key, windowsVirtualKeyCode, ...(key.length === 1 ? { text: key } : {}) },
+      this.sessionId,
+    );
+    await this.browser.send("Input.dispatchKeyEvent", { type: "keyUp", key, windowsVirtualKeyCode }, this.sessionId);
+  }
+
+  async onNewDocument(source: string): Promise<void> {
+    await this.browser.send("Page.addScriptToEvaluateOnNewDocument", { source }, this.sessionId);
   }
 
   // Evaluate a JS expression in the page and return its (JSON-serializable) value.
@@ -204,7 +314,15 @@ export class CdpPage {
       }
       await sleep(interval);
     }
-    throw new Error(`waitFor timed out: ${expression}${lastError ? ` (last error: ${String(lastError)})` : ""}`);
+    const diagnostics = await this.evaluate<string>(
+      `JSON.stringify({
+      pdfs:[...document.querySelectorAll('.pdf-viewer')].map(pane=>({id:pane.id,pages:pane.querySelectorAll('.pdf-page').length,first:pane.querySelector('.pdf-page')?.dataset.page,top:pane.scrollTop,status:pane.parentElement.querySelector('.pdf-load-status')?.textContent,hidden:pane.parentElement.querySelector('.pdf-load-status')?.hidden})),
+      errors:window.viewerErrors
+    })`,
+    ).catch(() => "unavailable");
+    throw new Error(
+      `waitFor timed out: ${expression}${lastError ? ` (last error: ${String(lastError)})` : ""}; diagnostics: ${diagnostics}`,
+    );
   }
 
   // The URLs the page has requested so far (including the EventSource stream).

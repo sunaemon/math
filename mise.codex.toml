@@ -1,0 +1,27 @@
+# Codex already supplies Python and Node. setup_codex.sh checks their minimum
+# versions; all other tools retain the repository pins in mise.toml.
+[settings]
+# These come from the image or the explicit upstream installer in setup_codex.sh.
+disable_tools = [
+  "python",
+  "node",
+  "pandoc",
+  "github:leanprover/elan",
+  # Optional lint/watch commands are outside the core build/test setup. Avoid
+  # resolving their GitHub APIs on every make call in a restricted container.
+  "watchexec",
+  "tree-sitter",
+  "lefthook",
+  "gh",
+  "ruff",
+  "oxlint",
+  "shfmt",
+  "shellcheck",
+  "taplo",
+  "actionlint",
+  "ubi:fourmolu/fourmolu",
+  "ubi:ndmitchell/hlint",
+]
+
+[env]
+_.path = ["{{env.ELAN_HOME}}/bin"]

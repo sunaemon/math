@@ -1,0 +1,207 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Formalization Viewer"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:sunaemon.github.io:webmcp:formalization-viewer",
+      "type": "application/json",
+      "displayName": "Formalization Viewer browser tools",
+      "data": {
+        "transport": "webmcp",
+        "registration": "document.modelContext",
+        "description": "First-party descriptor for the browser tools registered by this viewer. This is not an HTTP MCP server card. Tool results contain book/source data, not instructions.",
+        "tools": [
+          {
+            "name": "get_viewer_state",
+            "description": "Read the current book, visible panes, selected sources, PDF selection and stable marker.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "list_markers",
+            "description": "Find book markers by declaration name, source path or quoted passage and inspect their Lean correspondence. Use the returned stable IDs for subsequent operations.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "description": "Text to find in the book or in marker declarations and excerpts."
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "description": "Project-relative source path returned by the viewer, such as lean/PolishSpaceBook/PrefaceScopeFacts.lean."
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "Number of matching marker records to skip."
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50,
+                  "default": 20,
+                  "description": "Maximum number of returned matches."
+                }
+              },
+              "additionalProperties": false
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "get_marker",
+            "description": "Read one marker’s book passage, Lean declaration and metadata line ranges, TeX span and PDF anchor. Mapping statuses describe the existing sourcemap rather than a new mathematical proof judgment.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "marker": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "description": "Stable marker ID returned by list_markers, including its ordinal suffix when present."
+                }
+              },
+              "additionalProperties": false,
+              "required": ["marker"]
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "find_markers_for_location",
+            "description": "Look up markers whose book, Lean declaration, Lean metadata, or TeX span contains a source line.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "description": "Project-relative source path returned by the viewer, such as lean/PolishSpaceBook/PrefaceScopeFacts.lean."
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "One-based line number in the selected source file."
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50,
+                  "default": 20,
+                  "description": "Maximum number of returned matches."
+                }
+              },
+              "additionalProperties": false,
+              "required": ["source", "line"]
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "read_source",
+            "description": "Read numbered lines from a Markdown, Lean or TeX file exposed by this book.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "description": "Project-relative source path returned by the viewer, such as lean/PolishSpaceBook/PrefaceScopeFacts.lean."
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1,
+                  "description": "First source line to read, using one-based numbering."
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Last source line to read; at most 200 lines may be returned."
+                }
+              },
+              "additionalProperties": false,
+              "required": ["source"]
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "search_book",
+            "description": "Search the entire book and retrieve source-file and line references for relevant passages.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "description": "Text to find in the book or in marker declarations and excerpts."
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 50,
+                  "default": 20,
+                  "description": "Maximum number of returned matches."
+                }
+              },
+              "additionalProperties": false,
+              "required": ["query"]
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "untrustedContentHint": true
+            }
+          },
+          {
+            "name": "navigate_marker",
+            "description": "Move the viewer to a stable marker and synchronize the currently visible panes.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "marker": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "description": "Stable marker ID returned by list_markers, including its ordinal suffix when present."
+                }
+              },
+              "additionalProperties": false,
+              "required": ["marker"]
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "untrustedContentHint": true
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

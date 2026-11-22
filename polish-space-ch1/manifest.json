@@ -1,5 +1,6 @@
 {
   "name": "polish-space-ch1",
+  "selectorLabel": "English · Ch.1",
   "mount": "/polish-space-ch1",
   "dir": "polish-space-ch1",
   "repository": "https://github.com/sunaemon/math",
@@ -13,6 +14,11 @@
   "pdf": "build/polish-space-ch1-debug.pdf",
   "book": "src/polish-space-ch1.md",
   "bookManifest": "src/polish-space-ch1.json",
+  "previewSections": {
+    "_contents": "Contents",
+    "_index": "Index",
+    "_bibliography": "References"
+  },
   "bookSourcePrefix": "src/polish-space-book/",
   "leanSourcePrefix": "lean/PolishSpaceBook/",
   "leanRootModule": "lean/PolishSpaceBook.lean",

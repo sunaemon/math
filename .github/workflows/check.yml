@@ -27,14 +27,15 @@ concurrency:
 jobs:
   check:
     if: github.repository == 'sunaemon/math-private'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     # GITHUB_TOKEN lifts mise's unauthenticated GitHub API rate limit, used when
     # resolving github-backed tools — including the ghcup plugin that backs
     # ghc/cabal (registered by setup.sh; see its comment for why conda is avoided).
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # mathlib's olean cache (~7 GB unpacked + the download cache) plus TeX Live
       # and the toolchains overflow the runner's ~14 GB free disk. Drop large
@@ -45,21 +46,38 @@ jobs:
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h / | tail -1
 
-      # Provision the mise binary, put it on PATH, and cache the tool installs.
+      # Restore the complete setup state before provisioning. These caches are
+      # saved immediately after setup below, so a later lint/test failure cannot
+      # leave every subsequent run cold.
+      - name: Restore setup cache
+        id: setup-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.cache/mise
+            ~/.elan
+            .perllib
+          key: setup-${{ runner.os }}-ubuntu-24.04-${{ hashFiles('mise.toml', 'lean-toolchain', 'setup.sh') }}
+
+      # Provision the mise binary and put it on PATH. Tool installs are covered
+      # by the explicit setup cache above rather than mise-action's post-job
+      # cache, which is too late when a later step fails.
       # install: false defers the actual `mise install` to setup.sh below, so the
       # ghcup-backed ghc/cabal plugins it registers are in place before tools are
       # installed — mise's default conda GHC backend has no linux-64 candidate for
-      # the pinned 9.6.7.
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      # the pinned 9.14.1.
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5.2.3
         with:
-          cache: true
+          cache: false
           install: false
 
       # The repo-local TeX Live snapshot (~179 MB) is the heaviest input setup.sh
       # builds; cache it keyed on setup.sh (which pins the tlnet snapshot + package
       # set) so warm runs install nothing.
       - name: Cache TeX Live snapshot
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: texlive-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .texlive
           key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
@@ -67,7 +85,7 @@ jobs:
       # mathlib oleans: lake's download cache, so `lake exe cache get` is a no-op
       # on warm runs. Keyed on the pins that determine the mathlib build.
       - name: Cache mathlib build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/mathlib
           key: mathlib-${{ runner.os }}-${{ hashFiles('**/lake-manifest.json', 'lean-toolchain') }}
@@ -77,6 +95,27 @@ jobs:
       # snapshot, and the Lean toolchain.
       - name: Provision toolchain (mise tools + TeX Live + Lean)
         run: ./setup.sh --run
+
+      - name: Check provisioned toolchain
+        run: ./setup.sh --doctor
+
+      - name: Save setup cache
+        if: steps.setup-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.cache/mise
+            ~/.elan
+            .perllib
+          key: setup-${{ runner.os }}-ubuntu-24.04-${{ hashFiles('mise.toml', 'lean-toolchain', 'setup.sh') }}
+
+      - name: Save TeX Live snapshot
+        if: steps.texlive-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .texlive
+          key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
 
       - name: Lint
         run: make lint

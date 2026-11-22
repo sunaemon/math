@@ -20,7 +20,7 @@ The book is currently split into chapter files listed in `polish-space/src/polis
 From the repository root, extract the requested section with:
 
 ```sh
-python3 .codex/skills/book-section-review/scripts/extract_book_section.py "sec:label-or-title"
+python3 tools/extract_book_section.py "sec:label-or-title"
 ```
 
 By default this searches the chapter files listed in `polish-space/src/polish-space-book.json` and reports the matching split source file, for example `polish-space/src/polish-space-book/polish-spaces.md`.
@@ -28,7 +28,7 @@ By default this searches the chapter files listed in `polish-space/src/polish-sp
 To pass the source explicitly, use `--source`:
 
 ```sh
-python3 .codex/skills/book-section-review/scripts/extract_book_section.py --source polish-space/src/polish-space-book/polish-spaces.md "sec:label-or-title"
+python3 tools/extract_book_section.py --source polish-space/src/polish-space-book/polish-spaces.md "sec:label-or-title"
 ```
 
 The argument may be:
@@ -57,11 +57,21 @@ When a matching Lean file exists, use it as comparison evidence. The usual path 
 
 Also inspect any local `\lean{...}` annotations in the extracted section, because they are the strongest signal for intended correspondence between the prose proof and Lean declarations.
 
-Check the Lean file with the repository's Lean command before using it as evidence. In this workspace, if `lake` is not on `PATH`, use:
+Check the matching module from the repository root with the scoped runner:
 
 ```sh
-/opt/homebrew/bin/mise exec -- lake env lean polish-space/lean/PolishSpaceBook/PolishSpaces.lean
+make validate-lean LEAN_PROJECTS=polish-space LEAN_MODULES="PolishSpaceBook.PolishSpaces"
 ```
+
+Also gather plain coverage and the full exemption list with the pinned Python:
+
+```sh
+mise exec -- python3 tools/booklink_coverage.py polish-space/lean/PolishSpaceBook/PolishSpaces.lean
+mise exec -- python3 tools/booklink_coverage.py --show-exempt polish-space/lean/PolishSpaceBook/PolishSpaces.lean
+```
+
+Substitute the actual project/module. Read the master's notation-watch list.
+Mechanical coverage is evidence to review, not proof of mathematical adequacy.
 
 When comparing `.md` and Lean:
 
@@ -72,28 +82,8 @@ When comparing `.md` and Lean:
 - If Lean exposes a missing hypothesis, hidden case split, or proof-shape mismatch, report it as a source issue and identify the Lean declaration or gap that revealed it.
 - If a claim is intentionally external or proof-architecture-only in the book, say that Lean is out of scope rather than calling it a missing proof.
 
-## Review Checklist
+## Judgment review and output
 
-Prioritize findings that would justify a source change.
-
-- Mathematical correctness: false statements, missing hypotheses, circular reasoning, invalid proof steps, ambiguous quantifier scope, or mismatches between statement and proof.
-- Lean correspondence: whether the local `\lean{...}` declarations or chapter Lean file actually formalize the section, merely import/check, or encode a materially different proof.
-- Local coherence: whether definitions, examples, theorem-like statements, and transitions support the section's stated purpose.
-- Cross-references: stale, missing, misleading, or stylistically awkward references; prefer integrated references like "by §{sec:...}" over parenthesized references in running prose.
-- Notation and macros: use semantic macros from `polish-space/tex/macros.tex`; do not guess macro renderings for notation-heavy prose.
-- Indexing: use `\termdefine`, `\termdefineas`, `\termuse`, and `\termuseas` for important terms when the section defines or relies on them. A short informal use before the later formal definition is acceptable only when the informal occurrence itself uses `\termforward{...}` or `\termforwardas{...}{...}`; otherwise `\termuse{...}` before `\termdefine{...}` is a build error.
-- Theorem/proof form: use `amsthm` environments for genuine mathematical statements and proofs; use transitional labels only when a full conversion is not practical.
-- Prose style: avoid parentheticals that carry mathematical content or reading guidance; prefer direct predicate phrasing over compressed nominalizations.
-
-## Output Format
-
-Use a code-review stance:
-
-1. Findings first, ordered by severity.
-2. Each finding should cite the reviewed source file with a precise line number from the extracted section.
-3. Explain the issue and the concrete source-level fix or decision it calls for.
-4. Include Lean comparison evidence when available: command checked, matching declarations, whether the file is a stub, and whether Lean supports or weakens confidence in the `.md` proof.
-5. Add open questions only when they affect the recommendation.
-6. If no issues are found, say that clearly and mention any remaining residual risk, such as external references not checked or Lean coverage being stub-only.
-
-Do not include a broad summary before findings. Keep the review focused on the requested section rather than the whole book.
+Read `tools/book-section-review-checklist.md` and apply its full checklist and
+output contract. This is the canonical checklist shared with Claude Code.
+Review alone does not trigger a rendered book build.

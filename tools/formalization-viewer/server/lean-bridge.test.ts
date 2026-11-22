@@ -10,8 +10,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SessionRegistry } from "./lean-bridge.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { LeanBridge, SessionRegistry } from "./lean-bridge.ts";
 import type { BridgeLike, Sink } from "./lean-bridge.ts";
+
+import { terminate } from "./process-group.ts";
+import type { LeanProc, SpawnLean } from "./lsp-process.ts";
 
 const ROOT = "/repo";
 
@@ -166,4 +173,130 @@ test("overlapping sends reap only after the last completes", async () => {
   assert.ok(reg.reapers.has(sid));
   assert.equal(bridge.shutdowns, 0);
   clearReapers(reg);
+});
+
+// These tests use real lightweight Node children to check spawn failure and
+// reaping. They do not start a Lean compiler or depend on the Lake toolchain.
+const ECHO_CHILD = `
+const fs = require('node:fs');
+process.stdin.on('data', (chunk) => {
+  fs.appendFileSync(process.env.TEST_LSP_LOG, chunk);
+  const body = JSON.stringify({pid: process.pid});
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body);
+});
+setInterval(() => {}, 1000);
+`;
+
+function messages(bridge: LeanBridge): (pid: number) => Promise<void> {
+  const bodies: string[] = [];
+  let changed = (): void => {};
+  bridge.subscribe({
+    put(body) {
+      bodies.push(body);
+      changed();
+    },
+  });
+  return (pid) =>
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`No echo from child ${pid}`)), 5000);
+      const check = (): void => {
+        if (!bodies.includes(JSON.stringify({ pid }))) return;
+        clearTimeout(timer);
+        changed = () => {};
+        resolve();
+      };
+      changed = check;
+      check();
+    });
+}
+
+function childFactory(children: LeanProc[], failFirst = false): SpawnLean {
+  return (root) => {
+    const child = spawn(
+      failFirst && !children.length ? path.join(root, "missing-lake") : process.execPath,
+      ["-e", ECHO_CHILD],
+      {
+        cwd: root,
+        env: { ...process.env, TEST_LSP_LOG: path.join(root, "messages") },
+        stdio: ["pipe", "pipe", "ignore"],
+        detached: true,
+      },
+    );
+    children.push(child);
+    return child;
+  };
+}
+
+test("a real spawn failure rejects the send and the next initialize can recover", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-spawn-"));
+  const children: LeanProc[] = [];
+  const bridge = new LeanBridge(root, childFactory(children, true));
+  const echo = messages(bridge);
+  try {
+    const initialize = JSON.stringify({ method: "initialize", params: { note: "日本語" } });
+    await assert.rejects(bridge.send(initialize), /ENOENT/);
+    assert.equal(bridge.running(), false);
+    await bridge.send(initialize);
+    await echo(children[1].pid!);
+    assert.equal(bridge.running(), true);
+    assert.equal(
+      fs.readFileSync(path.join(root, "messages"), "utf-8"),
+      `Content-Length: ${Buffer.byteLength(initialize)}\r\n\r\n${initialize}`,
+    );
+  } finally {
+    await bridge.shutdown();
+    await Promise.all(children.map(terminate));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent initializes reap every predecessor and shutdown reaps the final child", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-restarts-"));
+  const children: LeanProc[] = [];
+  const bridge = new LeanBridge(root, childFactory(children));
+  const echo = messages(bridge);
+  try {
+    const initialize = JSON.stringify({ method: "initialize" });
+    await bridge.send(initialize);
+    await echo(children[0].pid!);
+    await Promise.all([bridge.send(initialize), bridge.send(initialize)]);
+    await echo(children[2].pid!);
+    assert.equal(children.length, 3);
+    assert.ok(children.slice(0, -1).every((child) => child.exitCode !== null || child.signalCode !== null));
+    await bridge.shutdown();
+    assert.ok(children.every((child) => child.exitCode !== null || child.signalCode !== null));
+    assert.equal(bridge.running(), false);
+  } finally {
+    await bridge.shutdown();
+    await Promise.all(children.map(terminate));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session cannot silently send to a different running project", async () => {
+  const registry = newRegistry();
+  await registry.send("same-tab", "message", ROOT);
+  const bridge = registry.bridges.get("same-tab") as StubBridge;
+  await assert.rejects(registry.send("same-tab", "message", "/other-project"), /another project/);
+  assert.equal(bridge.root, ROOT);
+  clearReapers(registry);
+  await registry.shutdownAll();
+});
+
+test("a root choice is reserved during the first queued send, before its child spawns", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-project-"));
+  const children: LeanProc[] = [];
+  const registry = new SessionRegistry(ROOT, (initial) => new LeanBridge(initial, childFactory(children)));
+  registry.subscribe("tab", { put() {} });
+  try {
+    const first = registry.send("tab", JSON.stringify({ method: "initialize" }), root);
+    await assert.rejects(registry.send("tab", "other", path.join(root, "other")), /another project/);
+    await first;
+    assert.equal(registry.bridges.get("tab")!.root, root);
+    assert.equal(children.length, 1);
+  } finally {
+    await registry.shutdownAll();
+    await Promise.all(children.map(terminate));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -1,0 +1,3 @@
+# Keep gettext source filenames visible while ignoring reference line numbers.
+*.po diff=gettext
+*.pot diff=gettext

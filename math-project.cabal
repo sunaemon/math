@@ -5,7 +5,30 @@ license:            MIT
 
 executable book-filter
     main-is:          Main.hs
-    other-modules:    DependencyGraph
+    other-modules:    OperatorProbe
+                      ProbeTemplates
+                      OperatorEvidence
+                      ProofContexts
+                      ContextTemplates
+                      Correspondence
+                      ChapterPreparation
+                      FormulaAnchors
+                      LeanSourceRanges
+                      StructuralSyntax
+                      VariableResolution
+                      SourceScopes
+                      SourceJSON
+                      SourceNormalization
+                      SemanticExpr
+                      SemanticAST
+                      SemanticTrace
+                      ChapterMappingRules
+                      SemanticTranslation
+                      SemanticInspection
+                      LocatedMath
+                      MathSyntaxCLI
+                      MathSyntax
+                      DependencyGraph
                       SectionRef
     hs-source-dirs:   tools/book-filter
     -- -Wall surfaces high-value warnings (incomplete patterns, unused imports
@@ -15,21 +38,42 @@ executable book-filter
     -- used only in sibling equations.
     ghc-options:      -Wall -Wno-type-defaults -Wno-unused-matches
     build-depends:
-        base ^>= 4.18.2.1,
+        base ^>= 4.22.0.0,
         pandoc-types,
+        aeson,
+        bytestring,
+        process,
         text,
         containers,
         directory,
-        time
+        time,
+        template-haskell
     default-language: Haskell2010
 
 test-suite book-filter-golden
     type:             exitcode-stdio-1.0
     main-is:          run-book-filter-golden.hs
     hs-source-dirs:   tests
+                     tools/book-filter
+    other-modules:   SemanticExprTests
+                     SemanticExpr
+                     SemanticAST
+                     SemanticTrace
+                     ChapterMappingRules
+                     LocatedMath
+                     MathSyntax
+                     DependencyGraphTests
+                     DependencyGraph
+                     SectionRef
     build-depends:
-        base ^>= 4.18.2.1,
+        base ^>= 4.22.0.0,
+        aeson,
         directory,
         filepath,
-        process
+        process,
+        pandoc-types,
+        text,
+        containers,
+        time,
+        template-haskell
     default-language: Haskell2010

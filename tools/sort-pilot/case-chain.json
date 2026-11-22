@@ -1,0 +1,69 @@
+{
+  "id": "chain",
+  "source": "polish-space/src/polish-space-book/effective-dst-ranks-effective-refinements.md",
+  "startAnchor": "For failure of well-foundedness, let a witness $q$ store",
+  "endAnchor": "An expression is invalid exactly when syntax fails",
+  "bindings": [
+    {
+      "symbol": "q",
+      "declaration": "SortPilot.chainWord",
+      "slot": 0,
+      "leanType": "ℕ → ℕ",
+      "occurrence": "q(n)"
+    },
+    {
+      "symbol": "n",
+      "declaration": "SortPilot.chainWord",
+      "slot": 1,
+      "leanType": "ℕ",
+      "occurrence": "n"
+    },
+    {
+      "symbol": "s_n",
+      "declaration": "SortPilot.chainWord",
+      "slot": "result",
+      "leanType": "List ℕ",
+      "occurrence": "s_n"
+    },
+    {
+      "symbol": "k_n",
+      "declaration": "SortPilot.chainChild",
+      "slot": "result",
+      "leanType": "ℕ",
+      "occurrence": "k_n"
+    }
+  ],
+  "expressions": [
+    {
+      "book": "q(n)=\\NatPair{\\LambdaListCode{s_n}}{k_n}",
+      "lean": "SortPilot.chainCode",
+      "interpretation": "The decoded word and child index reconstruct the witness entry."
+    },
+    {
+      "book": "k_n",
+      "lean": "SortPilot.chainChild",
+      "interpretation": "Second unpaired coordinate is the next child index."
+    },
+    {
+      "book": "s_{n+1}=s_n\\concat(k_n)",
+      "lean": "SortPilot.chainRow",
+      "interpretation": "Both nodes are present, and the next word extends the current word by one child."
+    },
+    {
+      "book": "failure of well-foundedness",
+      "lean": "SortPilot.chainWitness",
+      "interpretation": "Existence of a witness is equivalent to non-well-foundedness; no computable choice is asserted."
+    }
+  ],
+  "leanFingerprints": {
+    "SortPilot.chainCode": "c4d824f123b36960b922a18a31a83e38e73bf4ac4c6d80ce09c1854274b2db7c",
+    "SortPilot.chainWord": "b62b064fa86a1aa313196cdd2aa05d07e06231a12a0c68ca2b10905989c436c2",
+    "SortPilot.chainChild": "9a1caf520f920136e165941a2337c8f6a62372d13090cdbbf9c31a7d50aa0860",
+    "SortPilot.chainRow": "6926f9646e9def3033e72bc03ebe71d0942b02db471c46bcb78888919402d3f9",
+    "SortPilot.chainWitness": "fdb1904f8c33a9669f272542f521992427b0213e85306d47ee15231ee64d87ca",
+    "PolishSpaceBook.BorelExpression.finiteChainClause": "12bff8ee8a3f308b26a2a212d3b36b524897cda754440b73f45780bbf0c48901",
+    "PolishSpaceBook.BorelExpression.projected_not_wellFounded": "9dfa0fd453eb49d4099029ff5b4e1cf1655b9ec512f4a771b8a1e0933e804e88"
+  },
+  "badSlot": 1,
+  "sourceHash": "8114871537301daeecb25273aa7573e61caccc121dc7e825d885cd439b2140c0"
+}

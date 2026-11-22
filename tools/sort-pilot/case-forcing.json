@@ -1,0 +1,233 @@
+{
+  "id": "forcing",
+  "source": "polish-space/src/polish-space-book/appendix-forcing.md",
+  "startAnchor": "\\begin{proposition*}[Ordinal preservation]",
+  "endAnchor": "The proof separates the external rank estimate",
+  "expressions": [
+    {
+      "book": "M",
+      "lean": "SortPilot.ordinalSourceProof",
+      "interpretation": "M : ZFSet; hM : M.IsTransitive; six axiom/schema assumptions below.",
+      "term": "M"
+    },
+    {
+      "book": "P\\in M",
+      "lean": "SortPilot.ordinalSourceProof",
+      "interpretation": "hP : P ∈ M.",
+      "term": "P ∈ M"
+    },
+    {
+      "book": "\\varnothing\\ne G\\IncludedIn P",
+      "lean": "SortPilot.checkValue",
+      "interpretation": "hne : G.Nonempty and hsub : ∀ p ∈ G, p ∈ P yield ∃ p ∈ G, p ∈ P.",
+      "term": "G.Nonempty ∧ ∀ p ∈ G, p ∈ P"
+    },
+    {
+      "book": "\\mathrm{Ord}^{M[G]}=\\mathrm{Ord}^M.",
+      "lean": "SortPilot.ordinalClasses",
+      "interpretation": "External ordinal subclasses are equal by extensionality of pointwise membership. internalOrdinal and extension_isTransitive justify the internal reading.",
+      "term": "{α : ZFSet.{0} | α ∈ extension P M G ∧ α.IsOrdinal} = {α : ZFSet.{0} | α ∈ M ∧ α.IsOrdinal}"
+    },
+    {
+      "book": "\\alpha\\in M[G]",
+      "lean": "PolishSpaceBook.ForcingNames.mem_extension",
+      "interpretation": "hα : α.IsOrdinal and hαE : α ∈ extension P M G. Ordinalhood comes from prose.",
+      "term": "α ∈ extension P M G"
+    },
+    {
+      "book": "\\alpha=\\tau^G",
+      "lean": "PolishSpaceBook.ForcingNames.mem_extension",
+      "interpretation": "he : valuation G τ = α. Equality is reversed from the printed orientation.",
+      "term": "α = valuation G τ"
+    },
+    {
+      "book": "\\tau\\in M^P",
+      "lean": "PolishSpaceBook.ForcingNames.mem_extension",
+      "interpretation": "Extract τ ∈ M and IsName P τ. M^P is not a separate Lean type.",
+      "term": "τ ∈ M ∧ IsName P τ"
+    },
+    {
+      "book": "\\alpha\\le\\mathrm{rank}(\\tau).",
+      "lean": "PolishSpaceBook.ForcingNames.rank_valuation_le",
+      "interpretation": "First α.rank ≤ τ.rank via he; β := τ.rank.toZFSet has rank τ.rank. For ordinal sets this means α ⊆ β, hence the printed ordinal ≤.",
+      "unresolvedReason": "The printed ≤ mixes a ZFSet ordinal with Ordinal rank. The proof bridge is checked, but choosing α.rank ≤ τ.rank versus α ⊆ τ.rank.toZFSet needs an explicit expression-level convention."
+    },
+    {
+      "book": "\\beta:=\\mathrm{rank}(\\tau)\\in M",
+      "lean": "PolishSpaceBook.SetTheoryModels.rank_mem_of_axioms",
+      "interpretation": "Use a := ⟨τ,hτM⟩ : M. Result β := τ.rank.toZFSet ∈ M; β.IsOrdinal and β.rank = τ.rank are explicit Lean facts.",
+      "unresolvedReason": "This formula introduces β and asserts membership; it is not a single ordinary term. The checked proof uses β := τ.rank.toZFSet, but the inventory does not yet represent binding effects."
+    },
+    {
+      "book": "\\alpha=\\beta",
+      "lean": "PolishSpaceBook.ForcingNames.ordinal_valuation_mem_ground",
+      "interpretation": "ZFSet.IsOrdinal.subset_iff_eq_or_mem gives the equality branch α = β.",
+      "term": "α = β"
+    },
+    {
+      "book": "\\alpha\\in\\beta",
+      "lean": "PolishSpaceBook.ForcingNames.ordinal_valuation_mem_ground",
+      "interpretation": "The same disjunction gives α ∈ β in the other branch.",
+      "term": "α ∈ β"
+    },
+    {
+      "book": "\\alpha\\in M",
+      "lean": "PolishSpaceBook.ForcingNames.ordinal_valuation_mem_ground",
+      "interpretation": "Equality substitution or hM.mem_trans with hβM yields α ∈ M.",
+      "term": "α ∈ M"
+    },
+    {
+      "book": "\\check{\\alpha}^G=\\alpha",
+      "lean": "SortPilot.checkValue",
+      "interpretation": "check P α ∈ M from check_mem_of_axioms; check_isName supplies its name predicate; valuation_check gives the equality.",
+      "term": "valuation G (check P α) = α"
+    },
+    {
+      "book": "M[G]",
+      "lean": "SortPilot.ordinalSourceProof",
+      "interpretation": "Reverse direction constructs extension membership from check P α. Both domains are transitive; internalOrdinal identifies the internal predicate.",
+      "term": "extension P M G"
+    }
+  ],
+  "leanFingerprints": {
+    "PolishSpaceBook.ForcingNames.check_isName": "dc4f3759df37bd1f061794ad504e194d21e0d8f8ebdd39356369c022d6d528ea",
+    "PolishSpaceBook.ForcingNames.extension_isTransitive": "d7b1bb7c377252d4be65fe233b93b91ce0b4baa3ebe5cdf0a41cbeefe121e8a8",
+    "PolishSpaceBook.ForcingNames.mem_extension": "c736342521f476a24e223153aa2b7725913ef41f4f2d54b839227fbf44d78bd4",
+    "PolishSpaceBook.ForcingNames.ordinal_valuation_mem_ground": "04c6f6855cf5f45320bd989bc12c14cd9f5136b4f57c41397d0bf79a49672abf",
+    "PolishSpaceBook.ForcingNames.rank_valuation_le": "6d5fc789cd0592bff76be8e6d6ff41b29890369764d138d5a894e42b82bbb260",
+    "PolishSpaceBook.ForcingNames.valuation_check": "837cfcc4b46eaa121b2468946b346d69f944cdc3585b0b17f4c16835a77f7a87",
+    "PolishSpaceBook.SetTheoryModels.check_mem_of_axioms": "90afb75fc5b3a1768848f62fcdde94bb675f2eb5d8f4bfc46d3718c46cace320",
+    "PolishSpaceBook.SetTheoryModels.ordinal_mem_extension_iff_of_axioms": "0d3760c8f9bd9969559ac98124a5f7effcc451856623177ff7af5cd2104bfa48",
+    "PolishSpaceBook.SetTheoryModels.rank_mem_of_axioms": "d6ea8a45d15ca6520e72aee43aa1e39d43d4f6d010b8648f2b1c58b09cff2ba8",
+    "PolishSpaceBook.SetTheoryModels.realize_ordinalFormula": "7b9fe659573e27fbd5967b12c4fe1f83da5bd95ab44a4c08df5d2723911eff28",
+    "SortPilot.checkValue": "b7e4c293bd5368eb6710a98016cdf7bf45ae008a23a48a55f012bec8ef1cb5f0",
+    "SortPilot.forcingBound": "30d64602028d0e72ed7f44a2d6946bfc9de25ed8ce9b41e48f203b4d333f2677",
+    "SortPilot.forcingValue": "7853f895a733400e47236a3aedf4683793aa71fc5d605a67991efe06966ca611",
+    "SortPilot.internalOrdinal": "d80dd625098855c7b971656d4b071fada3f16cd2939b0543df31ec9bb15931f1",
+    "SortPilot.ordinalClasses": "d59752053bca035fc0420b372483ef36f5c71813f4fe054383d87b0fc11bf50b",
+    "SortPilot.ordinalSourceProof": "433ab5bbde2eb0d04e3537f11dc56a6557b35c9d983c2a8b375cbd1116273191",
+    "SortPilot.rankBridge": "170e65e798ace554569a2d018b17b7459eb80f66c5a83eed52283830dec09f2d",
+    "SortPilot.rankOrdinal": "be64efc379d0ef9f66f07daa45fd87b3876131293cfa89142aa0794e7e7faa12",
+    "SortPilot.ordinalSourceClasses": "0a90efe64921fa8c74430cf17adc6d8387f087c36c18976a0c573fe3e5c1cc75",
+    "SortPilot.internalExtensionOrdinal": "4d968d2392077df1132dc552de007e38c60e3f82b3e031d1e36943eb61895683"
+  },
+  "sourceHash": "2cb35bcba1618f9aff7383348d4f9d5b89d485c73aff204c2163cd02955e986f",
+  "coverage": {
+    "mode": "complete-dollar-math",
+    "sourceReview": "Reviewed against the complete proposition and proof. Formula/role interpretations are human judgments, not inferred from prose.",
+    "proof": "SortPilot.ordinalSourceProof",
+    "support": [
+      "SortPilot.ordinalClasses",
+      "SortPilot.internalOrdinal",
+      "PolishSpaceBook.ForcingNames.extension_isTransitive",
+      "SortPilot.ordinalSourceClasses",
+      "SortPilot.internalExtensionOrdinal"
+    ],
+    "assumptions": [
+      {
+        "binder": "hM",
+        "source": "transitive",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hinf",
+        "source": "Infinity",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hpair",
+        "source": "Pairing",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hunion",
+        "source": "Union",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hpower",
+        "source": "Power Set",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hsep",
+        "source": "Separation",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hrep",
+        "source": "Replacement",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hP",
+        "source": "P\\in M",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hne",
+        "source": "\\varnothing\\ne G\\IncludedIn P",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hsub",
+        "source": "\\varnothing\\ne G\\IncludedIn P",
+        "origin": "proposition premise"
+      },
+      {
+        "binder": "hα",
+        "source": "an ordinal",
+        "origin": "proof restriction to arbitrary ordinal"
+      }
+    ],
+    "boundArguments": [
+      {
+        "binder": "M",
+        "argument": "M"
+      },
+      {
+        "binder": "τ",
+        "argument": "τ from mem_extension"
+      },
+      {
+        "binder": "α",
+        "argument": "α"
+      },
+      {
+        "binder": "β",
+        "argument": "τ.rank.toZFSet"
+      },
+      {
+        "binder": "hM",
+        "argument": "hM"
+      },
+      {
+        "binder": "G",
+        "argument": "G"
+      },
+      {
+        "binder": "hα",
+        "argument": "hα"
+      },
+      {
+        "binder": "hβ",
+        "argument": "ZFSet.isOrdinal_toZFSet τ.rank"
+      },
+      {
+        "binder": "hβM",
+        "argument": "rank_mem_of_axioms … ⟨τ,hτM⟩"
+      },
+      {
+        "binder": "hτβ",
+        "argument": "by rw [Ordinal.rank_toZFSet]"
+      },
+      {
+        "binder": "he",
+        "argument": "he from mem_extension, reversed printed equality"
+      }
+    ],
+    "boundDeclaration": "PolishSpaceBook.ForcingNames.ordinal_valuation_mem_ground"
+  },
+  "sourceScope": "ordinal-preservation",
+  "annotationHash": "e4deb1c746aff042a40c9137ef266bc24cc9a1c8e1ff7d78e7608f48993e0935"
+}

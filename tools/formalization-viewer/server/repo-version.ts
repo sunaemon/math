@@ -15,7 +15,7 @@ import path from "node:path";
 // come from on-disk config (a project manifest.json, vendor/manifest.json), so
 // this keeps a stray "../../etc/passwd" entry from inlining an out-of-repo file
 // into the served manifest. Returns null on escape or a non-existent path.
-function resolveWithinRoot(root: string, rel: string): string | null {
+export function resolveWithinRoot(root: string, rel: string): string | null {
   const abs = path.join(root, rel);
   const within = path.relative(root, abs);
   if (within.startsWith("..") || path.isAbsolute(within)) return null;
@@ -36,11 +36,12 @@ export interface RepoVersion {
   date: string;
 }
 
-export function repoVersion(root = "."): RepoVersion {
+function readRepoVersion(root: string): RepoVersion {
   const git = (...args: string[]): string => {
     try {
       return execFileSync("git", ["-C", root, ...args], {
         encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     } catch {
       return "";
@@ -56,12 +57,35 @@ export function repoVersion(root = "."): RepoVersion {
   };
 }
 
+// A short TTL preserves live commit/dirty-state updates without synchronously
+// spawning three git processes for every tab's manifest request.
+export function cachedRepoVersion(
+  read: (root: string) => RepoVersion = readRepoVersion,
+  now: () => number = Date.now,
+  ttlMs = 1000,
+): (root?: string) => RepoVersion {
+  const cache = new Map<string, { value: RepoVersion; expires: number }>();
+  return (root = ".") => {
+    const key = path.resolve(root);
+    let cached = cache.get(key);
+    if (!cached || now() >= cached.expires) {
+      const value = read(key);
+      cached = { value, expires: now() + ttlMs };
+      cache.set(key, cached);
+    }
+    return { ...cached.value };
+  };
+}
+
+export const repoVersion = cachedRepoVersion();
+
 interface LicenseItem {
   file?: string;
   text?: string;
   [key: string]: unknown;
 }
 interface LicenseObject {
+  vendorManifests?: string[];
   items?: LicenseItem[];
   [key: string]: unknown;
 }
@@ -90,6 +114,7 @@ export function attachLicenseText<T>(root: string, licenseObj: T): T {
 }
 
 interface VendorComponent {
+  distribution?: "static" | "build-only";
   name: string;
   version: string;
   spdx: string;
@@ -99,7 +124,7 @@ interface VendorComponent {
 
 const VENDOR_REL = "tools/formalization-viewer/vendor";
 
-// Expand the vendored components (vendor/manifest.json) into license items so the
+// Expand the viewer vendor manifest and the book's declared vendorManifests into license items so the
 // About panel lists each one — name, version, SPDX, source, and its license text
 // — instead of a single opaque notices blob. Appends to licenseObj.items; the
 // caller then runs attachLicenseText to inline each item's license file. Both the
@@ -107,22 +132,32 @@ const VENDOR_REL = "tools/formalization-viewer/vendor";
 export function appendVendorComponents<T>(root: string, licenseObj: T): T {
   if (licenseObj === null || typeof licenseObj !== "object") return licenseObj;
   const obj = licenseObj as LicenseObject;
-  let components: VendorComponent[];
-  try {
-    const manifest = JSON.parse(readFileSync(path.join(root, VENDOR_REL, "manifest.json"), "utf-8"));
-    components = Array.isArray(manifest.components) ? manifest.components : [];
-  } catch {
-    return licenseObj;
-  }
   const items = (obj.items ??= []);
-  for (const component of components) {
-    items.push({
-      scope: component.name,
-      version: component.version,
-      spdx: component.spdx,
-      source: component.homepage,
-      file: component.licenseFile ? `${VENDOR_REL}/${component.licenseFile}` : undefined,
-    });
+  const manifests = new Set([`${VENDOR_REL}/manifest.json`, ...(obj.vendorManifests ?? [])]);
+  for (const rel of manifests) {
+    const file = resolveWithinRoot(root, rel);
+    if (!file) continue;
+    let components: VendorComponent[];
+    try {
+      const manifest = JSON.parse(readFileSync(file, "utf-8"));
+      components = Array.isArray(manifest.components) ? manifest.components : [];
+    } catch {
+      continue;
+    }
+    for (const component of components) {
+      if (component.distribution === "build-only") continue;
+      const licenseFile = component.licenseFile
+        ? path.posix.normalize(path.posix.join(path.posix.dirname(rel), component.licenseFile))
+        : undefined;
+      if (items.some((item) => item.scope === component.name && item.file === licenseFile)) continue;
+      items.push({
+        scope: component.name,
+        version: component.version,
+        spdx: component.spdx,
+        source: component.homepage,
+        file: licenseFile,
+      });
+    }
   }
   return licenseObj;
 }
@@ -132,6 +167,10 @@ function readBraced(text: string, i: number): [string, number] {
   let depth = 0;
   let j = i;
   while (j < text.length) {
+    if (text[j] === "\\") {
+      j += 2;
+      continue;
+    }
     if (text[j] === "{") {
       depth += 1;
     } else if (text[j] === "}") {
@@ -179,7 +218,16 @@ export function katexMacros(macrosTexPath: string): Record<string, string> {
     }
     if (i < text.length && text[i] === "{") {
       const [body] = readBraced(text, i);
-      macros[name] = body.trim();
+      // KaTeX's native big operators already implement display-only limits.
+      // Removing this redundant TeX wrapper preserves inline side scripts and
+      // display under/over scripts; replacing displaylimits with limits would
+      // incorrectly force under/over placement in inline mathematics.
+      macros[name] = body
+        .trim()
+        .replace(
+          /\\mathop\s*\{\s*(\\(?:bigsqcup|biguplus|bigcup|bigcap|bigvee|bigwedge|bigoplus|bigotimes|bigodot|sum|prod|coprod))\s*\}\s*\\displaylimits\b/g,
+          "$1",
+        );
     }
   }
   return macros;

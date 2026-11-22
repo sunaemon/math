@@ -1,23 +1,93 @@
 \usepackage{amssymb}
 \usepackage{amsthm}
 \usepackage{fancyhdr}
+% A link split across pages must not acquire rectangles on the running page
+% number. LuaTeX otherwise carries the open link into the header/footer boxes.
+\ExplSyntaxOn
+\sys_if_engine_luatex:T
+  {
+    \AddToHook{begindocument/end}
+      {
+        \cs_set_protected:cpn {pdfannot@link@off@@}
+          {\tex_pdfextension:D linkstate 1 ~}
+        \cs_set_protected:cpn {pdfannot@link@on@@}
+          {\tex_pdfextension:D linkstate 0 ~}
+      }
+  }
+\ExplSyntaxOff
 \usepackage{xcolor}
+% Viewer-only dark renders use their own jobname and auxiliaries. Colors do not
+% change page geometry, so the same source map and named destinations apply.
+\ifdefined\BookDarkMode
+  \definecolor{BookDarkBackground}{HTML}{002B36}
+  \definecolor{BookDarkForeground}{HTML}{93A1A1}
+  \definecolor{BookDarkLink}{HTML}{268BD2}
+  \PassOptionsToPackage{colorlinks=true}{hyperref}
+  \AddToHook{package/hyperref/after}{%
+    \hypersetup{allcolors=BookDarkLink,pdfborder={0 0 0}}%
+  }
+  \AtBeginDocument{%
+    \pagecolor{BookDarkBackground}%
+    \color{BookDarkForeground}%
+  }
+\fi
 \usepackage{tikz}
-\usetikzlibrary{graphs,graphdrawing,fit,backgrounds}
-\usegdlibrary{force}
+\usetikzlibrary{backgrounds}
 
 % A5 pages are too narrow for robust running section titles, especially
 % with long mathematical headings. Use quiet page-number headers instead.
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[LE,RO]{\thepage}
+\newcommand{\BookPageNumber}{%
+  \ifdefined\BookDarkMode\textcolor{BookDarkForeground}{\thepage}%
+  \else\thepage\fi
+}
+\fancyhead[LE,RO]{\BookPageNumber}
 \renewcommand{\headrulewidth}{0pt}
 \fancypagestyle{plain}{%
   \fancyhf{}%
-  \fancyfoot[C]{\thepage}%
+  \fancyfoot[C]{\BookPageNumber}%
   \renewcommand{\headrulewidth}{0pt}%
 }
 \emergencystretch=2em
+
+% Short display headings should not stretch their word spaces to fill A5 lines.
+% The Japanese class supplies its own heading layout.
+\usepackage{etoolbox}
+\makeatletter
+% Pandoc 3.12 sets a table-caption skip even for uncaptioned tables.
+% Apply the same skip inside table environments, where it is used locally,
+% instead of leaving a pending table-specific setup that caption warns about.
+\AtBeginDocument{%
+\@ifpackageloaded{caption}{%
+  \clearcaptionsetup{table}%
+  \AddToHook{env/table/begin}{\captionsetup{skip=6pt}}%
+  \AddToHook{env/longtable/begin}{\captionsetup{skip=6pt}}%
+}{}%
+}
+\@ifclassloaded{book}{%
+  \patchcmd{\section}{\bfseries}{\bfseries\raggedright}{}%
+    {\PackageError{book-layout}{Cannot set section alignment}{Check the book class definition.}}%
+  \patchcmd{\subsection}{\bfseries}{\bfseries\raggedright}{}%
+    {\PackageError{book-layout}{Cannot set subsection alignment}{Check the book class definition.}}%
+  \patchcmd{\subsubsection}{\bfseries}{\bfseries\raggedright}{}%
+    {\PackageError{book-layout}{Cannot set subsubsection alignment}{Check the book class definition.}}%
+}{}
+\makeatother
+
+% Long English index headings must wrap within the narrow A5 columns.
+% Keep their word spacing natural instead of justifying each index entry.
+\AddToHook{env/theindex/begin}{\raggedright}
+
+% Match the standard section-reference display when the target is included;
+% keep descriptive fallback wording for targets omitted from chapter excerpts.
+\newcommand{\BookSectionLink}[2]{%
+  \ifcsname r@#1\endcsname
+    \hyperref[#1]{§~\nameref*{#1}}%
+  \else
+    #2%
+  \fi
+}
 
 % Emit an index hyperlink target only once, even if the same term or notation
 % is defined in more than one indexed place.
@@ -29,6 +99,12 @@
   }{}%
 }
 \makeatother
+% Read notation entries before \index changes catcodes, then turn the entire
+% payload into characters. This produces identical makeindex keys in ordinary
+% paragraphs and inside already-tokenized theorem arguments or emphasis.
+\DeclareRobustCommand{\BookNotationIndex}[1]{%
+  \expandafter\index\expandafter{\detokenize{#1}}%
+}
 \newcommand{\notationindexpage}[2]{\indexhypertarget{#1}\hyperpage{#2}}
 \newcommand{\termindexpage}[2]{\indexhypertarget{#1}\hyperpage{#2}}
 \makeatletter
@@ -48,9 +124,27 @@
 % content character (already horizontal mode, already exact); forcing \leavevmode
 % there could open a stray paragraph.
 \newcommand{\booklinkanchor}[1]{\hypertarget{#1}{}}
-\newcommand{\booklinkanchorhere}[1]{\leavevmode\hypertarget{#1}{}}
+% Debug-only source identity on math nodes; the Lua shipout callback adds
+% balanced PDF marked content without altering mathematical layout.
+\DeclareRobustCommand{\BookFormulaStart}[1]{%
+  \ifbooklinkhighlight
+    \directlua{if not book_formula_overlay then dofile("polish-space/tex/formula-overlays.lua") end; book_formula_overlay.start("#1")}\fi}
+\DeclareRobustCommand{\BookFormulaEnd}[1]{%
+  \ifbooklinkhighlight\directlua{book_formula_overlay.finish()}\fi}
+% Preserve TeX's normal suppression of leading spaces when opening a paragraph.
+% In an existing horizontal list, spaces following an inline marker stay meaningful.
+\newcommand{\booklinkanchorhere}[1]{%
+  \ifhmode\hypertarget{#1}{}%
+  \else\leavevmode\hypertarget{#1}{}\expandafter\ignorespaces\fi
+}
 \makeatother
 \ExplSyntaxOn
+\cs_new_protected:Npn \booklinkstartanchor #1
+  {
+    \peek_meaning_remove:NTF \item
+      { \item \booklinkanchorhere {#1} }
+      { \booklinkanchorhere {#1} }
+  }
 \int_new:N \l__booklink_entry_int
 \keys_define:nn { booklink }
   {
@@ -64,7 +158,8 @@
 % color the text itself: the viewer's per-kind overlay is the single source of
 % booklink coloring, so the rendered PDF stays visually clean. The anchors are
 % un-raised (see \booklinkanchor above) so their coordinates are the exact span
-% boundaries.
+% boundaries. The mandatory names list and the kind key are metadata; TeX
+% deliberately does not render them.
 % At a list-item start the span begins with \item; \leavevmode *before* \item adds
 % horizontal material ahead of it and breaks the list ("missing \item"). So when an
 % \item is next, let it run first, then force horizontal mode (safe now) for the
@@ -73,9 +168,7 @@
 \NewDocumentCommand{\BooklinkStart}{O{}m}
   {
     \keys_set:nn { booklink } { entry=0, #1 }
-    \peek_meaning_remove:NTF \item
-      { \item \exp_args:Nx \booklinkanchorhere { booklink-entry-\int_use:N \l__booklink_entry_int } }
-      { \exp_args:Nx \booklinkanchorhere { booklink-entry-\int_use:N \l__booklink_entry_int } }
+    \exp_args:Nx \booklinkstartanchor { booklink-entry-\int_use:N \l__booklink_entry_int }
   }
 \NewDocumentCommand{\BooklinkEnd}{O{}m}
   {
@@ -87,10 +180,13 @@
 % Formalization-skip anchors. The book filter wraps each `formalization: skip`
 % region with \SkipStart{key}/\SkipEnd{key}; these drop zero-width hypertargets
 % (skip-key-start / skip-key-end) so the formalization viewer can resolve the
-% region's PDF coordinates and draw an overlay band. Gated on the same debug
-% flag as the Booklink coloring, so the released book emits nothing and stays
+% region's PDF coordinates and draw an overlay band. Gated on the
+% booklink-highlight debug flag, so the released book emits nothing and stays
 % unchanged; only the booklink-highlight (debug) PDF carries the anchors.
-\newcommand{\SkipStart}[1]{\ifbooklinkhighlight\hypertarget{skip-#1-start}{}\fi}
+\ExplSyntaxOn
+\NewDocumentCommand{\SkipStart}{m}
+  { \legacy_if:nT { booklinkhighlight } { \booklinkstartanchor {skip-#1-start} } }
+\ExplSyntaxOff
 \newcommand{\SkipEnd}[1]{\ifbooklinkhighlight\hypertarget{skip-#1-end}{}\fi}
 
 % Theorem/proof structure. Use these environments for genuine mathematical
@@ -98,34 +194,57 @@
 % **Theorem.**, **Lemma.**, **Corollary.**, **Claim.**, or **Proof.**.
 % They are unnumbered for now so source cleanup does not change the book's
 % visible numbering scheme.
-\theoremstyle{plain}
-\newtheorem*{theorem*}{Theorem}
-\newtheorem*{lemma*}{Lemma}
-\newtheorem*{proposition*}{Proposition}
-\newtheorem*{corollary*}{Corollary}
-\newtheorem*{claim*}{Claim}
-\newtheorem*{fact*}{Fact}
+% The names are locale hooks: the English book uses these defaults, while a
+% translated master may define them before loading this shared macro file.
+\providecommand{\BookTheoremName}{Theorem}
+\providecommand{\BookLemmaName}{Lemma}
+\providecommand{\BookPropositionName}{Proposition}
+\providecommand{\BookCorollaryName}{Corollary}
+\providecommand{\BookClaimName}{Claim}
+\providecommand{\BookFactName}{Fact}
+\providecommand{\BookRecallName}{Recall}
+\providecommand{\BookDefinitionName}{Definition}
+\providecommand{\BookExampleName}{Example}
+\providecommand{\BookConstructionName}{Construction}
+\providecommand{\BookRemarkName}{Remark}
+\providecommand{\BookStatementName}{Statement}
+% A translated master can select upright statement bodies, while the English
+% default retains amsthm's italic plain style.
+\providecommand{\BookTheoremStyle}{plain}
+\theoremstyle{\BookTheoremStyle}
+\newtheorem*{theorem*}{\BookTheoremName}
+\newtheorem*{lemma*}{\BookLemmaName}
+\newtheorem*{proposition*}{\BookPropositionName}
+\newtheorem*{corollary*}{\BookCorollaryName}
+\newtheorem*{claim*}{\BookClaimName}
+\newtheorem*{fact*}{\BookFactName}
 \theoremstyle{definition}
-\newtheorem*{recall*}{Recall}
-\newtheorem*{definition*}{Definition}
-\newtheorem*{example*}{Example}
-\newtheorem*{construction*}{Construction}
-\newtheorem*{remark*}{Remark}
+\newtheorem*{recall*}{\BookRecallName}
+\newtheorem*{definition*}{\BookDefinitionName}
+\newtheorem*{example*}{\BookExampleName}
+\newtheorem*{construction*}{\BookConstructionName}
+\newtheorem*{remark*}{\BookRemarkName}
 
 % Generic amsthm environment for statement headings that do not fit one of the
-% named theorem-like environments above.
-\newtheorem*{statement*}{Statement}
+% named theorem-like environments above. Its upright definition style is
+% intentional: it also presents named axioms and logical principles.
+\newtheorem*{statement*}{\BookStatementName}
 
 % Boldface Borel/projective-hierarchy classes
+% pdf-bookmark: bSigma = Σ
 \newcommand{\bSigma}{{\symbf{\Sigma}}}
+% pdf-bookmark: bPi = Π
 \newcommand{\bPi}{{\symbf{\Pi}}}
+% pdf-bookmark: bDelta = Δ
 \newcommand{\bDelta}{{\symbf{\Delta}}}
 \newcommand{\DeltaZero}{\Delta_0}
 
 % Classical low-level Borel class names.
 % notation-index: $\Fsigma$
+% pdf-bookmark: Fsigma = Fσ
 \newcommand{\Fsigma}{F_\sigma}
 % notation-index: $\Gdelta$
+% pdf-bookmark: Gdelta = Gδ
 \newcommand{\Gdelta}{G_\delta}
 % notation-index: $\GdeltaSigma$
 \newcommand{\GdeltaSigma}{G_{\delta\sigma}}
@@ -133,8 +252,11 @@
 \newcommand{\FsigmaDelta}{F_{\sigma\delta}}
 
 % Lightface Borel/projective-hierarchy classes
+% pdf-bookmark: lSigma = Σ
 \newcommand{\lSigma}{\Sigma}
+% pdf-bookmark: lPi = Π
 \newcommand{\lPi}{\Pi}
+% pdf-bookmark: lDelta = Δ
 \newcommand{\lDelta}{\Delta}
 
 % The set of natural numbers
@@ -157,15 +279,145 @@
 % lint-raw-notation: enforce
 \newcommand{\C}{\mathbb{C}}
 
+% Sort/Lean correspondence and erased hypotheses are documented above data Sort
+% in tools/book-filter/Main.hs. These signatures classify notation; they do not
+% import Lean types or certify domain membership, totality, or computability.
+% See that inventory before adding a sort or treating two sorts as compatible.
+%
+% Ordered pair of two objects, written with angle brackets: a point of a
+% product, the coordinates of a point, or a structure such as the pair
+% $\langle X,\tau\rangle$ of a set with a topology. Read set-theoretically
+% this is the Kuratowski pair; the angle-bracket form is used for pairs in
+% every reading, and parentheses are reserved for the open interval
+% (\OpenInterval), so the printed syntax itself separates the two meanings.
+% notation-index: $\Pair{a}{b}$
+% notation-type: \Pair : a x b -> Prod(a, b)
+\newcommand{\Pair}[2]{\langle #1,#2\rangle}
+% Open interval in \R: the set of reals strictly between a and b.
+% Parentheses are used only for this meaning; ordered pairs are \Pair,
+% written with angle brackets.
+% notation-index: $\OpenInterval{a}{b}$
+% notation-type: \OpenInterval : Real x Real -> Set(Real)
+\newcommand{\OpenInterval}[2]{(#1,#2)}
+% Tuple of three or more objects, written with angle brackets like \Pair:
+% a point of a multiple product, a structure with several components, or a
+% finite sequence displayed by its entries. The single argument is the
+% comma-separated list of components.
+% notation-index: $\Tuple{a,b,c}$
+% notation-type: \Tuple : a1 x ... x an -> Tuple(a1, ..., an), n >= 3
+\newcommand{\Tuple}[1]{\langle #1\rangle}
+% Closed interval in \R: the set of reals between a and b, endpoints
+% included. The bracket form is reserved for intervals whose endpoints
+% are terms; it is not an equivalence class or a commutator.
+% notation-index: $\ClosedInterval{a}{b}$
+% notation-type: \ClosedInterval : Real x Real -> Set(Real)
+\newcommand{\ClosedInterval}[2]{[#1,#2]}
+% Half-open interval in \R, closed on the left: [a, b).
+% notation-index: $\LeftClosedInterval{a}{b}$
+% notation-type: \LeftClosedInterval : Real x Real -> Set(Real)
+\newcommand{\LeftClosedInterval}[2]{[#1,#2)}
+% Half-open interval in \R, closed on the right: (a, b].
+% notation-index: $\RightClosedInterval{a}{b}$
+% notation-type: \RightClosedInterval : Real x Real -> Set(Real)
+\newcommand{\RightClosedInterval}[2]{(#1,#2]}
+
+% The four readings of vertical bars are four different operators, told
+% apart by the sort of the argument and recorded by their signatures.
+% Absolute value (or modulus) of a number: a real, complex, or valued
+% quantity; a subscript naming a specific absolute value (the p-adic
+% one, say) stays outside the macro.
+% notation-index: $\Abs{x}$
+% notation-type: \Abs : a -> a (a a number sort)
+\newcommand{\Abs}[1]{|#1|}
+% Cardinality of a set: a cardinal, or a natural number for a finite set.
+% notation-index: $\Card{X}$
+% notation-type: \Card : Set -> Card
+\newcommand{\Card}[1]{|#1|}
+% Floor of a real number: the greatest integer at most x.
+% notation-index: $\Floor{x}$
+% notation-type: \Floor : Real -> Int
+\newcommand{\Floor}[1]{\lfloor #1 \rfloor}
+
 % Function-space notation: \funcspace{A}{B} = functions from A to B,
 % rendered as B^A (right superscript). Switch to {}^{A}\!B by editing
 % this single definition.
 % notation-index: $\funcspace{A}{B}$
 \newcommand{\funcspace}[2]{#2^{#1}}
+% notation-index: $\GraphRange{g}$
+\newcommand{\GraphRange}[1]{\operatorname{ran}(#1)}
+
+% A closed term modulo provable equality in the fixed theory.
+% notation-index: $\TermModelClass{t}$
+\newcommand{\TermModelClass}[1]{\left[#1\right]}
+
+% Equivalence class and quotient by a set-coded relation.
+% notation-index: $\EquivalenceClass{E}{a}$
+\newcommand{\EquivalenceClass}[2]{[#2]_{#1}}
+% notation-index: $\SetQuotient{D}{E}$
+\newcommand{\SetQuotient}[2]{#1/#2}
+
+% Membership fibers and internal coordinate cells.
+% notation-index: $\MembershipFiber{Y}{a}$
+\newcommand{\MembershipFiber}[2]{C_{#1}(#2)}
+% notation-index: $\InternalBitCell{M}{n}{i}$
+\newcommand{\InternalBitCell}[3]{C^{#1}_{#2,#3}}
+
+% Upward closure of the image of a filter, and internal random length tests.
+% notation-index: $\FilterTransport{e}{G}$
+\newcommand{\FilterTransport}[2]{\mathord{\uparrow}#1[#2]}
+% notation-index: $\InternalRandomLength{M}{n}$
+\newcommand{\InternalRandomLength}[2]{L^{#1}_{#2}}
+
+% Positive internal classes below the class of an internal set.
+% notation-index: $\InternalMeasureCone{X}$
+\newcommand{\InternalMeasureCone}[1]{K_{#1}}
 
 % Power set of A.
 % notation-index: $\PowerSet{A}$
+% notation-type: \PowerSet : Set(a) -> Set(Set(a))
 \newcommand{\PowerSet}[1]{\mathcal P(#1)}
+% notation-index: $\InternalPowerSet{M}{x}$
+\newcommand{\InternalPowerSet}[2]{\mathcal P^{#1}(#2)}
+% notation-index: $\InternalHierarchy{M}{\alpha}$
+\newcommand{\InternalHierarchy}[2]{V_{#2}^{#1}}
+% notation-index: $\ForcingUnorderedPairName{P}{\sigma}{\tau}$
+\newcommand{\ForcingUnorderedPairName}[3]{\mathsf U_{#1}(#2,#3)}
+% notation-index: $\ForcingOrderedPairName{P}{\sigma}{\tau}$
+\newcommand{\ForcingOrderedPairName}[3]{\mathsf O_{#1}(#2,#3)}
+% notation-index: $\ForcingEvaluationName{P}{D}$
+\newcommand{\ForcingEvaluationName}[2]{\mathsf E_{#1}(#2)}
+% notation-index: $\CheckNameGraph{P}{A}$
+\newcommand{\CheckNameGraph}[2]{\chi_{#1}(#2)}
+% notation-index: $\ForcingDecisionName{P}{A}{E}$
+\newcommand{\ForcingDecisionName}[3]{\mathsf{Dec}_{#1}(#2,#3)}
+% notation-index: $\ForcingTableEntry{b}{p}{\sigma}{\tau}$
+\newcommand{\ForcingTableEntry}[4]{\langle #1,\langle #2,\langle #3,#4\rangle\rangle\rangle}
+
+% Names obtained by internal Separation, Power Set, and function-graph selection.
+% notation-index: $\ForcingSeparationName{\tau}{\varphi}{\vec\nu}$
+\newcommand{\ForcingSeparationName}[3]{\mathsf{Sep}(#1,#2,#3)}
+% notation-index: $\ForcingPowerSetName{\tau}$
+\newcommand{\ForcingPowerSetName}[1]{\mathsf{Pow}(#1)}
+% notation-index: $\ForcingFunctionSpaceName{A}{B}$
+\newcommand{\ForcingFunctionSpaceName}[2]{\mathsf{Fun}(#1,#2)}
+% notation-index: $\CantorSpaceName$
+\newcommand{\CantorSpaceName}{\dot Y}
+
+% Space of probability measures on X.
+% notation-index: $\ProbMeasures{X}$
+\newcommand{\ProbMeasures}[1]{\mathcal P(#1)}
+
+% Measure algebra of X modulo mu-null sets.
+% notation-index: $\MeasureAlg{X}{\mu}$
+\newcommand{\MeasureAlg}[2]{\mathrm{MAlg}(#1,#2)}
+
+% Class of a measurable set modulo null sets for the displayed measure.
+% notation-index: $\MeasureClass{\mu}{A}$
+\newcommand{\MeasureClass}[2]{[#2]_{#1}}
+
+% Symmetric-difference distance on a measure algebra.
+% notation-index: $\MeasureAlgDistance{\mu}{a}{b}$
+\newcommand{\MeasureAlgDistance}[3]{d_{#1}(#2,#3)}
 
 % Inclusion relation allowing equality.
 % notation-index: $A \IncludedIn B$
@@ -184,6 +436,49 @@
 % notation-index: $\PartialFunctionMap{f}{X}{Y}$
 \newcommand{\PartialFunctionMap}[3]{#1 : \subseteq #2 \to #3}
 
+% Represented space of continuously realizable functions.
+% notation-index: $\RepresentedFunctionSpace{\mathbf X}{\mathbf Y}$
+\newcommand{\RepresentedFunctionSpace}[2]{\mathcal C(#1,#2)}
+
+% Continuous reducibility of representations.
+% notation-index: $\delta_1 \ContinuouslyReducesTo \delta_2$
+% lint-raw-notation: enforce
+\newcommand{\ContinuouslyReducesTo}{\mathrel{\le_t}}
+% Failure of continuous reducibility of representations.
+% notation-index: $\delta_1 \NotContinuouslyReducesTo \delta_2$
+% lint-raw-notation: enforce
+\newcommand{\NotContinuouslyReducesTo}{\mathrel{\not\le_t}}
+% Continuous equivalence of representations.
+% notation-index: $\delta_1 \ContinuouslyEquivalentTo \delta_2$
+% lint-raw-notation: enforce
+\newcommand{\ContinuouslyEquivalentTo}{\mathrel{\equiv_t}}
+% Failure of continuous equivalence of representations.
+% notation-index: $\delta_1 \NotContinuouslyEquivalentTo \delta_2$
+% lint-raw-notation: enforce
+\newcommand{\NotContinuouslyEquivalentTo}{\mathrel{\not\equiv_t}}
+
+% Orbit equivalence relation of an action of G on X.
+% notation-index: $\OrbitER{G}{X}$
+\newcommand{\OrbitER}[2]{E_{#1}^{#2}}
+% Borel reducibility and bireducibility of equivalence relations.
+% notation-index: $E \BorelReducesTo F$
+\newcommand{\BorelReducesTo}{\mathrel{\le_B}}
+% notation-index: $E \BorelEquivalentTo F$
+\newcommand{\BorelEquivalentTo}{\mathrel{\equiv_B}}
+% Equality on the real numbers as a benchmark equivalence relation.
+% notation-index: $\RealEqualityER$
+\newcommand{\RealEqualityER}{\Delta_{\R}}
+% Eventual equality on Cantor space.
+% notation-index: $\EventualEqualityER$
+% pdf-bookmark: EventualEqualityER = E₀
+\newcommand{\EventualEqualityER}{E_0}
+% Eventual row equality on sequences of reals.
+% notation-index: $\EventualRowEqualityER$
+\newcommand{\EventualRowEqualityER}{E_1}
+% Universal countable Borel equivalence relation.
+% notation-index: $\UniversalCountableER$
+\newcommand{\UniversalCountableER}{E_\infty}
+
 % Relation composition: first R, then S, rendered as S \circ R.
 % notation-index: $\RelationComposition{S}{R}$
 \newcommand{\RelationComposition}[2]{#1\circ #2}
@@ -198,14 +493,37 @@
 % These preserve the existing rendering while giving the source a more
 % descriptive vocabulary.
 \newcommand{\BaireSpace}{\funcspace{\omega}{\omega}}
-\newcommand{\CantorSpace}{\funcspace{\omega}{2}}
+% notation-index: $\TwoPointSpace$
+\newcommand{\TwoPointSpace}{2}
+% notation-index: $\Homeomorphic{X}{Y}$
+\newcommand{\Homeomorphic}[2]{#1\cong #2}
+\newcommand{\CantorSpace}{\funcspace{\omega}{\TwoPointSpace}}
 % notation-index: $\HilbertCube$
 \newcommand{\HilbertCube}{\seqPower{[0,1]}{\omega}}
+% Hilbert-space spectral quantities.
+% notation-index: $\OrthogonalComplement{F}$
+\newcommand{\OrthogonalComplement}[1]{#1^{\perp}}
+% notation-index: $\MinMaxValue{A}{n}$
+\newcommand{\MinMaxValue}[2]{m_{#2}(#1)}
+% notation-index: $\PositiveSpectralCount{A}{r}$
+\newcommand{\PositiveSpectralCount}[2]{N_{#1}(#2)}
 % notation-index: $\RealSequenceSpace$
 \newcommand{\RealSequenceSpace}{\seqPower{\R}{\omega}}
 % Infinite symmetric group on the natural numbers.
 % notation-index: $\InfiniteSymmetricGroup$
 \newcommand{\InfiniteSymmetricGroup}{S_\infty}
+% notation-index: $\PadicField{p}$
+\newcommand{\PadicField}[1]{\mathbb{Q}_{#1}}
+% notation-index: $\PadicIntegers{p}$
+\newcommand{\PadicIntegers}[1]{\mathbb{Z}_{#1}}
+
+% An indexed sequence; the index condition is supplied explicitly.
+% notation-index: $\Sequence{x_n}{n\in\omega}$
+% notation-type: \Sequence : (i -> a) x Prop -> Seq(a)
+\newcommand{\Sequence}[2]{\left(#1\right)_{#2}}
+% A brace-displayed indexed family, or its range when used as a set.
+% notation-index: $\IndexedFamily{U_i}{i\in I}$
+\newcommand{\IndexedFamily}[2]{\left\{#1\right\}_{#2}}
 
 % Sequence powers are function-space notation with ordinal domain n,
 % read as sequences of length n.
@@ -219,6 +537,26 @@
 % Finite sequences with entries in A: \finseq{A} = A^{<\omega}.
 % notation-index: $A^{<\omega}$
 \newcommand{\finseq}[1]{#1^{<\omega}}
+
+% The empty sequence, the unique element of \seqPower{A}{0}; also the root of
+% a prefix tree. Distinct from \emptyset used as the empty set.
+% notation-index: $\emptySeq$
+\newcommand{\emptySeq}{\emptyset}
+
+% The one-term finite sequence with the single entry a: the word of length
+% one, as in s\concat\SingletonSeq{n} for a one-step extension of a node.
+% Angle brackets display the sequence itself; this is neither a pair nor
+% the code of the sequence.
+% notation-index: $\SingletonSeq{a}$
+% notation-type: \SingletonSeq : a -> Seq(a)
+\newcommand{\SingletonSeq}[1]{\langle #1\rangle}
+
+% Length of a finite sequence or word: the number of its entries.
+% The argument is a sequence, not a set (that reading is \Card) and not
+% a number (that reading is \Abs).
+% notation-index: $\Length{s}$
+% notation-type: \Length : Seq(a) -> Nat
+\newcommand{\Length}[1]{|#1|}
 
 % Infinite subsets of A: \infiniteSubsets{A} = [A]^\omega.
 % notation-index: $\infiniteSubsets{\omega}$
@@ -238,15 +576,35 @@
 
 % Internal indexed/family disjoint union: \InternalDisjointUnion_{i\in I} A_i.
 % notation-index: $\InternalDisjointUnion_{i\in I} A_i$
-\newcommand{\InternalDisjointUnion}{\mathop{\uplus}\displaylimits}
+\newcommand{\InternalDisjointUnion}{\mathop{\biguplus}\displaylimits}
 
 % Directed supremum in domain theory.
 % notation-index: $\DirectedSup S$
 \newcommand{\DirectedSup}{\mathop{\bigsqcup}\displaylimits}
+% Flat domain of natural numbers with bottom.
+% notation-index: $\FlatNaturals$
+\newcommand{\FlatNaturals}{\NN_{\bot}}
+% Principal upward-closed set generated by a.
+% notation-index: $\PrincipalUp{a}$
+\newcommand{\PrincipalUp}[1]{\mathord{\uparrow}\!#1}
+% Domain of nonempty compact real intervals ordered by reverse inclusion.
+% notation-index: $\IntervalDomain$
+\newcommand{\IntervalDomain}{\mathbb{I}\R}
+% Basic Scott-open interval-domain box.
+% notation-index: $\IntervalBox{u}{v}$
+\newcommand{\IntervalBox}[2]{\Box(#1,#2)}
+% Domain-theoretic admissible representation of X.
+% notation-index: $\DomainRepresentation{X}$
+\newcommand{\DomainRepresentation}[1]{\rho^{\mathrm{dom}}_{#1}}
 
 % Restriction of a function or sequence: \restrict{f}{A}.
 % notation-index: $\restrict{f}{A}$
+% notation-type: \restrict : a x Nat -> a
 \newcommand{\restrict}[2]{#1\mathord{\upharpoonright}_{#2}}
+
+% Delete the first n entries of an infinite sequence.
+% notation-index: $\SequenceTailMap{n}$
+\newcommand{\SequenceTailMap}[1]{\tau_{#1}}
 
 % Sequence concatenation: s \concat t for the concatenation of finite
 % (or finite-and-infinite) sequences. Renders as a superscript frown
@@ -259,7 +617,9 @@
 \newcommand{\prefixOf}{\mathrel{\preceq}}
 % Negated initial-segment / prefix relation.
 % notation-index: $s\notPrefixOf y$
-\newcommand{\notPrefixOf}{\mathrel{\not\preceq}}
+% Draw the negation from the active OpenType math font. The general \not
+% command otherwise selects the legacy AMS \npreceq glyph in this case.
+\newcommand{\notPrefixOf}{\mathrel{\notaccent\preceq}}
 % Proper initial-segment / proper-prefix relation.
 % notation-index: $s\properPrefixOf y$
 \newcommand{\properPrefixOf}{\mathrel{\prec}}
@@ -301,6 +661,15 @@
 % Open-cylinder-code map from open sets to prefix up-sets.
 % notation-index: $\OpenCylinderCode{U}$
 \newcommand{\OpenCylinderCode}[1]{\Psi(#1)}
+% Continued-fraction cylinder code in the integer cell indexed by a_0.
+% notation-index: $\ContinuedFractionCylinderCode{a_0}{A}$
+\newcommand{\ContinuedFractionCylinderCode}[2]{\operatorname{Cyl}_{#1}(#2)}
+% Continued-fraction prefix code in the integer cell indexed by a_0.
+% notation-index: $\ContinuedFractionPrefixCode{a_0}{V}$
+\newcommand{\ContinuedFractionPrefixCode}[2]{\operatorname{Pref}_{#1}(#2)}
+% Mediant-limit map from Stern--Brocot boundary paths.
+% notation-index: $\MediantLimitMap$
+\newcommand{\MediantLimitMap}{\Phi}
 % Closed-tree-code map from closed sets to prefix trees.
 % notation-index: $\ClosedTreeCode{F}$
 \newcommand{\ClosedTreeCode}[1]{T_{#1}}
@@ -333,8 +702,6 @@
 % notation-index: $\SeqMetric{x}{y}$
 \newcommand{\SeqMetric}[2]{\SeqMetricName(#1,#2)}
 % Cylinder radius for the standard sequence metric.
-% notation-index: $\CylinderBallRadius{k}$
-\newcommand{\CylinderBallRadius}[1]{\rho_{#1}}
 
 % Domain of a function.
 % notation-index: $\DomainOf{f}$
@@ -361,6 +728,11 @@
 \newcommand{\SubstFormula}[3]{#1\subst{#2}{#3}}
 % notation-index: $M\subst{x}{N}$, lambda terms
 \newcommand{\SubstLambda}[3]{#1\subst{#2}{#3}}
+% notation-index: $\PCAPair{a}{b}$
+% notation-type: \PCAPair : a x a -> a (entries and value in one fixed PCA)
+\newcommand{\PCAPair}[2]{\langle #1,#2\rangle_A}
+% notation-index: $\PCAAbstract{x}{t}$
+\newcommand{\PCAAbstract}[2]{\langle #1\rangle\,#2}
 % notation-index: $t\subst{x_1,\ldots,x_n}{a_1,\ldots,a_n}$, PCA terms
 \newcommand{\SubstPCA}[3]{#1\subst{#2}{#3}}
 % Free variables of a syntactic expression.
@@ -371,6 +743,156 @@
 \newcommand{\FreeVarsFormula}[1]{\FreeVars{#1}}
 % notation-index: $\FreeVars{M}$, lambda terms
 \newcommand{\FreeVarsLambda}[1]{\FreeVars{#1}}
+% notation-index: $\LambdaNameCorrespondence{R}{M}{N}$
+\newcommand{\LambdaNameCorrespondence}[3]{#2\mathrel{\sim_{#1}}#3}
+% notation-index: $\FirstOrderNameCorrespondence{R}{\varphi}{\psi}$
+\newcommand{\FirstOrderNameCorrespondence}[3]{#2\mathrel{\sim_{#1}}#3}
+% notation-index: $\FirstOrderBoundNames{R}{x}{y}$
+\newcommand{\FirstOrderBoundNames}[3]{#1[#2\leftrightarrow#3]}
+% notation-index: $\FirstOrderOperationGraph{f}{\vec{z}}{y}$
+\newcommand{\FirstOrderOperationGraph}[3]{C_{#1}(#2,#3)}
+% notation-index: $\FirstOrderTermGraph{t}{y}{B}$
+\newcommand{\FirstOrderTermGraph}[3]{V_{#1}^{#3}(#2)}
+% notation-index: $\LambdaSyntaxSizeBound{k}{m}$
+\newcommand{\LambdaSyntaxSizeBound}[2]{\mathsf{bnd}(#1,#2)}
+% notation-index: $\LambdaBoundNames{R}{x}{y}$
+\newcommand{\LambdaBoundNames}[3]{#1[#2\leftrightarrow#3]}
+% notation-index: $\LambdaBindingTree{M}$
+\newcommand{\LambdaBindingTree}[1]{\mathsf{B}(#1)}
+% notation-index: $\AlphaEquivalent{M}{N}$
+\newcommand{\AlphaEquivalent}[2]{#1 \equiv_{\alpha} #2}
+% notation-index: $\ParallelBeta{M}{N}$
+\newcommand{\ParallelBeta}[2]{#1 \mathrel{\Rightarrow_{\beta}} #2}
+% notation-index: $\BetaConvertible{M}{N}$
+\newcommand{\BetaConvertible}[2]{#1 =_{\beta} #2}
+% notation-index: $\ChurchNumeral{n}$
+\newcommand{\ChurchNumeral}[1]{\overline{#1}}
+% Expanded nested application, annotated by its iteration count.
+\newcommand{\LambdaIterationExpansion}[3]{\mathord{\overbrace{#1(#1(\cdots #1(}^{#3}}#2)\cdots))}
+% notation-index: $\LambdaIter{F}{X}{n}$
+\newcommand{\LambdaIter}[3]{\operatorname{It}_{#3}(#1,#2)}
+% notation-index: $\LambdaSucc$
+\newcommand{\LambdaSucc}{\mathsf{succ}}
+% notation-index: $\LambdaAdd$
+\newcommand{\LambdaAdd}{\mathsf{add}}
+% notation-index: $\LambdaMul$
+\newcommand{\LambdaMul}{\mathsf{mul}}
+% notation-index: $\LambdaTrue$
+\newcommand{\LambdaTrue}{\mathsf{true}}
+% notation-index: $\LambdaFalse$
+\newcommand{\LambdaFalse}{\mathsf{false}}
+% notation-index: $\LambdaZeroTest$
+\newcommand{\LambdaZeroTest}{\mathsf{iszero}}
+% notation-index: $\LambdaPair$
+\newcommand{\LambdaPair}{\mathsf{pair}}
+% notation-index: $\LambdaPairValue{A}{B}$
+\newcommand{\LambdaPairValue}[2]{\langle #1,#2\rangle_{\lambda}}
+% notation-index: $\LambdaPairNext$
+\newcommand{\LambdaPairNext}{\mathsf{next}}
+% notation-index: $\LambdaPred$
+\newcommand{\LambdaPred}{\mathsf{pred}}
+% notation-index: $\LambdaSub$
+\newcommand{\LambdaSub}{\mathsf{sub}}
+% notation-index: $\LambdaRecUpdate{G}$
+\newcommand{\LambdaRecUpdate}[1]{\mathsf{step}_{#1}}
+% notation-index: $\LambdaRecursor$
+\newcommand{\LambdaRecursor}{\mathsf{rec}}
+% notation-index: $\LambdaParamRec{B}{H}$
+\newcommand{\LambdaParamRec}[2]{\mathsf{rec}_{#1,#2}}
+% notation-index: $\LambdaSearchKernel{G}$
+\newcommand{\LambdaSearchKernel}[1]{L_{#1}}
+% notation-index: $\LambdaSearch$
+\newcommand{\LambdaSearch}{\mathsf{search}}
+% notation-index: $\LambdaNonzeroSearch$
+\newcommand{\LambdaNonzeroSearch}{\mathsf{nonzero}}
+% notation-index: $\LambdaSearchProgram{H}$
+\newcommand{\LambdaSearchProgram}[1]{\mathsf{search}_{#1}}
+% notation-index: $\NameTail{p}$
+\newcommand{\NameTail}[1]{\mathsf{tail}(#1)}
+% notation-index: $\LambdaNameTail$
+\newcommand{\LambdaNameTail}{\mathsf{tail}}
+% notation-index: $\LambdaNamePrefix{t}$
+\newcommand{\LambdaNamePrefix}[1]{\mathsf{prefix}_{#1}}
+% notation-index: $\LambdaTagBranch{P}{Q}$
+\newcommand{\LambdaTagBranch}[2]{\mathsf{branch}(#1,#2)}
+% notation-index: $\LambdaCoproductCase{P}{Q}$
+\newcommand{\LambdaCoproductCase}[2]{\mathsf{case}_{#1,#2}}
+% notation-index: $\NamePair{p}{q}$
+% notation-type: \NamePair : Name x Name -> Name
+\newcommand{\NamePair}[2]{\langle #1,#2\rangle}
+% notation-index: $\NameProjection{i}{p}$
+% notation-type: \NameProjection : Nat x a -> a
+\newcommand{\NameProjection}[2]{\mathsf{pr}_{#1}(#2)}
+% notation-index: $\LambdaPairOutputs{P}{Q}$
+\newcommand{\LambdaPairOutputs}[2]{\mathsf{pairout}_{#1,#2}}
+% notation-index: $\LambdaProjectOutput{i}{P}$
+\newcommand{\LambdaProjectOutput}[2]{\mathsf{projout}_{#1,#2}}
+% notation-index: $F\WeihrauchReducesTo G$
+\newcommand{\WeihrauchReducesTo}{\le_{\mathrm W}}
+% notation-index: $F\StrongWeihrauchReducesTo G$
+\newcommand{\StrongWeihrauchReducesTo}{\le_{\mathrm{sW}}}
+% notation-index: $\LimitedOmniscienceProblem$
+\newcommand{\LimitedOmniscienceProblem}{\mathsf{LPO}}
+% notation-index: $\ClosedChoiceNaturals$
+\newcommand{\ClosedChoiceNaturals}{\mathsf{C}_{\NN}}
+% notation-index: $\NaturalChoiceSet{a}$
+\newcommand{\NaturalChoiceSet}[1]{A_{#1}}
+
+% notation-index: $\NatPair{a}{b}$
+% notation-type: \NatPair : Nat x Nat -> Nat
+\newcommand{\NatPair}[2]{\langle #1,#2\rangle}
+% Binary-string code of a pair of natural numbers: a computable coding of
+% the pair as a finite binary word, used where the code itself, not the
+% pair, is the object at hand (contrast \NatPair, whose value is a number).
+% notation-index: $\BinaryPair{a}{b}$
+% notation-type: \BinaryPair : Nat x Nat -> Seq(Bit)
+\newcommand{\BinaryPair}[2]{\langle #1,#2\rangle_2}
+% notation-index: $\RationalCode{a}{b}{c}$
+\newcommand{\RationalCode}[3]{\mathsf{rat}(#1,#2,#3)}
+% notation-index: $\RationalValue{c}$
+\newcommand{\RationalValue}[1]{\operatorname{val}(#1)}
+% notation-index: $\LambdaBallTest{b}$
+\newcommand{\LambdaBallTest}[1]{\mathsf{balltest}_{#1}}
+% notation-index: $\LambdaBallSemidecider{b}$
+\newcommand{\LambdaBallSemidecider}[1]{\mathsf{ballsearch}_{#1}}
+% notation-index: $\LambdaRationalAdd$
+\newcommand{\LambdaRationalAdd}{\mathsf{qadd}}
+% notation-index: $\LambdaRationalDouble$
+\newcommand{\LambdaRationalDouble}{\mathsf{qdbl}}
+% notation-index: $\LambdaRationalLess$
+\newcommand{\LambdaRationalLess}{\mathsf{qlt}}
+% notation-index: $\LambdaDyadic$
+\newcommand{\LambdaDyadic}{\mathsf{dyadic}}
+% notation-index: $\LambdaNumericPair$
+% notation-type: \LambdaNumericPair : Nat x Nat -> Nat
+\newcommand{\LambdaNumericPair}{\mathsf{npair}}
+% Numerical pairing applied to lambda terms, distinct from Church pairing.
+% notation-index: $\LambdaNumericPairValue{X}{Y}$
+\newcommand{\LambdaNumericPairValue}[2]{\mathsf{npair}(#1,#2)}
+% notation-index: $\LambdaLeCase{A}{B}{X}{Y}$
+\newcommand{\LambdaLeCase}[4]{\mathsf{lecase}(#1,#2;#3,#4)}
+% notation-index: $\LambdaSqrt$
+\newcommand{\LambdaSqrt}{\mathsf{isqrt}}
+% notation-index: $\LambdaNumericProjection{i}$
+\newcommand{\LambdaNumericProjection}[1]{\mathsf{nproj}_{#1}}
+
+% notation-index: $\NatProjection{i}{n}$
+% notation-type: \NatProjection : Nat x Nat -> Nat
+\newcommand{\NatProjection}[2]{\pi_{#1}(#2)}
+
+% notation-index: $\JumpTupleBody{o}$
+\newcommand{\JumpTupleBody}[1]{\mathsf{tuple}(#1)}
+
+% Naming macro for a locally defined lambda term or open term body.
+% The argument is its mathematical name; definitions and parameters remain in the source.
+\newcommand{\LambdaTermName}[1]{\mathsf{#1}}
+
+% notation-index: $\LambdaInputStep{p}{M}{N}$
+\newcommand{\LambdaInputStep}[3]{#2 \mathrel{\to_{\beta,#1}} #3}
+% notation-index: $\LambdaInputSteps{p}{M}{N}$
+\newcommand{\LambdaInputSteps}[3]{#2 \mathrel{\to_{\beta,#1}^{*}} #3}
+% notation-index: $\ParallelLambdaInput{p}{M}{N}$
+\newcommand{\ParallelLambdaInput}[3]{#2 \mathrel{\Rightarrow_{\beta,#1}} #3}
 % First-order quantifier binders, kept separate from the raw symbols \forall
 % and \exists so mathmeta inference only sees actual quantified formulas.
 \newcommand{\forallbind}[2]{\forall #1\,#2}
@@ -383,9 +905,37 @@
 % notation-index: $p\forces\varphi$
 \newcommand{\forces}{\Vdash}
 
+% Strengthened Martin's Maximum and Woodin's canonical forcing.
+% notation-index: $\MartinMaximumPlusPlus$
+\newcommand{\MartinMaximumPlusPlus}{\mathsf{MM}^{++}}
+% notation-index: $\PmaxForcing$
+\newcommand{\PmaxForcing}{\mathbb{P}_{\mathrm{max}}}
+
+% Positive-condition forcing sets, negative alternatives, and decision tests.
+% notation-index: $\CodeForcingSet{c}$
+\newcommand{\CodeForcingSet}[1]{F_{#1}}
+% notation-index: $\ForcingNeg{S}$
+\newcommand{\ForcingNeg}[1]{N(#1)}
+% notation-index: $\ForcingDecision{S}$
+\newcommand{\ForcingDecision}[1]{D(#1)}
+
 % Gandy--Harrington topology.
 % notation-index: $\GHTopology$
-\newcommand{\GHTopology}{\tau_{\rm GH}}
+\newcommand{\GHTopology}{\tau_{\mathrm{GH}}}
+
+% Analytic-condition forcing and equivalence-relation constructions.
+% notation-index: $\GHConditions{d}$
+\newcommand{\GHConditions}[1]{\mathbb{P}_{#1}}
+% notation-index: $\ERSaturation{A}{E}$
+\newcommand{\ERSaturation}[2]{[#1]_{#2}}
+% notation-index: $\EffectiveClosureER{E}$
+\newcommand{\EffectiveClosureER}[1]{\widehat{#1}}
+% notation-index: $\RestrictedGHProduct{E}$
+\newcommand{\RestrictedGHProduct}[1]{\mathbb{Q}_{#1}}
+
+% Symmetric difference of two sets.
+% notation-index: $\SymmetricDifference{A}{B}$
+\newcommand{\SymmetricDifference}[2]{#1\mathbin{\triangle}#2}
 
 % Category-theoretic notation.
 % Category names.
@@ -399,9 +949,34 @@
 \newcommand{\MesCat}{\mathbf{Mes}}
 % notation-index: $\DomOmegaCat$
 \newcommand{\DomOmegaCat}{\mathbf{Dom}_\omega}
-% notation-index: $\qPolAdmCat$
-\newcommand{\qPolAdmCat}{\mathbf{qPol}_{\rm adm}}
+% Legacy category name retained so incremental builds can read older index files.
+\newcommand{\qPolAdmCat}{\mathbf{qPol}_{\mathrm{adm}}}
+% notation-index: $\PERRestriction{X}{\varphi}$
+\newcommand{\PERRestriction}[2]{{#1}_{#2}}
+% notation-index: $\RelativeNegation{X}{\varphi}$
+\newcommand{\RelativeNegation}[2]{\neg_{#1}#2}
+% notation-index: $\DoubleNegationClosure{X}{\varphi}$
+\newcommand{\DoubleNegationClosure}[2]{c_{#1}(#2)}
+% notation-index: $\UniformTrackers{\varphi}{\psi}$
+\newcommand{\UniformTrackers}[2]{\operatorname{Tr}(#1,#2)}
+% notation-index: $\FunctionalRealizers{R}$
+\newcommand{\FunctionalRealizers}[1]{\mathsf D(#1)}
+% notation-index: $\RealizabilityFunctionSpace{X}{Y}$
+\newcommand{\RealizabilityFunctionSpace}[2]{\mathcal F(#1,#2)}
+% notation-index: $\CurriedRelation{H}$
+\newcommand{\CurriedRelation}[1]{\operatorname{cur}(#1)}
+% notation-index: $\UncurriedRelation{F}$
+\newcommand{\UncurriedRelation}[1]{\operatorname{uncur}(#1)}
+% notation-index: $\RealizabilityTruthArrow$
+\newcommand{\RealizabilityTruthArrow}{\mathrm{true}}
+% notation-index: $\PCATruthValues{A}$
+\newcommand{\PCATruthValues}[1]{\Omega_{\RTCat{#1}}}
+% notation-index: $\NameObject{A}$
+\newcommand{\NameObject}[1]{\mathsf{N}_{#1}}
+% notation-index: $\RealizabilityTruthValues$
+\newcommand{\RealizabilityTruthValues}{\Omega_{\EffCat}}
 % notation-index: $\EffCat$
+% pdf-bookmark: EffCat = Eff
 \newcommand{\EffCat}{\mathbf{Eff}}
 % notation-index: $\CatCat$
 \newcommand{\CatCat}{\mathbf{Cat}}
@@ -409,6 +984,21 @@
 \newcommand{\AsmCat}[1]{\mathbf{Asm}(#1)}
 % notation-index: $\ModCat{A}$
 \newcommand{\ModCat}[1]{\mathbf{Mod}(#1)}
+% notation-index: $\PERCat{A}$
+\newcommand{\PERCat}[1]{\mathbf{PER}(#1)}
+% notation-index: $\PERSupport{R}$
+\newcommand{\PERSupport}[1]{\mathrm{supp}(#1)}
+% notation-index: $\PERAssembly{R}$
+\newcommand{\PERAssembly}[1]{\mathcal A(#1)}
+% Underlying set of a structured object: of an assembly, the set carrying
+% its realizability relation; of a tripos or realizability object, the set
+% of its representatives. A projection, not a size: contrast \Card.
+% notation-index: $\UnderlyingSet{X}$
+% notation-type: \UnderlyingSet : a -> Set (a a structured object)
+\newcommand{\UnderlyingSet}[1]{|#1|}
+% notation-index: $\ModestPER{X}$
+\newcommand{\ModestPER}[1]{R_{#1}}
+
 % notation-index: $\RTCat{A}$
 \newcommand{\RTCat}[1]{\mathbf{RT}(#1)}
 % notation-index: $\HeytAlgCat$
@@ -422,6 +1012,12 @@
 % Hom-set in a category: morphisms A -> B in C.
 % notation-index: $\HomSet{\mathcal C}{A}{B}$
 \newcommand{\HomSet}[3]{#1(#2,#3)}
+% Pairing of morphisms into a product: the unique morphism with
+% \pi_A \circ \Pairing{f}{g} = f and \pi_B \circ \Pairing{f}{g} = g.
+% A morphism, not a pair of morphisms: its sort is Mor(C, A x B).
+% notation-index: $\Pairing{f}{g}$
+% notation-type: \Pairing : Mor(C, A) x Mor(C, B) -> Mor(C, A x B)
+\newcommand{\Pairing}[2]{\langle #1,#2\rangle}
 % notation-index: $\opcat{\mathcal C}$
 \newcommand{\opcat}[1]{#1^{\mathrm{op}}}
 % notation-index: $\functorCat{\mathcal C}{\mathcal D}$
@@ -442,11 +1038,14 @@
 % First uncountable ordinal
 % notation-index: $\omegaOneOrd$
 % lint-raw-notation: enforce
+% pdf-bookmark: omegaOneOrd = ω₁
 \newcommand{\omegaOneOrd}{\omega_1}
 % Church--Kleene ordinal.
 % notation-index: $\churchKleeneOrd$
 % lint-raw-notation: enforce
 \newcommand{\churchKleeneOrd}{\omega_1^{CK}}
+% notation-index: $\relativeChurchKleeneOrd{\varepsilon}$
+\newcommand{\relativeChurchKleeneOrd}[1]{\omega_1^{#1}}
 % First infinite cardinal (= cardinality of \NN)
 % notation-index: $\alephNull$
 % lint-raw-notation: enforce
@@ -460,8 +1059,18 @@
 % lint-raw-notation: enforce
 \newcommand{\bethCard}[1]{\beth_{#1}}
 % Countable infinitary logic.
+% notation-index: $\TupleAgreementCoset{\bar a}{\bar s}$
+\newcommand{\TupleAgreementCoset}[2]{N(#1,#2)}
+% notation-index: $\InverseTupleFormula{e}{\psi}$
+\newcommand{\InverseTupleFormula}[2]{E_{#1,#2}}
 % notation-index: $\LCountableInfinitaryLogic$
 \newcommand{\LCountableInfinitaryLogic}{L_{\omega_1\omega}}
+% Arithmetic numerals and Robinson arithmetic.
+% notation-index: $\ArithmeticNumeral{n}$
+\newcommand{\ArithmeticNumeral}[1]{\underline{#1}}
+% notation-index: $\RobinsonArithmetic$
+\newcommand{\RobinsonArithmetic}{\mathsf{Q}}
+
 % Consistency of a theory.
 % notation-index: $\ConsistentTheory{T}$
 \newcommand{\ConsistentTheory}[1]{\operatorname{Con}(#1)}
@@ -471,11 +1080,462 @@
 \newcommand{\ADTheta}{\Theta}
 
 % Effective descriptive set theory.
+% Natural-number code of a finite sequence under a fixed bijection.
+% notation-index: $\FiniteSequenceCode{s}$
+\newcommand{\FiniteSequenceCode}[1]{\ulcorner #1\urcorner}
 % notation-index: $\BorelCodes$
 \newcommand{\BorelCodes}{\mathrm{BC}}
+% Interpretation of a Borel code c in a model K.
+% notation-index: $\BorelInterpretation{c}{K}$
+\newcommand{\BorelInterpretation}[2]{B_{#1}^{#2}}
+% Canonical forcing name for the interpretation of a Borel code c.
+% notation-index: $\BorelCodeName{c}$
+\newcommand{\BorelCodeName}[1]{\dot B_{#1}}
 % notation-index: $\WellFoundedTrees$
 \newcommand{\WellFoundedTrees}{\mathrm{WF}}
 % notation-index: $\HyperarithmeticalSets$
 \newcommand{\HyperarithmeticalSets}{\mathrm{HYP}}
+% notation-index: $\kleeneBrouwerOrder{s}{t}$
+\newcommand{\kleeneBrouwerOrder}[2]{#1\mathrel{<_{\mathrm{KB}}}#2}
+% notation-index: $\LambdaKleeneBrouwer$
+\newcommand{\LambdaKleeneBrouwer}{\mathsf{kb}}
 % notation-index: $\KleeneO$
 \newcommand{\KleeneO}{\mathcal{O}}
+
+% notation-index: $\KleeneCandidateStep{a}{b}$
+\newcommand{\KleeneCandidateStep}[2]{#1\mathrel{\triangleleft}#2}
+% notation-index: $\KleeneCandidatePrecedes{a}{b}$
+\newcommand{\KleeneCandidatePrecedes}[2]{#1\mathrel{\triangleleft^+}#2}
+% notation-index: $\KleenePrecedes{a}{b}$
+\newcommand{\KleenePrecedes}[2]{#1\mathrel{<_{\KleeneO}}#2}
+% notation-index: $\KleeneValue{a}$
+\newcommand{\KleeneValue}[1]{\lvert #1\rvert_{\KleeneO}}
+
+% notation-index: $\KleeneSuccIter{a}{k}$
+\newcommand{\KleeneSuccIter}[2]{S^{#2}(#1)}
+% notation-index: $\KleenePredMax{a}{n}$
+\newcommand{\KleenePredMax}[2]{\sigma_{#1}(#2)}
+% notation-index: $\LambdaNotationIterate$
+\newcommand{\LambdaNotationIterate}{\mathsf{succIter}}
+% notation-index: $\LambdaLimitCodeProgram$
+\newcommand{\LambdaLimitCodeProgram}{\mathsf{limitCode}}
+
+% notation-index: $\EffectiveJoin{n}{A_n}$
+\newcommand{\EffectiveJoin}[2]{\bigoplus_{#1}#2}
+% notation-index: $\IteratedJump{A}{a}$
+\newcommand{\IteratedJump}[2]{H^{#1}_{#2}}
+% notation-index: $\LambdaJoinSection{n}$
+\newcommand{\LambdaJoinSection}[1]{\mathsf{row}_{#1}}
+
+% notation-index: $\LambdaSyntaxCode{M}$
+% notation-type: \LambdaSyntaxCode : a -> Nat
+\newcommand{\LambdaSyntaxCode}[1]{\ulcorner #1\urcorner}
+% notation-index: $\LambdaSyntaxDecode{e}$
+\newcommand{\LambdaSyntaxDecode}[1]{\mathsf{decode}(#1)}
+% notation-index: $\LambdaVarCode$
+\newcommand{\LambdaVarCode}{\mathsf{vcode}}
+% notation-index: $\LambdaTaggedCode{t}$
+\newcommand{\LambdaTaggedCode}[1]{\mathsf{node}_{#1}}
+% notation-index: $\LambdaSyntaxPayload$
+\newcommand{\LambdaSyntaxPayload}{\mathsf{payload}}
+% notation-index: $\LambdaSyntaxTag$
+\newcommand{\LambdaSyntaxTag}{\mathsf{tag}}
+% notation-index: $\LambdaSyntaxField{i}$
+\newcommand{\LambdaSyntaxField}[1]{\mathsf{field}_{#1}}
+% notation-index: $\LambdaSyntaxCase{e}{X}{Y}{Z}$
+\newcommand{\LambdaSyntaxCase}[4]{\mathsf{scase}(#1;#2,#3,#4)}
+% notation-index: $\LambdaSyntaxFold{V}{A}{L}$
+\newcommand{\LambdaSyntaxFold}[3]{\mathsf{fold}(#1,#2,#3)}
+% notation-index: $\LambdaNodeCount{M}$
+\newcommand{\LambdaNodeCount}[1]{\operatorname{nodes}(#1)}
+% notation-index: $\LambdaSyntaxNodes$
+\newcommand{\LambdaSyntaxNodes}{\mathsf{nodes}}
+% notation-index: $\LambdaEqual$
+\newcommand{\LambdaEqual}{\mathsf{eq}}
+% notation-index: $\LambdaFreeVarTest$
+\newcommand{\LambdaFreeVarTest}{\mathsf{free}}
+% notation-index: $\LambdaFreshVar$
+\newcommand{\LambdaFreshVar}{\mathsf{fresh}}
+% notation-index: $\LambdaSubstBase$
+\newcommand{\LambdaSubstBase}{\mathsf{substbase}}
+% notation-index: $\LambdaSubstStep$
+\newcommand{\LambdaSubstStep}{\mathsf{subststep}}
+% notation-index: $\LambdaSubstFuel$
+\newcommand{\LambdaSubstFuel}{\mathsf{substfuel}}
+% notation-index: $\LambdaSubstCode$
+\newcommand{\LambdaSubstCode}{\mathsf{substcode}}
+% notation-index: $\LambdaBoundedSubst{k}{M}{x}{N}$
+\newcommand{\LambdaBoundedSubst}[4]{S_{#1}(#2,#3,#4)}
+% notation-index: $\LambdaBindingCode{A}$
+\newcommand{\LambdaBindingCode}[1]{\mathsf{bcode}(#1)}
+% notation-index: $\LambdaCloseTree{A}{i}{k}$
+\newcommand{\LambdaCloseTree}[3]{\mathsf{close}_{#2,#3}(#1)}
+% notation-index: $\LambdaCloseCode$
+\newcommand{\LambdaCloseCode}{\mathsf{closecode}}
+% notation-index: $\LambdaBindingProgram$
+\newcommand{\LambdaBindingProgram}{\mathsf{bindcode}}
+% notation-index: $\LambdaAlphaTest$
+\newcommand{\LambdaAlphaTest}{\mathsf{alphaeq}}
+% notation-index: $\LambdaListCode{\ell}$
+% notation-type: \LambdaListCode : a -> Nat
+\newcommand{\LambdaListCode}[1]{\FiniteSequenceCode{#1}}
+% notation-index: $\LambdaListDecode{e}$
+% notation-type: \LambdaListDecode : Nat -> Seq(Nat)
+\newcommand{\LambdaListDecode}[1]{\mathsf{ldecode}(#1)}
+% notation-index: $\LambdaListCons$
+\newcommand{\LambdaListCons}{\mathsf{cons}}
+% notation-index: $\LambdaListField{i}$
+\newcommand{\LambdaListField}[1]{\mathsf{lfield}_{#1}}
+% notation-index: $\LambdaListFold{Z}{H}$
+\newcommand{\LambdaListFold}[2]{\mathsf{lfold}(#1,#2)}
+% notation-index: $\LambdaListRecursor$
+\newcommand{\LambdaListRecursor}{\mathsf{lrec}}
+% notation-index: $\LambdaPrefixStep{A}$
+\newcommand{\LambdaPrefixStep}[1]{\mathsf{prefixStep}_{#1}}
+% notation-index: $\LambdaInputPrefix$
+\newcommand{\LambdaInputPrefix}{\mathsf{prefix}}
+% notation-index: $\LambdaListAppend$
+\newcommand{\LambdaListAppend}{\mathsf{append}}
+% notation-index: $\LambdaListMap$
+\newcommand{\LambdaListMap}{\mathsf{map}}
+% notation-index: $\LambdaListAny$
+\newcommand{\LambdaListAny}{\mathsf{any}}
+% notation-index: $\LambdaListMember$
+\newcommand{\LambdaListMember}{\mathsf{member}}
+% notation-index: $\ListConcat{\ell}{m}$
+\newcommand{\ListConcat}[2]{#1\mathbin{+\!+}#2}
+% notation-index: $\ListMap{f}{\ell}$
+\newcommand{\ListMap}[2]{\mathsf{map}(#1,#2)}
+% notation-index: $\LambdaBetaSuccessors{M}$
+\newcommand{\LambdaBetaSuccessors}[1]{\mathsf{red}(#1)}
+% notation-index: $\LambdaReductListCode{M}$
+\newcommand{\LambdaReductListCode}[1]{\mathsf{rcode}(#1)}
+% notation-index: $\LambdaRootReduct$
+\newcommand{\LambdaRootReduct}{\mathsf{rootred}}
+% notation-index: $\LambdaReductState$
+\newcommand{\LambdaReductState}{\mathsf{redstate}}
+% notation-index: $\LambdaReductProgram$
+\newcommand{\LambdaReductProgram}{\mathsf{redlist}}
+% notation-index: $\LambdaBetaStepTest$
+\newcommand{\LambdaBetaStepTest}{\mathsf{betastep}}
+% notation-index: $\LambdaCertificateCode{c}$
+\newcommand{\LambdaCertificateCode}[1]{\mathsf{ccode}(#1)}
+% notation-index: $\LambdaCertificateCheck$
+\newcommand{\LambdaCertificateCheck}{\mathsf{cert}}
+% notation-index: $\LambdaBoundedBetaProgram$
+\newcommand{\LambdaBoundedBetaProgram}{\mathsf{btest}}
+% notation-index: $\LambdaNumeralCodeProgram$
+\newcommand{\LambdaNumeralCodeProgram}{\mathsf{numcode}}
+% notation-index: $\LambdaClosedTest$
+\newcommand{\LambdaClosedTest}{\mathsf{closed}}
+% notation-index: $\LambdaProgramCode$
+\newcommand{\LambdaProgramCode}{\mathsf{pcode}}
+% notation-index: $\LambdaProgramInputCode$
+\newcommand{\LambdaProgramInputCode}{\mathsf{inputcode}}
+% notation-index: $\LambdaOutputTest$
+\newcommand{\LambdaOutputTest}{\mathsf{outtest}}
+% notation-index: $\LambdaOutputCandidate$
+\newcommand{\LambdaOutputCandidate}{\mathsf{candidate}}
+% notation-index: $\LambdaOutputSearch$
+\newcommand{\LambdaOutputSearch}{\mathsf{outsearch}}
+% notation-index: $\LambdaBetaTest{s}{M}{N}$
+\newcommand{\LambdaBetaTest}[3]{\mathsf{test}_{#1}(#2,#3)}
+
+% notation-index: $\LambdaHeadSteps{M}{N}$
+\newcommand{\LambdaHeadSteps}[2]{#1\mathrel{\to_h^*}#2}
+% notation-index: $\LambdaStandardSteps{M}{N}$
+\newcommand{\LambdaStandardSteps}[2]{#1\mathrel{\Rightarrow_{\!s}}#2}
+
+% notation-index: $\LambdaHeadStep{M}{N}$
+\newcommand{\LambdaHeadStep}[2]{#1\mathrel{\to_h}#2}
+% notation-index: $\LambdaResultSearchKernel{G}{F}$
+\newcommand{\LambdaResultSearchKernel}[2]{L_{#1,#2}}
+% notation-index: $\LambdaResultSearch$
+\newcommand{\LambdaResultSearch}{\mathsf{searchResult}}
+
+% notation-index: $\LambdaQuerySuccessors{t}{M}$
+\newcommand{\LambdaQuerySuccessors}[2]{\mathsf{qred}_{#1}(#2)}
+% notation-index: $\LambdaInputSuccessors{t}{M}$
+\newcommand{\LambdaInputSuccessors}[2]{\mathsf{ired}_{#1}(#2)}
+% notation-index: $\LambdaInputCertificate{t}{M}{N}{c}$
+\newcommand{\LambdaInputCertificate}[4]{\mathsf{icert}_{#1}(#2,#3;#4)}
+% notation-index: $\LambdaAnswerTableCode{t}$
+% notation-type: \LambdaAnswerTableCode : Seq(Prod(Nat,Nat)) -> Nat
+\newcommand{\LambdaAnswerTableCode}[1]{\mathsf{acode}(#1)}
+% notation-index: $\LambdaInputTest{p}{s}{M}{N}$
+\newcommand{\LambdaInputTest}[4]{\mathsf{itest}^{#1}_{#2}(#3,#4)}
+
+% notation-index: $\LambdaSyntaxRecursor$
+\newcommand{\LambdaSyntaxRecursor}{\mathsf{srec}}
+% notation-index: $\LambdaRootQueryProgram$
+\newcommand{\LambdaRootQueryProgram}{\mathsf{qroot}}
+% notation-index: $\LambdaQueryReductListCode{t}{M}$
+\newcommand{\LambdaQueryReductListCode}[2]{\mathsf{qcode}_{#1}(#2)}
+% notation-index: $\LambdaQueryReductProgram$
+\newcommand{\LambdaQueryReductProgram}{\mathsf{qlist}}
+% notation-index: $\LambdaInputReductProgram$
+\newcommand{\LambdaInputReductProgram}{\mathsf{ilist}}
+% notation-index: $\LambdaInputStepTest$
+\newcommand{\LambdaInputStepTest}{\mathsf{istep}}
+% notation-index: $\LambdaInputCertificateCheck$
+\newcommand{\LambdaInputCertificateCheck}{\mathsf{icheck}}
+% notation-index: $\LambdaAnswerAgreementCheck$
+\newcommand{\LambdaAnswerAgreementCheck}{\mathsf{acheck}}
+% notation-index: $\LambdaInputCandidateCheck$
+\newcommand{\LambdaInputCandidateCheck}{\mathsf{icand}}
+% notation-index: $\LambdaBoundedInputCheck$
+\newcommand{\LambdaBoundedInputCheck}{\mathsf{ibounded}}
+% notation-index: $\LambdaInputHeadStep{p}{M}{N}$
+\newcommand{\LambdaInputHeadStep}[3]{#2 \mathrel{\to_{h,#1}} #3}
+% notation-index: $\LambdaInputHeadSteps{p}{M}{N}$
+\newcommand{\LambdaInputHeadSteps}[3]{#2 \mathrel{\to_{h,#1}^{*}} #3}
+% notation-index: $\LambdaInputStandardSteps{p}{M}{N}$
+\newcommand{\LambdaInputStandardSteps}[3]{#2 \mathrel{\to_{s,#1}} #3}
+% notation-index: $\LambdaQueryInputCodeProgram$
+\newcommand{\LambdaQueryInputCodeProgram}{\mathsf{qinput}}
+% notation-index: $\LambdaQueryOutputCandidate$
+\newcommand{\LambdaQueryOutputCandidate}{\mathsf{qoutcand}}
+% notation-index: $\LambdaQueryOutputSearch$
+\newcommand{\LambdaQueryOutputSearch}{\mathsf{qeval}}
+
+% notation-index: $\LambdaFiniteTrial$
+\newcommand{\LambdaFiniteTrial}{\mathsf{trial}}
+
+% notation-index: $\LambdaUniformInterpreter$
+\newcommand{\LambdaUniformInterpreter}{\mathsf{ueval}}
+% notation-index: $\LambdaIndexSpecialization{P}{e}$
+\newcommand{\LambdaIndexSpecialization}[2]{\mathsf{spec}_{#2}(#1)}
+% notation-index: $\LambdaDiagonalTerm{H}$
+\newcommand{\LambdaDiagonalTerm}[1]{D_{#1}}
+% notation-index: $\LambdaSpecializationCode{u}{e}$
+\newcommand{\LambdaSpecializationCode}[2]{\mathsf{scode}(#1,#2)}
+% notation-index: $\LambdaSpecializationCodeProgram$
+\newcommand{\LambdaSpecializationCodeProgram}{\mathsf{specializeCode}}
+
+% notation-index: $\LambdaNameAccessor{i}{A}$
+\newcommand{\LambdaNameAccessor}[2]{\mathsf{access}_{#1}(#2)}
+% notation-index: $\LambdaCylinderPrefix{A}{K}$
+\newcommand{\LambdaCylinderPrefix}[2]{\mathsf{cprefix}_{#1}(#2)}
+% notation-index: $\LambdaCylinderQuery{A}{B}{K}$
+\newcommand{\LambdaCylinderQuery}[3]{\mathsf{cquery}_{#1,#2}(#3)}
+% notation-index: $\LambdaCylinderTest{A}{B}$
+\newcommand{\LambdaCylinderTest}[2]{\mathsf{ctest}_{#1,#2}}
+% notation-index: $\LambdaContinuousReader$
+\newcommand{\LambdaContinuousReader}{\mathsf{cread}}
+
+% notation-index: $\HaltingReal$
+\newcommand{\HaltingReal}{\alpha_K}
+% Norm of an element of a normed space, with no space subscript: the
+% ambient norm of the chapter (an operator norm, a Hilbert-space norm).
+% Measured norms carry their own macros, as \LpNorm does.
+% notation-index: $\Norm{x}$
+% notation-type: \Norm : a -> Real (a in a normed space)
+\newcommand{\Norm}[1]{\|#1\|}
+% notation-index: $\LpNorm{p}{f}$
+\newcommand{\LpNorm}[2]{\lVert #2\rVert_{L^{#1}}}
+% notation-index: $\FourierTransform{f}$
+\newcommand{\FourierTransform}[1]{\widehat{#1}}
+% notation-index: $\BernsteinBasis{d}{j}{t}$
+\newcommand{\BernsteinBasis}[3]{b_{#1,#2}(#3)}
+% notation-index: $\BernsteinApproximation{d}{g}{t}$
+\newcommand{\BernsteinApproximation}[3]{B_{#1}(#2)(#3)}
+% notation-index: $\ExponentialPartialSum{N}{z}$
+\newcommand{\ExponentialPartialSum}[2]{E_{#1}(#2)}
+% notation-index: $\FourierSeriesCutoff{M}{n}$
+\newcommand{\FourierSeriesCutoff}[2]{N(#1,#2)}
+% notation-index: $\IntervalFourierPolynomial{a}{b}{N}{\xi}$
+\newcommand{\IntervalFourierPolynomial}[4]{P^{#1,#2}_{#3}(#4)}
+% notation-index: $\IntervalFourierCoefficient{a}{b}{j}$
+\newcommand{\IntervalFourierCoefficient}[3]{c^{#1,#2}_{#3}}
+% notation-index: $\FourierCoefficientSensitivity{j}{S}$
+\newcommand{\FourierCoefficientSensitivity}[2]{H_{#1}(#2)}
+
+% notation-index: $\LambdaListLength$
+\newcommand{\LambdaListLength}{\mathsf{llen}}
+
+% notation-index: $\LambdaListDrop$
+\newcommand{\LambdaListDrop}{\mathsf{ldrop}}
+
+% notation-index: $\LambdaListGet$
+\newcommand{\LambdaListGet}{\mathsf{lget}}
+
+% notation-index: $\ZeroExtendedWord{s}$
+% notation-type: \ZeroExtendedWord : Seq(Nat) -> Name
+\newcommand{\ZeroExtendedWord}[1]{#1 0^\omega}
+% notation-index: $\WordPair{s}{t}$
+% notation-type: \WordPair : Seq(a) x Seq(a) -> Seq(a)
+\newcommand{\WordPair}[2]{\mathsf{pairw}(#1,#2)}
+% notation-index: $\LambdaListTabulate{F}$
+\newcommand{\LambdaListTabulate}[1]{\mathsf{tab}_{#1}}
+% notation-index: $\WitnessRow{v}{i}{k}$
+\newcommand{\WitnessRow}[3]{\mathsf{row}(#1,#2,#3)}
+% notation-index: $\LambdaWitnessRow$
+\newcommand{\LambdaWitnessRow}{\mathsf{rowlist}}
+% notation-index: $\LambdaListPair$
+\newcommand{\LambdaListPair}{\mathsf{pairlist}}
+
+% notation-index: $\LambdaListTake$
+\newcommand{\LambdaListTake}{\mathsf{ltake}}
+
+% notation-index: $\LambdaListPrefix$
+\newcommand{\LambdaListPrefix}{\mathsf{lprefix}}
+
+% notation-index: $\LambdaRelativeSearch{T}$
+\newcommand{\LambdaRelativeSearch}[1]{\mathsf{rsearch}_{#1}}
+% notation-index: $\LambdaAcceptanceTest{e}$
+\newcommand{\LambdaAcceptanceTest}[1]{\mathsf{accept}_{#1}}
+% notation-index: $\LambdaTotalEnumeration{e}{a_\ast}$
+\newcommand{\LambdaTotalEnumeration}[2]{\mathsf{enum}_{#1,#2}}
+
+% notation-index: $\LambdaRelativeProduct{T}$
+\newcommand{\LambdaRelativeProduct}[1]{\mathsf{rbprod}_{#1}}
+
+% notation-index: $\LambdaBoundedProduct{T}$
+\newcommand{\LambdaBoundedProduct}[1]{\mathsf{bprod}_{#1}}
+
+% notation-index: $\LambdaPrefixMargins{M}$
+\newcommand{\LambdaPrefixMargins}[1]{\mathsf{margins}_{#1}}
+
+% notation-index: $\LambdaPrefixCertificate$
+\newcommand{\LambdaPrefixCertificate}{\mathsf{pcert}}
+% notation-index: $\LambdaExtractBall{M}$
+\newcommand{\LambdaExtractBall}[1]{\mathsf{extract}_{#1}}
+
+% notation-index: $\LambdaEnumerationTrial{M}$
+\newcommand{\LambdaEnumerationTrial}[1]{\mathsf{enumTrial}_{#1}}
+% notation-index: $\LambdaEnumerationSemidecider{M}{e}$
+\newcommand{\LambdaEnumerationSemidecider}[2]{\mathsf{enumSearch}_{#1,#2}}
+
+
+% notation-index: $\LambdaPreimageTrial{M}{E}$
+\newcommand{\LambdaPreimageTrial}[2]{\mathsf{preimageTrial}_{#1,#2}}
+% notation-index: $\LambdaPreimageRealizer{M}{E}$
+\newcommand{\LambdaPreimageRealizer}[2]{\mathsf{preimageRealizer}_{#1,#2}}
+
+% notation-index: $\NumberBinding{n}{x}$
+\newcommand{\NumberBinding}[2]{\mathsf{bind}(#1,#2)}
+
+% Borel-expression constructors and their root interpretation.
+% notation-index: $\BorelLeafCode{n}$
+\newcommand{\BorelLeafCode}[1]{\mathsf{leaf}(#1)}
+% notation-index: $\BorelComplementCode{c}$
+\newcommand{\BorelComplementCode}[1]{\mathsf{neg}(#1)}
+% notation-index: $\BorelUnionCode{(c_i)}$
+\newcommand{\BorelUnionCode}[1]{\mathsf{union}(#1)}
+% notation-index: $\BorelValue{c}$
+\newcommand{\BorelValue}[1]{B_{#1}}
+
+% Nonnegative real encoded by its strict fraction lower cut.
+% notation-index: $\NonnegativeRealCut{r}$
+\newcommand{\NonnegativeRealCut}[1]{C_{#1}}
+
+% Internal finite-level cylinder union and tree body.
+% notation-index: $\InternalTreeLevel{M}{T}{n}$
+\newcommand{\InternalTreeLevel}[3]{C_{#3}^{#1}(#2)}
+% notation-index: $\InternalTreeBody{M}{T}$
+\newcommand{\InternalTreeBody}[2]{\TreeBody{#2}^{#1}}
+
+% Arithmetic recognition and external decoding of nonnegative real cuts.
+% notation-index: $\RealCutCondition{C}$
+\newcommand{\RealCutCondition}[1]{\operatorname{Cut}(#1)}
+% notation-index: $\RealCutValue{C}$
+\newcommand{\RealCutValue}[1]{\operatorname{val}(#1)}
+
+% Lower approximations and sums of nonnegative real cuts.
+% notation-index: $\RealCutApprox{C}{a}{b}$
+\newcommand{\RealCutApprox}[3]{\operatorname{Low}_{#1}(#2,#3)}
+% notation-index: $\RealCutSum{C}{D}$
+\newcommand{\RealCutSum}[2]{\operatorname{SumCut}(#1,#2)}
+
+% Rounded countable intersection of strict fraction cuts.
+% notation-index: $\RealCutInfimum{C}$
+\newcommand{\RealCutInfimum}[1]{\operatorname{InfCut}(#1)}
+
+% Real code of a finite binary-tree level weight.
+% notation-index: $\TreeLevelMeasureCode{T}{n}$
+\newcommand{\TreeLevelMeasureCode}[2]{Q_{#2}(#1)}
+
+% Values in a measure graph, its finite-additivity law, and internal cylinders.
+% notation-index: $\MeasureValueCode{F}{A}$
+\newcommand{\MeasureValueCode}[2]{v_{#1}(#2)}
+% notation-index: $\FiniteAdditivityLaw{D}{R}{F}$
+\newcommand{\FiniteAdditivityLaw}[3]{\operatorname{FA}(#1,#2,#3)}
+% notation-index: $\InternalCylinder{M}{s}$
+\newcommand{\InternalCylinder}[2]{\cyl{#2}^{#1}}
+
+% Rank layers and the Borel expressions representing them.
+% notation-index: $\OrdinalRankLayer{\alpha}{s}$
+\newcommand{\OrdinalRankLayer}[2]{L_{#1,#2}}
+% notation-index: $\RankLayer{a}{s}$
+\newcommand{\RankLayer}[2]{A_{#1,#2}}
+% notation-index: $\RankLayerCode{a}{s}$
+\newcommand{\RankLayerCode}[2]{c_{#1,#2}}
+% notation-index: $\BorelEmptyCode$
+\newcommand{\BorelEmptyCode}{\mathsf{empty}}
+% notation-index: $\BorelIntersectionCode{(c_i)}$
+\newcommand{\BorelIntersectionCode}[1]{\mathsf{inter}(#1)}
+% notation-index: $\BorelBinaryUnionCode{c}{d}$
+\newcommand{\BorelBinaryUnionCode}[2]{\mathsf{join}(#1,#2)}
+
+% notation-index: $\LambdaIterateProgram{P}$
+\newcommand{\LambdaIterateProgram}[1]{\mathsf{iter}_{#1}}
+% notation-index: $\LambdaRankLabelProgram{P}{Q}$
+\newcommand{\LambdaRankLabelProgram}[2]{\mathsf{ranklabel}_{#1,#2}}
+
+% Boundary in an explicitly named ambient space.
+% notation-index: $\AmbientBoundary{X}{A}$
+\newcommand{\AmbientBoundary}[2]{\partial_{#1}#2}
+% The three dimension functions used in the zero-dimensionality appendix.
+% A finite nonnegative level, shared by the three dimension-bound APIs.
+\newcommand{\NonnegativeDimensionLevel}[1]{#1}
+% notation-index: $\SmallInductiveDimension{X}$
+\newcommand{\SmallInductiveDimension}[1]{\operatorname{ind}(#1)}
+% notation-index: $\LargeInductiveDimension{X}$
+\newcommand{\LargeInductiveDimension}[1]{\operatorname{Ind}(#1)}
+% notation-index: $\CoveringDimension{X}$
+\newcommand{\CoveringDimension}[1]{\operatorname{dim}(#1)}
+
+% notation-index: $\CantorNotationIndex{d}{t}$
+% notation-type: \CantorNotationIndex : Nat x Nat -> Nat
+\newcommand{\CantorNotationIndex}[2]{\mathsf{ord}(#1,#2)}
+% notation-index: $\CantorSelfIndex{d}{t}{p}$
+% notation-type: \CantorSelfIndex : Nat x Nat x Nat -> Nat
+\newcommand{\CantorSelfIndex}[3]{\mathsf{self}(#1,#2,#3)}
+% notation-index: $\CantorStageIndex{d}{t}{p}{a}$
+% notation-type: \CantorStageIndex : Nat x Nat x Nat x Nat -> Nat
+\newcommand{\CantorStageIndex}[4]{\mathsf{stage}(#1,#2,#3,#4)}
+
+% notation-index: $\CantorMatrixIndex{a}$
+% notation-type: \CantorMatrixIndex : Nat -> Nat
+\newcommand{\CantorMatrixIndex}[1]{\mathsf{matrix}(#1)}
+
+% notation-index: $\CantorReaderIndex{a}$
+% notation-type: \CantorReaderIndex : Nat -> Nat
+\newcommand{\CantorReaderIndex}[1]{\mathsf{read}(#1)}
+
+% notation-index: $\LambdaTwoParameterIndex{a}{p}{k}$
+% notation-type: \LambdaTwoParameterIndex : Nat x Nat x Nat -> Nat
+\newcommand{\LambdaTwoParameterIndex}[3]{\mathsf{spec}_2(#1,#2,#3)}
+
+% notation-index: $\DescentDomainIndex{a}$
+% notation-type: \DescentDomainIndex : Nat -> Nat
+\newcommand{\DescentDomainIndex}[1]{\mathsf{dom}(#1)}
+
+% notation-index: $\TreeDifferenceLabelIndex{a}{p}$
+% notation-type: \TreeDifferenceLabelIndex : Nat x Nat -> Nat
+\newcommand{\TreeDifferenceLabelIndex}[2]{\mathsf{diff}(#1,#2)}
+
+% notation-index: $\PureTreeProgramIndex{a}$
+% notation-type: \PureTreeProgramIndex : Nat -> Nat
+\newcommand{\PureTreeProgramIndex}[1]{\mathsf{pure}(#1)}
+
+% notation-index: $\CantorKernelLabelIndex{a}{p}$
+% notation-type: \CantorKernelLabelIndex : Nat x Nat -> Nat
+\newcommand{\CantorKernelLabelIndex}[2]{\mathsf{ker}(#1,#2)}
+
+% notation-index: $\CantorScatteredLabelIndex{a}{p}$
+% notation-type: \CantorScatteredLabelIndex : Nat x Nat -> Nat
+\newcommand{\CantorScatteredLabelIndex}[2]{\mathsf{scat}(#1,#2)}
+
+% The real-valued indicator of a set.
+\newcommand{\IndicatorFunction}[1]{\chi_{#1}}

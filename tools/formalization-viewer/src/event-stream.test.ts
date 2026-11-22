@@ -121,3 +121,15 @@ test("instances are isolated — one stream's handlers never see another's event
   b.sources.last().emit("watch", "for-b");
   assert.deepEqual(gotA, []); // b's source is wholly separate
 });
+
+test("a throwing subscriber does not block other subscribers", () => {
+  const { stream, sources } = makeStream();
+  stream.onStreamEvent("watch", () => {
+    throw new Error("broken subscriber");
+  });
+  const got: string[] = [];
+  stream.onStreamEvent("watch", (data) => got.push(data));
+  stream.connectStream();
+  sources.last().emit("watch", "next");
+  assert.deepEqual(got, ["next"]);
+});

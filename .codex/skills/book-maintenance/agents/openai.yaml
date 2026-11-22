@@ -1,0 +1,4 @@
+interface:
+  display_name: "Book Maintenance"
+  short_description: "Reconcile book review evidence and validation reports"
+  default_prompt: "Use $book-maintenance to check review flags against saved evidence and summarize any justified updates."

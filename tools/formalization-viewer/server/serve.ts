@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+import { preloadViewerModules } from "./module-preload.ts";
+import { CorrespondenceService } from "./correspondence.ts";
+import { ensureSearchIndex } from "./search-index.ts";
+import { bookReferences } from "./references.ts";
+import { fixedMath } from "./mathml.ts";
+import { bookDefinitionRegistry } from "./definitions.ts";
+import { HighlightService } from "./highlight-cache.ts";
 // Static file server for the formalization viewer plus a Lean LSP bridge.
 //
 // Serves the repository over HTTP like `python -m http.server` and adds a bridge
@@ -26,19 +33,33 @@ import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
-import { Projects } from "./projects.ts";
+import { Projects, VIEWER_DIR } from "./projects.ts";
 import type { Manifest } from "./projects.ts";
 import { SessionRegistry } from "./lean-bridge.ts";
 import type { Sink } from "./lean-bridge.ts";
 import { FileWatcher } from "./file-watcher.ts";
+import { BuildLogSockets } from "./build-log-socket.ts";
 import { BookBuilder } from "./book-builder.ts";
+import { chapterTitles } from "./chapter-titles.ts";
 import { isTrustedRequest } from "./request-trust.ts";
+import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
+import { createGzip, gzipSync } from "node:zlib";
+import { pipeline } from "node:stream";
 import { repoVersion, attachLicenseText, appendVendorComponents, katexMacros, macrosTexPath } from "./repo-version.ts";
 
 const ROOT = fs.realpathSync(process.env.BOOKLINK_ROOT ?? process.cwd());
+const HOST = (process.env.BOOKLINK_VIEWER_HOST ?? "127.0.0.1").trim().replace(/\.+$/, "").toLowerCase();
+if (!HOST) throw new Error("BOOKLINK_VIEWER_HOST must not be empty");
+const BIND_ADDRESS = isIP(HOST) ? HOST : (await lookup(HOST)).address;
+if (BIND_ADDRESS === "0.0.0.0" || BIND_ADDRESS === "::") {
+  throw new Error("BOOKLINK_VIEWER_HOST must resolve to a specific local IP address");
+}
+const URL_HOST = HOST.includes(":") ? `[${HOST}]` : HOST;
 // Requested port; 0 means "let the OS assign a free port". The bound port is
 // read back from the listening socket below.
 const PORT = (() => {
@@ -47,6 +68,8 @@ const PORT = (() => {
 })();
 
 const projects = new Projects(ROOT, process.env.BOOKLINK_PROJECT ?? "");
+const highlightService = new HighlightService(ROOT);
+const correspondenceService = new CorrespondenceService(ROOT);
 const sessions = new SessionRegistry(projects.defaultLspRoot);
 
 // Build-status fan-out: book-builder reports {dir,state} on build start/finish;
@@ -63,15 +86,21 @@ function broadcastBuild(status: { dir: string; state: string }): void {
   for (const sink of sinks) sink.put(payload);
 }
 
-// Rebuild a book's debug PDF + viewer source map when its Markdown source
-// changes; the regenerated build/ files reload the panes through the watcher.
+// Rebuild a book's debug PDF + viewer source map when its Markdown or Lean
+// source changes; the regenerated build/ files reload the panes through the
+// watcher.
+const buildLogs = new BuildLogSockets(HOST);
 const builder = new BookBuilder(
   ROOT,
   projects.projects,
   (m) => process.stderr.write(`${m}\n`),
   (status) => broadcastBuild(status),
+  (dir, text, reset) => buildLogs.publish(dir, text, reset),
 );
-const watcher = new FileWatcher(ROOT, projects.watchDirs, projects.watchAliases, (rel) => builder.notify(rel));
+const watcher = new FileWatcher(ROOT, projects.watchDirs, projects.watchAliases, (rel) => {
+  correspondenceService.invalidate(rel);
+  builder.notify(rel);
+});
 
 const MIME: Record<string, string> = {
   ".html": "text/html",
@@ -100,6 +129,18 @@ const MIME: Record<string, string> = {
 
 const POST_BODY_LIMIT = 16 * 1024 * 1024;
 
+function acceptsGzip(header: string | undefined): boolean {
+  let wildcard = false;
+  for (const item of (header ?? "").toLowerCase().split(",")) {
+    const [coding, ...parameters] = item.trim().split(";");
+    const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
+    const accepted = quality === undefined || Number(quality.trim().slice(2)) > 0;
+    if (coding === "gzip") return accepted;
+    if (coding === "*") wildcard = accepted;
+  }
+  return wildcard;
+}
+
 function safeDecode(s: string): string {
   try {
     return decodeURIComponent(s);
@@ -117,17 +158,31 @@ function safeDecode(s: string): string {
 function sendError(res: ServerResponse, status: number, message: string): void {
   if (res.writableEnded) return;
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end(message);
+  res.end(res.req.method === "HEAD" ? undefined : message);
 }
 
-function sendJson(res: ServerResponse, obj: unknown, status = 200): void {
+function sendJson(res: ServerResponse, obj: unknown, status = 200, revalidate = false): void {
   if (res.writableEnded) return;
   const data = JSON.stringify(obj);
+  if (revalidate && status === 200) {
+    const etag = `W/"${crypto.createHash("sha256").update(data).digest("hex")}"`;
+    res.setHeader("ETag", etag);
+    res.setHeader("Cache-Control", "no-cache");
+    if (
+      String(res.req.headers["if-none-match"] ?? "")
+        .split(",")
+        .map((tag) => tag.trim())
+        .includes(etag)
+    ) {
+      res.writeHead(304);
+      return void res.end();
+    }
+  }
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(data),
   });
-  res.end(data);
+  res.end(res.req.method === "HEAD" ? undefined : data);
 }
 
 function noStoreRoute(route: string): boolean {
@@ -178,27 +233,38 @@ function sendText(res: ServerResponse, text: string): void {
     "Content-Length": Buffer.byteLength(text),
     "Cache-Control": "no-store",
   });
-  res.end(text);
+  res.end(res.req.method === "HEAD" ? undefined : text);
 }
 
 // Serve the viewer's index.html with the current build version injected, so the
 // running page knows exactly which build it loaded and can detect a newer one.
-// Read-and-rewrite rather than stream because it is one small file.
+let viewerIndex: { version: string; html: string; gzip?: Buffer } | undefined;
+
 function serveViewerIndex(res: ServerResponse): void {
-  let html: string;
-  try {
-    html = fs.readFileSync(path.join(VIEWER_DIR_ABS, "index.html"), "utf-8");
-  } catch {
-    return sendError(res, 404, "Not Found");
+  const version = viewerBuildVersion();
+  if (viewerIndex?.version !== version) {
+    let html: string;
+    try {
+      html = fs.readFileSync(path.join(VIEWER_DIR_ABS, "index.html"), "utf-8");
+    } catch {
+      return sendError(res, 404, "Not Found");
+    }
+    html = preloadViewerModules(html, VIEWER_DIR_ABS);
+    const meta = `<meta name="viewer-build-version" content="${version}">`;
+    viewerIndex = {
+      version,
+      html: html.includes("</head>") ? html.replace("</head>", `  ${meta}\n</head>`) : `${meta}\n${html}`,
+    };
   }
-  const meta = `<meta name="viewer-build-version" content="${viewerBuildVersion()}">`;
-  const injected = html.includes("</head>") ? html.replace("</head>", `  ${meta}\n</head>`) : `${meta}\n${html}`;
+  const index = viewerIndex;
+  const gzip = acceptsGzip(res.req.headers["accept-encoding"]);
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
-    "Content-Length": Buffer.byteLength(injected),
-    "Cache-Control": "no-store",
+    ...(gzip ? { "Content-Encoding": "gzip" } : { "Content-Length": Buffer.byteLength(index.html) }),
+    Vary: "Accept-Encoding",
+    "Cache-Control": "no-cache",
   });
-  res.end(injected);
+  res.end(res.req.method === "HEAD" ? undefined : gzip ? (index.gzip ??= gzipSync(index.html)) : index.html);
 }
 
 // --- static file serving ----------------------------------------------------
@@ -213,9 +279,12 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, urlPath: string)
   if (urlPath.endsWith("/")) fsPath = path.join(fsPath, "index.html");
 
   // The viewer's own index.html is served with the build version injected so the
-  // page can detect a later rebuild and self-reload; GET only (HEAD keeps the
-  // plain streamed path, which still 200s for probes).
-  if (req.method === "GET" && path.resolve(fsPath) === path.join(VIEWER_DIR_ABS, "index.html")) {
+  // page can detect a later rebuild and self-reload. HEAD uses that same
+  // representation and content length while omitting the body.
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    path.resolve(fsPath) === path.join(VIEWER_DIR_ABS, "index.html")
+  ) {
     return serveViewerIndex(res);
   }
 
@@ -244,8 +313,27 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, urlPath: string)
     return sendError(res, 404, "Not Found");
   }
 
+  // Stream large text assets through gzip without buffering the whole source
+  // map in memory. PDFs and already-compressed binary assets stay unchanged.
+  const contentType =
+    path.basename(fsPath) === "ai-catalog.json"
+      ? "application/ai-catalog+json"
+      : (MIME[path.extname(fsPath).toLowerCase()] ?? "application/octet-stream");
+  const compressible =
+    stat.size >= 1024 &&
+    (contentType.startsWith("text/") ||
+      ["application/json", "application/ai-catalog+json", "application/x-tex", "image/svg+xml"].includes(contentType));
+  if (compressible) res.setHeader("Vary", "Accept-Encoding");
+  const gzip = compressible && acceptsGzip(req.headers["accept-encoding"]);
   const lastModified = stat.mtime.toUTCString();
-  const ims = req.headers["if-modified-since"];
+  const etag = `W/"${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}-${stat.ctimeMs.toString(16)}"`;
+  res.setHeader("ETag", etag);
+  const inm = req.headers["if-none-match"];
+  if (typeof inm === "string" && (inm === "*" || inm.split(",").some((tag) => tag.trim() === etag))) {
+    res.writeHead(304);
+    return void res.end();
+  }
+  const ims = inm === undefined ? req.headers["if-modified-since"] : undefined;
   if (typeof ims === "string") {
     const imsTime = Date.parse(ims);
     if (!Number.isNaN(imsTime) && Math.floor(stat.mtimeMs / 1000) <= Math.floor(imsTime / 1000)) {
@@ -255,20 +343,21 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, urlPath: string)
   }
 
   const headers: Record<string, string | number> = {
-    "Content-Type": MIME[path.extname(fsPath).toLowerCase()] ?? "application/octet-stream",
-    "Content-Length": stat.size,
+    "Content-Type": contentType,
     "Last-Modified": lastModified,
   };
+  if (gzip) headers["Content-Encoding"] = "gzip";
+  else headers["Content-Length"] = stat.size;
   // Dev server: serve the viewer's own assets uncached so an esbuild rebuild —
   // and the page reload the file-watch triggers — loads the new JS/CSS.
   if (noStoreRoute(urlPath.split("?")[0])) headers["Cache-Control"] = "no-store";
 
   res.writeHead(200, headers);
   if (req.method === "HEAD") return void res.end();
-  const stream = fs.createReadStream(fsPath);
-  stream.on("error", () => res.destroy());
-  res.on("close", () => stream.destroy());
-  stream.pipe(res);
+  const stream = fs.createReadStream(realPath);
+  // pipeline tears down every stream on cancellation or read/compression error.
+  if (gzip) pipeline(stream, createGzip(), res, () => {});
+  else pipeline(stream, res, () => {});
 }
 
 // --- SSE streaming ----------------------------------------------------------
@@ -302,6 +391,10 @@ function startSse(res: ServerResponse, cleanup: () => void): void {
     "Cache-Control": "no-cache",
     Connection: "close",
   });
+  if (res.req.method === "HEAD") {
+    res.end();
+    return;
+  }
   const ping = setInterval(() => {
     if (!res.writableEnded) res.write(": ping\n\n");
   }, 15000);
@@ -358,13 +451,39 @@ function sendManifest(res: ServerResponse, meta: Manifest): void {
     return sendError(res, 404, "Not Found");
   }
   data.pdfs = projects.projectPdfList(meta);
+  data.chapterTitles = chapterTitles(ROOT, meta);
   data.version = repoVersion(ROOT);
   if (data.license) {
     appendVendorComponents(ROOT, data.license);
     attachLicenseText(ROOT, data.license);
   }
+  data.definitionRegistry = bookDefinitionRegistry(ROOT, meta);
+  data.references = bookReferences(ROOT, meta);
   data.katexMacros = katexMacros(macrosTexPath(ROOT, meta.dir));
-  sendJson(res, data);
+  data.fixedMath = fixedMath(
+    ROOT,
+    path.join(meta.dir, String(meta.sourceMap)),
+    data.katexMacros as Record<string, string>,
+  );
+  sendJson(res, data, 200, true);
+}
+
+// --- highlight cache ----------------------------------------------------------
+
+// Precomputed tree-sitter highlight data (server/highlight-cache.ts). A static
+// distribution ships the same URLs as files; here they are computed on demand
+// and memoized by source hash, so an edit recomputes exactly one file.
+function serveHighlightData(res: ServerResponse, meta: Manifest, rel: string): void {
+  highlightService
+    .get(meta, rel)
+    .then((data) => {
+      if (!data) return sendError(res, 404, "Not Found");
+      sendJson(res, data);
+    })
+    .catch((error: Error) => {
+      process.stderr.write(`[viewer] highlight request failed: ${error?.stack ?? error}\n`);
+      sendError(res, 500, "Internal Server Error");
+    });
 }
 
 // --- request handling -------------------------------------------------------
@@ -382,6 +501,7 @@ function readBody(req: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const declared = Number.parseInt(req.headers["content-length"] ?? "", 10);
     if (!Number.isNaN(declared) && (declared < 0 || declared > limit)) {
+      req.pause();
       reject(Object.assign(new Error("request body too large"), { code: 413 }));
       return;
     }
@@ -391,7 +511,8 @@ function readBody(req: IncomingMessage, limit: number): Promise<string> {
       size += chunk.length;
       if (size > limit) {
         reject(Object.assign(new Error("request body too large"), { code: 413 }));
-        req.destroy();
+        chunks.length = 0;
+        req.pause();
         return;
       }
       chunks.push(chunk);
@@ -424,6 +545,8 @@ async function handlePost(req: IncomingMessage, res: ServerResponse, route: stri
     sendJson(res, { ok: true });
   } catch (error) {
     if ((error as { code?: number }).code === 413) {
+      res.setHeader("Connection", "close");
+      res.once("finish", () => req.destroy());
       sendJson(res, { ok: false, error: "request body too large" }, 413);
     } else {
       sendJson(res, { ok: false, error: String((error as Error).message ?? error) }, 500);
@@ -432,11 +555,17 @@ async function handlePost(req: IncomingMessage, res: ServerResponse, route: stri
 }
 
 function handleGet(req: IncomingMessage, res: ServerResponse, route: string, url: URL): void {
+  if (route === "/.well-known/ai-catalog.json") return serveStatic(req, res, `${VIEWER_DIR}/ai-catalog.json`);
   if (route === "/projects.json") {
     // The book selector in the viewer lists every served project.
     return sendJson(
       res,
-      projects.projects.map((meta) => ({ name: meta.name ?? meta.dir, dir: meta.dir, mount: meta.mount })),
+      projects.projects.map((meta) => ({
+        name: meta.name ?? meta.dir,
+        selectorLabel: meta.selectorLabel,
+        dir: meta.dir,
+        mount: meta.mount,
+      })),
     );
   }
   if (route === "/viewer-version") {
@@ -445,13 +574,16 @@ function handleGet(req: IncomingMessage, res: ServerResponse, route: string, url
     return sendText(res, viewerBuildVersion());
   }
   if (route === "/events" || route.startsWith("/lsp/") || route.startsWith("/watch/")) {
+    if (req.method === "HEAD" && ["/events", "/lsp/events", "/watch/events"].includes(route)) {
+      return startSse(res, () => {});
+    }
     if (route === "/events") return streamCombined(req, res, sessionIdOf(url));
     if (route === "/lsp/info") {
       const projectDir = url.searchParams.get("project") ?? projects.defaultProject.dir;
       const lspRoot = projects.lspRoots.get(projectDir);
       if (lspRoot === undefined) return sendJson(res, { error: `unknown project: ${projectDir}` }, 404);
       return sendJson(res, {
-        rootUri: `file://${lspRoot}`,
+        rootUri: pathToFileURL(lspRoot).href,
         rootPath: lspRoot,
         running: sessions.running(sessionIdOf(url)),
       });
@@ -462,13 +594,53 @@ function handleGet(req: IncomingMessage, res: ServerResponse, route: string, url
   }
   if (route === "/" || projects.mounts.has(route)) {
     res.writeHead(302, {
-      Location: `${route === "/" ? projects.defaultMount : route}/`,
+      Location: `${route === "/" ? projects.defaultMount : route}/${url.search}`,
       "Content-Length": "0",
     });
     return void res.end();
   }
   for (const meta of projects.byMount) {
+    if (route === `${meta.mount}/correspondence.json` || route === `${meta.mount}/correspondence-lean.json`) {
+      const source = url.searchParams.get("source") ?? "";
+      if (!source.startsWith(`${meta.dir}/`) || !source.endsWith(".md") || !projects.isAllowedPath(`/${source}`))
+        return sendError(res, 404, "Not Found");
+      res.setHeader("Cache-Control", "no-cache");
+      void correspondenceService
+        .read(source, route.endsWith("/correspondence-lean.json"))
+        .then((data) => sendJson(res, data, 200, true))
+        .catch((error) => {
+          console.error("[viewer] correspondence", error);
+          sendJson(res, { status: "error", reason: "inspection-failed", formulas: [] }, 503);
+        });
+      return;
+    }
     if (route === `${meta.mount}/manifest.json`) return sendManifest(res, meta);
+  }
+  for (const meta of projects.byMount) {
+    const prefix = `${meta.mount}/pagefind/`;
+    if (!route.startsWith(prefix)) continue;
+    const asset = safeDecode(route.slice(prefix.length));
+    if (!/^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/.test(asset) || asset.split("/").includes(".."))
+      return sendError(res, 404, "Not Found");
+    void ensureSearchIndex(ROOT, meta)
+      .then((directory) => {
+        if (!directory) return sendError(res, 404, "Not Found");
+        serveStatic(req, res, `/${path.relative(ROOT, path.join(directory, asset)).split(path.sep).join("/")}`);
+      })
+      .catch((error) => {
+        console.error("[viewer] search index", error);
+        sendError(res, 503, "Search index unavailable");
+      });
+    return;
+  }
+  for (const meta of projects.byMount) {
+    const prefix = `${meta.mount}/highlight-cache/`;
+    if (route.startsWith(prefix) && route.endsWith(".json")) {
+      // Authorize the encoded path, as for static files: both consumers decode once.
+      const rel = route.slice(prefix.length, -".json".length);
+      if (!projects.isAllowedPath(`/${meta.dir}/${rel}`)) return sendError(res, 404, "Not Found");
+      return void serveHighlightData(res, meta, safeDecode(rel));
+    }
   }
   const rewritten = projects.applyMount(route);
   if (!projects.isAllowedPath(rewritten)) return sendError(res, 403, "Forbidden");
@@ -485,7 +657,7 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
   try {
     const host = req.headers.host;
     const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
-    if (!isTrustedRequest(host, origin)) return sendError(res, 403, "Forbidden");
+    if (!isTrustedRequest(host, origin, HOST)) return sendError(res, 403, "Forbidden");
 
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const route = (req.url ?? "/").split("?", 1)[0].split("#", 1)[0];
@@ -495,11 +667,6 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     if (req.method === "GET" || req.method === "HEAD") {
-      if (req.method === "HEAD") {
-        const rewritten = projects.applyMount(route);
-        if (!projects.isAllowedPath(rewritten)) return sendError(res, 403, "Forbidden");
-        return serveStatic(req, res, rewritten);
-      }
       return handleGet(req, res, route, url);
     }
     sendError(res, 405, "Method Not Allowed");
@@ -552,26 +719,51 @@ function installProcessGuards(): void {
 function main(): void {
   installProcessGuards();
   const server = http.createServer(handle);
+  server.on("upgrade", (req, socket, head) => {
+    buildLogs.upgrade(req, socket, head, (dir) => {
+      if (!projects.projects.some((meta) => meta.dir === dir)) return null;
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(path.join(ROOT, dir, "build/viewer-build.log"), "r");
+        const size = fs.fstatSync(fd).size;
+        const buffer = Buffer.alloc(Math.min(size, 1024 * 1024));
+        fs.readSync(fd, buffer, 0, buffer.length, size - buffer.length);
+        return buffer.toString("utf8");
+      } catch {
+        return "";
+      } finally {
+        if (fd !== undefined) fs.closeSync(fd);
+      }
+    });
+  });
   server.on("clientError", (_err, socket) => socket.destroy());
   server.keepAliveTimeout = 120000;
-  server.listen(PORT, "127.0.0.1", () => {
+  server.listen(PORT, BIND_ADDRESS, () => {
     const address = server.address();
     const port = typeof address === "object" && address !== null ? address.port : PORT;
     for (const meta of projects.projects) {
-      process.stdout.write(`Formalization viewer: http://127.0.0.1:${port}${meta.mount}/\n`);
+      process.stdout.write(`Formalization viewer: http://${URL_HOST}:${port}${meta.mount}/\n`);
     }
     process.stdout.write(`Lean LSP bridge: serving ${ROOT}\n`);
-    openBrowser(`http://127.0.0.1:${port}${projects.defaultMount}/`);
+    openBrowser(`http://${URL_HOST}:${port}${projects.defaultMount}/`);
   });
 
   let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    watcher.shutdown();
-    await builder.shutdown();
-    await sessions.shutdownAll();
-    process.exit(0);
+    // The watchexec supervisor waits for this process to exit before it can
+    // restart the server, so a cleanup step that throws or hangs must never
+    // keep the process alive: exit on any path, and force-exit on a timeout.
+    const failsafe = setTimeout(() => process.exit(1), 15000);
+    failsafe.unref();
+    try {
+      await watcher.shutdown();
+      await builder.shutdown();
+      await sessions.shutdownAll();
+    } finally {
+      process.exit(0);
+    }
   };
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());

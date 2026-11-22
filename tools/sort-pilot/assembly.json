@@ -1,0 +1,43 @@
+{
+  "source": "polish-space/src/polish-space-book/inside-effective-topos.md",
+  "sourceHash": "5d5d8a2575c2087d028ab3e1735af4bf5cdab416736dae6761515dd026ee2da2",
+  "leanFingerprints": {
+    "PolishSpaceBook.LambdaIndexPCA.ComputesName": "6a07f64cad14fa8aed28b802f4f1b96a1d83d3d864187331db8bbfe1777854e2",
+    "PolishSpaceBook.LambdaIndexPCA.HasComputableName": "9596ae8a5f3b61bd31a226613b5b73bd20752a03609d0cf501a3de376034de6e",
+    "PolishSpaceBook.LambdaIndexPCA.computablePointAssembly": "9ea708e189e751dd4aaf6da632c0d8de384961d4912af5e72844d26b7139bfcc",
+    "PolishSpaceBook.Representation": "86737bdd3b3d76df36c2b31be1130c9e7b98e46718f952c38487b3c2cc8f07b2",
+    "PolishSpaceBook.Representation.mk": "d5b1b482f974398fd005437b766715f14c1b75cf7fef8903b845709878c696d7"
+  },
+  "bindings": [
+    {
+      "symbol": "e",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.ComputesName",
+      "slot": 0
+    },
+    {
+      "symbol": "p",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.ComputesName",
+      "slot": 1
+    },
+    {
+      "symbol": "X",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.HasComputableName",
+      "slot": 0
+    },
+    {
+      "symbol": "\\delta",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.HasComputableName",
+      "slot": 1
+    },
+    {
+      "symbol": "x",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.HasComputableName",
+      "slot": 2
+    },
+    {
+      "symbol": "A_\\delta",
+      "declaration": "PolishSpaceBook.LambdaIndexPCA.computablePointAssembly",
+      "slot": "result"
+    }
+  ]
+}

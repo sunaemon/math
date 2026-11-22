@@ -1,10 +1,8 @@
 // Request provenance checks for the formalization viewer's bridge.
 //
-// The server binds 127.0.0.1 only, but a malicious web page can still aim a
-// cross-origin request at it (and DNS-rebinding can make a hostile name resolve
-// to loopback). So every request is accepted only when its Host is a loopback
-// name and its Origin (when present) matches that Host exactly. This mirrors the
-// SimpleHTTPRequestHandler-based Python server's is_trusted_request.
+// Only the listening address is trusted: loopback names for the default local
+// server, or the explicitly configured IP or DNS name for a VPN listener. An Origin, when
+// present, must match Host exactly, including the port.
 
 import { isIP } from "node:net";
 
@@ -74,9 +72,12 @@ function originMatchesHost(origin: string, host: string): boolean {
   }
   const scheme = parsed.protocol.replace(/:$/, "");
   if ((scheme !== "http" && scheme !== "https") || !parsed.hostname) return false;
-  const originHost = parsed.hostname.replace(/\.+$/, "").toLowerCase();
+  const originHost = parsed.hostname
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "")
+    .toLowerCase();
   const [hostName, hostPort] = splitHostPort(host);
-  if (hostName === null || !isLoopbackName(originHost)) return false;
+  if (hostName === null) return false;
   // URL.port is "" when absent or default; Python's urlparse(...).port is None.
   const originPort = parsed.port === "" ? null : parsed.port;
   return (
@@ -85,6 +86,14 @@ function originMatchesHost(origin: string, host: string): boolean {
   );
 }
 
-export function isTrustedRequest(host: string | undefined, origin: string | undefined): boolean {
-  return isLoopbackHost(host) && originMatchesHost(origin ?? "", host ?? "");
+export function isTrustedRequest(
+  host: string | undefined,
+  origin: string | undefined,
+  bindHost = "127.0.0.1",
+): boolean {
+  const configuredHost = bindHost.trim().replace(/\.+$/, "").toLowerCase();
+  const trustedHost = isLoopbackName(configuredHost)
+    ? isLoopbackHost(host)
+    : configuredHost !== "" && hostWithoutPort(host) === configuredHost;
+  return trustedHost && originMatchesHost(origin ?? "", host ?? "");
 }

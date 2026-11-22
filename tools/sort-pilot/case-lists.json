@@ -1,0 +1,63 @@
+{
+  "id": "lists",
+  "source": "polish-space/src/polish-space-book/appendix-borel-absoluteness.md",
+  "startAnchor": "### Internal finite-list coding",
+  "endAnchor": "\\begin{corollary*}[\\termdefine{Internal standard cylinder interpretation}]",
+  "bindings": [
+    {
+      "symbol": "s",
+      "declaration": "SortPilot.wordAsSet",
+      "slot": 0,
+      "leanType": "List ℕ",
+      "occurrence": "s"
+    },
+    {
+      "symbol": "n",
+      "declaration": "SortPilot.decodedWord",
+      "slot": 0,
+      "leanType": "ℕ",
+      "occurrence": "n"
+    }
+  ],
+  "expressions": [
+    {
+      "book": "e(s)",
+      "lean": "SortPilot.wordAsSet",
+      "interpretation": "Finite list -> set-theoretic function graph."
+    },
+    {
+      "book": "\\LambdaListCode{s}",
+      "lean": "SortPilot.wordCode",
+      "interpretation": "Finite list -> natural-number code."
+    },
+    {
+      "book": "e(\\LambdaListDecode{n})",
+      "lean": "SortPilot.decodedGraph",
+      "interpretation": "Decode to a list and then embed it as a set-theoretic graph."
+    },
+    {
+      "book": "\\Pair{e(s)}{n}\\in C",
+      "lean": "SortPilot.fixedEncodingEntry",
+      "interpretation": "The fixed-point identification C=E gives graph membership; numerical n is embedded by natOrdinal."
+    },
+    {
+      "book": "\\LambdaListDecode{\\LambdaListCode{s}}=s",
+      "lean": "SortPilot.decodeEncode",
+      "interpretation": "Inverse numbering on actual lists."
+    }
+  ],
+  "leanFingerprints": {
+    "SortPilot.wordAsSet": "05b256b4e00b94db7f779b00809aa7ccd05811832fbe588b7b11ab285eb3b8ef",
+    "SortPilot.wordCode": "13272f66fbfabd08f59c600b05d2f3aa3d63c664dc180b8842a0be318ca0c540",
+    "SortPilot.decodedWord": "1ce68f4e94698d18316b9b2dd69d0c108e2930bf30c485ea05cbbffd8dbd7b35",
+    "SortPilot.decodedGraph": "902e2ba37034be59d0ee9819b0b88482a5f0ef121d494c2a860cb9dad499421f",
+    "SortPilot.fixedEncodingEntry": "9a71c4805d41a104b6d304c7cb559b6a0bcdac7d15ab087416d19bca68b3573b",
+    "SortPilot.encodingEntry": "26f66a6ee788f36aa168bd7cf84bde5004361680edef2e95888fcf41e3cef81d",
+    "SortPilot.decodingEntry": "24c9bcdd637e6a43f940bbc8ae69e3f754fbce1ae59f5067e17a4b68f6529107",
+    "SortPilot.decodeEncode": "5efe7fff5fba1b7e61bbbf8fe14e6e5d3dbc15bc52ed8385aa6454bf0b55b2f0",
+    "PolishSpaceBook.SetTheoryModels.listCodeGraph_mem": "00604892ecb0b3f7cb8a92d0d0beb2842bb37ce952d3a75f896e0b75d07af8ab",
+    "PolishSpaceBook.SetTheoryModels.listDecodeGraph_mem": "ac5cc9bc8e71150e791e8f49654c504c5db9c5c3f5b18d0c91a229e2f014a47c"
+  },
+  "badSlot": "result",
+  "sourceHash": "4b2dd1556e4d6695f75aa442105d5eae4eaf87554f3b03ad6622b2832e1f8bac"
+}

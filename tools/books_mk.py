@@ -6,7 +6,8 @@ Each `<dir>/src/<stem>.json` manifest defines a book whose master source is
 all manifests into a single Make include (`BOOK_STEMS` plus per-book
 `<stem>_DIR`, `<stem>_MANIFEST`, `<stem>_SOURCE`, `<stem>_CHAPTERS`,
 `<stem>_INPUTS`, and the `<stem>_PANDOC_INPUTS` / `<stem>_BOOKLINK_DEPS` pair
-that routes booklink chapters through their injected copies), so the Makefile
+that routes chapters carrying booklinks or formalization-skip metadata through
+their injected copies), so the Makefile
 needs one process per `make` invocation no matter how many books exist.
 
 The Lean files passed after `--leans` are scanned for booklink markers — the
@@ -20,10 +21,9 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 
+from book_manifest import read_book_manifest
 from booklink_sourcemap import discover_booklinks
-from book_manifest import read_manifest
-
-STEM_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+from formalization_annotations import parse_formalization_scope
 
 
 def fail(message: str) -> int:
@@ -54,24 +54,20 @@ def main(argv: list[str]) -> int:
     lines: list[str] = []
     seen: dict[str, str] = {}
     viewer_deps: dict[str, list[str]] = {}
+    all_skip_sources: set[str] = set()
     for raw in manifests:
         manifest = PurePosixPath(raw)
         parts = manifest.parts
         if len(parts) != 3 or parts[1] != "src" or manifest.suffix != ".json":
             return fail(f"manifest path must look like <dir>/src/<stem>.json: {manifest}")
-        stem = manifest.stem
-        if not STEM_PATTERN.match(stem):
-            return fail(f"book stem must match {STEM_PATTERN.pattern}: {manifest}")
+        try:
+            stem, source, chapters = read_book_manifest(Path(raw))
+        except ValueError as exc:
+            return fail(str(exc))
         if stem in seen:
             return fail(f"duplicate book stem {stem!r}: {seen[stem]} and {manifest}")
         seen[stem] = str(manifest)
 
-        try:
-            source, chapters = read_manifest(Path(raw))
-        except ValueError as exc:
-            return fail(str(exc))
-        if PurePosixPath(source).stem != stem:
-            return fail(f"{manifest}: source file must be named {stem}.md, got {source}")
         for value in (source, *chapters):
             if re.search(r"[\s#$%:]", value):
                 return fail(f"{manifest}: path is not Make-safe: {value!r}")
@@ -81,16 +77,26 @@ def main(argv: list[str]) -> int:
         # (booklink_sourcemap.book_src_root), so an excerpt that owns its Lean
         # file through a symlink matches its own book-local chapter directly and
         # the sourcemap stays book-local with no path rewrite. A chapter that
-        # has booklinks is built through an injected copy under
+        # has booklinks or formalization-skip metadata is built through an
+        # injected copy under
         # $(BUILD_DIR)/booklink-src/<input>; PANDOC_INPUTS is the pandoc input
         # list with such chapters swapped for their injected copies, and
         # BOOKLINK_DEPS lists those copies as prerequisites.
         book_leans: list[str] = []
+        try:
+            skip_sources = {
+                inp
+                for inp in [source, *chapters]
+                if parse_formalization_scope(Path(inp).read_text(encoding="utf-8"), inp).has_skips
+            }
+        except (OSError, ValueError) as exc:
+            return fail(str(exc))
+        all_skip_sources.update(skip_sources)
         pandoc_inputs: list[str] = []
         booklink_deps: list[str] = []
         for inp in [source, *chapters]:
             leans = source_to_leans.get(inp, [])
-            if leans:
+            if leans or inp in skip_sources:
                 book_leans.extend(leans)
                 injected = f"$(BUILD_DIR)/booklink-src/{inp}"
                 pandoc_inputs.append(injected)
@@ -109,6 +115,7 @@ def main(argv: list[str]) -> int:
         if booklink_deps:
             lines.append(f"{stem}_BOOKLINK_DEPS := {' '.join(sorted(set(booklink_deps)))}")
         lines.append(f"{stem}_BOOKLINK_LEANS := {' '.join(book_leans)}")
+        lines.append(f"{stem}_SKIP_SOURCES := {' '.join(sorted(skip_sources))}")
 
         deps = viewer_deps.setdefault(parts[0], [])
         if book_leans:
@@ -125,6 +132,7 @@ def main(argv: list[str]) -> int:
     print(f"BOOK_STEMS := {' '.join(stems)}")
     print(f"BOOKLINK_LEANS := {' '.join(str(lean) for lean, _sources in booklinks)}")
     print(f"BOOKLINK_SOURCES := {' '.join(sorted(source_to_leans))}")
+    print(f"BOOKLINK_SKIP_SOURCES := {' '.join(sorted(all_skip_sources))}")
     print("\n".join(lines))
     for dirname, deps in viewer_deps.items():
         print(f"{dirname}_VIEWER_DEPS := {' '.join(deps)}")

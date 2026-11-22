@@ -1,0 +1,35 @@
+{
+  "comment": "Book dependencies and validation adapters. License paths are relative to this manifest; the formalization viewer reads this list through license.vendorManifests in the book manifest.",
+  "components": [
+    {
+      "id": "borel-det",
+      "name": "Manthe Borel determinacy",
+      "version": "42bc874b2357ca7e7573b31854a0d09761e11e41",
+      "spdx": "Apache-2.0",
+      "homepage": "https://github.com/sven-manthe/A-formalization-of-Borel-determinacy-in-Lean",
+      "licenseFile": "borel-det/LICENSE",
+      "description": "Maintained Lean port of the required upstream import closure; provenance and original source hashes are in borel-det/UPSTREAM.json.",
+      "distribution": "build-only"
+    },
+    {
+      "id": "afk",
+      "name": "Ackerman–Freer–Knight Vaught conjecture formalization",
+      "version": "348f38d92c3cd67968ccfb79102f0c7a96d0be33",
+      "spdx": "Apache-2.0",
+      "homepage": "https://github.com/cameronfreer/vaught-conjecture-counterexample",
+      "licenseFile": "afk-validation/LICENSE",
+      "description": "External validation dependency fetched at this revision into build/afk-validation. Upstream Lean sources are not vendored here; the unmodified upstream license is retained.",
+      "distribution": "build-only"
+    },
+    {
+      "id": "afk-validation",
+      "name": "Book AFK validation adapter",
+      "version": "repository version",
+      "spdx": "MIT",
+      "homepage": "https://github.com/sunaemon/math-private",
+      "licenseFile": "afk-validation/LICENSE-MIT",
+      "description": "Locally written ChartClass.lean adapter, checked separately using the pinned AFK toolchain.",
+      "distribution": "build-only"
+    }
+  ]
+}

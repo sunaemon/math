@@ -6,19 +6,12 @@
 // shared document state, no cross-tab id collisions, and one tab's
 // reload/restart never disturbs another.
 //
-// Node runs single-threaded, so the locks the Python original needed are gone:
-// any run of synchronous code is atomic, and the only interleavings happen at
-// `await` points. The one contract that still matters is that a grace-period
-// reaper (a timer) must not tear a bridge down while a send is in flight (the
-// send `await`s spawning/writing); the in-flight counter below preserves it.
+// Sends and lifecycle changes share one queue: a restart must finish reaping
+// the previous process before another send can spawn or write to its successor.
 
-import { spawn } from "node:child_process";
-import type { ChildProcessByStdio } from "node:child_process";
-import type { Writable, Readable } from "node:stream";
 import { killGroup, terminate } from "./process-group.ts";
-
-// stdio: ["pipe", "pipe", "ignore"] -> stdin/stdout present, stderr ignored.
-type LeanProc = ChildProcessByStdio<Writable, Readable, null>;
+import { LspFrames } from "./lsp-frames.ts";
+import { spawnLean, type LeanProc, type SpawnLean } from "./lsp-process.ts";
 
 export interface Sink {
   put(text: string): void;
@@ -49,87 +42,79 @@ export class LeanBridge implements BridgeLike {
   root: string;
   private proc: LeanProc | null = null;
   private epoch = 0;
+  private usable = false;
+  private pending: Promise<void> = Promise.resolve();
+  private readonly spawnServer: SpawnLean;
   private clients = new Set<Sink>();
 
-  constructor(root: string) {
+  constructor(root: string, spawnServer: SpawnLean = spawnLean) {
     this.root = root;
+    this.spawnServer = spawnServer;
   }
 
   running(): boolean {
-    return this.proc !== null && this.proc.exitCode === null && this.proc.signalCode === null;
+    return this.usable && this.proc !== null && this.proc.exitCode === null && this.proc.signalCode === null;
   }
 
-  private spawnProcess(): void {
+  private async spawnProcess(): Promise<void> {
     this.epoch += 1;
     const epoch = this.epoch;
-    // detached puts the server in its own process group so we can signal the
-    // whole tree (lake -> lean) and never orphan the child.
-    const proc = spawn("lake", ["env", "lean", "--server"], {
-      cwd: this.root,
-      stdio: ["pipe", "pipe", "ignore"],
-      detached: true,
-    });
+    const proc = this.spawnServer(this.root);
     this.proc = proc;
-
-    let buffer = Buffer.alloc(0);
+    this.usable = false;
+    const frames = new LspFrames();
     let dead = false;
-    // Only announce closure for the still-current server, so an intentional
-    // restart does not surface as a crash to the new client.
     const announceClosed = (): void => {
       if (dead) return;
       dead = true;
+      if (this.proc === proc) {
+        this.usable = false;
+        // A failed spawn has no process to reap. A closed stdout can still
+        // belong to a live child; retain that handle until shutdown/restart.
+        if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) this.proc = null;
+      }
       if (epoch === this.epoch) this.broadcast(BRIDGE_CLOSED);
     };
-
     proc.stdout.on("data", (chunk: Buffer) => {
       if (dead) return;
-      buffer = Buffer.concat([buffer, chunk]);
-      for (;;) {
-        const headerEnd = buffer.indexOf("\r\n\r\n");
-        if (headerEnd < 0) return;
-        let length = 0;
-        let malformed = false;
-        for (const line of buffer.subarray(0, headerEnd).toString("latin1").split("\r\n")) {
-          if (line.toLowerCase().startsWith("content-length:")) {
-            const parsed = Number.parseInt(line.slice(line.indexOf(":") + 1).trim(), 10);
-            if (Number.isNaN(parsed)) {
-              malformed = true;
-            } else {
-              length = parsed;
-            }
-          }
-        }
-        if (malformed) {
-          // Treat like a dropped server so clients self-heal.
-          announceClosed();
-          killGroup(proc, "SIGTERM");
-          return;
-        }
-        const bodyStart = headerEnd + 4;
-        if (buffer.length - bodyStart < length) return;
-        const body = buffer.subarray(bodyStart, bodyStart + length).toString("utf-8");
-        buffer = buffer.subarray(bodyStart + length);
-        this.broadcast(body);
+      try {
+        for (const body of frames.push(chunk)) this.broadcast(body);
+      } catch {
+        announceClosed();
+        killGroup(proc, "SIGTERM");
       }
     });
     proc.stdout.on("end", announceClosed);
+    proc.stdin.on("error", announceClosed);
     proc.on("exit", announceClosed);
     proc.on("error", announceClosed);
+    await new Promise<void>((resolve, reject) => {
+      proc.once("spawn", () => {
+        if (dead) return reject(new Error("Lean bridge closed during startup"));
+        this.usable = true;
+        resolve();
+      });
+      proc.once("error", reject);
+    });
   }
 
-  private ensure(): void {
-    if (!this.running()) this.spawnProcess();
-  }
-
-  private async restart(): Promise<void> {
-    await terminate(this.proc);
+  private async stopProcess(): Promise<void> {
+    this.epoch += 1;
+    const proc = this.proc;
     this.proc = null;
-    this.spawnProcess();
+    this.usable = false;
+    await terminate(proc);
   }
 
-  async shutdown(): Promise<void> {
-    await terminate(this.proc);
-    this.proc = null;
+  private enqueue(action: () => Promise<void>): Promise<void> {
+    const result = this.pending.then(action);
+    // A failed send must not poison the queue for the next reconnect attempt.
+    this.pending = result.catch(() => {});
+    return result;
+  }
+
+  shutdown(): Promise<void> {
+    return this.enqueue(() => this.stopProcess());
   }
 
   private broadcast(text: string): void {
@@ -139,21 +124,20 @@ export class LeanBridge implements BridgeLike {
     for (const sink of [...this.clients]) sink.put(text);
   }
 
-  async send(text: string): Promise<void> {
-    // `initialize` is the first message of an LSP session. A reused Lean server
-    // rejects a second initialize, so start a fresh server for each one; this
-    // makes browser reloads reconnect cleanly.
-    if (isInitialize(text)) {
-      await this.restart();
-    } else {
-      this.ensure();
-    }
-    const proc = this.proc;
-    if (proc === null || proc.stdin === null) {
-      throw new Error("Lean bridge is not running");
-    }
-    const data = Buffer.from(text, "utf-8");
-    proc.stdin.write(Buffer.concat([Buffer.from(`Content-Length: ${data.length}\r\n\r\n`, "latin1"), data]));
+  send(text: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (isInitialize(text) || !this.running()) {
+        await this.stopProcess();
+        await this.spawnProcess();
+      }
+      const proc = this.proc;
+      if (proc === null || !this.running()) throw new Error("Lean bridge is not running");
+      const data = Buffer.from(text, "utf-8");
+      const framed = Buffer.concat([Buffer.from(`Content-Length: ${data.length}\r\n\r\n`, "latin1"), data]);
+      await new Promise<void>((resolve, reject) => {
+        proc.stdin.write(framed, (error) => (error ? reject(error) : resolve()));
+      });
+    });
   }
 
   subscribe(sink: Sink): void {
@@ -272,7 +256,12 @@ export class SessionRegistry {
     // The bridge may have been created by an earlier /events subscribe with the
     // default root; correct it before the lazy spawn (the first send) so
     // `lake env lean --server` runs in this session's project lake dir.
-    if (root !== undefined && !bridge.running()) bridge.root = root;
+    if (root !== undefined && root !== bridge.root) {
+      if (bridge.running() || this.inflight.get(sessionId)) {
+        throw new Error("LSP session belongs to another project; create a new session");
+      }
+      bridge.root = root;
+    }
     // Treat the send as activity: cancel any pending reaper and mark the session
     // in-flight so a reaper that has already fired skips the shutdown (see reap)
     // instead of tearing the bridge down mid-write. The finally reschedules it.

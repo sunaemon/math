@@ -1,0 +1,17 @@
+name = "PolishSpaceBook"
+defaultTargets = ["PolishSpaceBook"]
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4.git"
+rev = "v4.35.0"
+
+[[lean_lib]]
+name = "PolishSpaceBook"
+srcDir = "lean"
+
+[[lean_lib]]
+name = "BorelDet"
+srcDir = "vendor/borel-det"
+leanOptions = { autoImplicit = false, backward.isDefEq.respectTransparency = false }
+moreLeanArgs = ["-Dbackward.isDefEq.respectTransparency.types=false"]

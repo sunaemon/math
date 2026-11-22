@@ -1,0 +1,3142 @@
+# Frozen, test-only differential oracle from 7d0e3927; never imported by production.
+def translate(tree, variables, records=None, trace=None):
+    """Shared compositional operation rules; no formula-specific Lean wrappers."""
+    by_offset = {v["formulaOffset"]: v for v in variables}
+    declaration_contexts = set()
+    integer_depth = 0
+    case_equalities = []
+
+    def sequence_numeral_domain(node):
+        witness = "(fun «" + node["binderName"] + "» : Nat => " + go_untraced(node["sequenceBody"]) + ")"
+        return "(bookSequenceCodomain% " + witness + ")"
+
+    def real_scalar_operand(node):
+        """Use a real-valued comparison witness before elaborating arithmetic."""
+        tokens = (
+            [t for child in node["items"] for t in expression_tokens(child)]
+            if node["kind"] == "sequence"
+            else expression_tokens(node)
+        )
+        converted, i = [], 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token["kind"] != "text":
+                return None
+            value = token["text"]
+            if value.isdigit():
+                start = token["start"]
+                i += 1
+                while (
+                    i < len(tokens) and tokens[i].get("text", "").isdigit() and tokens[i]["start"] == start + len(value)
+                ):
+                    value += tokens[i]["text"]
+                    i += 1
+                token = dict(token, text=value, end=start + len(value))
+            else:
+                i += 1
+            variable = by_offset.get(token["start"])
+            if value.isdigit() or variable and variable.get("leanType") in {"Nat", "ℕ", "Int", "ℤ", "Real", "ℝ"}:
+                converted.append(dict(token, kind="real-scalar-atom", body=token))
+            elif value.isspace() or value in {"+", "-", "*", "/", "(", ")"}:
+                converted.append(token)
+            else:
+                return None
+        return sequence_node(converted)
+
+    def comparison_operand(tokens):
+        domain = tree.get("numericContext")
+        if not domain or not all(t["kind"] == "text" and re.fullmatch(r"[0-9+*/()\s-]+", t["text"]) for t in tokens):
+            return sequence_node(tokens)
+        # Only wholly numeric scalar operands of a comparison inherit this
+        # witness. Indices, exponents and arguments of other terms do not.
+        typed, i = [], 0
+        while i < len(tokens):
+            token = tokens[i]
+            if not token["text"].isdigit():
+                typed.append(token)
+                i += 1
+                continue
+            start = token["start"]
+            number = token["text"]
+            i += 1
+            while i < len(tokens) and tokens[i]["text"].isdigit() and tokens[i]["start"] == start + len(number):
+                number += tokens[i]["text"]
+                i += 1
+            typed.append(
+                {
+                    "kind": "source-numeral",
+                    "start": start,
+                    "end": start + len(number),
+                    "numericDomain": domain,
+                    "numeral": number,
+                    "numericStart": start,
+                    "numericEnd": start + len(number),
+                }
+            )
+        return sequence_node(typed)
+
+    def ennreal_comparison_operands(left, right):
+        """Type comparison literals from a resolved source operand, not the observed call."""
+        if not any(
+            (v := by_offset.get(atom(n).get("start"), {})).get("status") == "resolved"
+            and v.get("leanType") in {"ENNReal", "ℝ≥0∞"}
+            for n in (left, right)
+        ):
+            return left, right
+        result = []
+        for operand in (left, right):
+            literal = atom(operand)
+            if literal.get("kind") == "command" and literal.get("name") == "infty":
+                operand = dict(literal, kind="ennreal-top")
+            elif literal.get("kind") == "text" and literal.get("text", "").isdigit():
+                operand = dict(
+                    literal,
+                    kind="ennreal-numeral",
+                    end=literal.get("end", literal["start"] + len(literal["text"])),
+                    operatorStart=literal["start"],
+                    operatorEnd=literal.get("end", literal["start"] + len(literal["text"])),
+                )
+            result.append(operand)
+        return tuple(result)
+
+    def traced(node, rule, term):
+        nonlocal trace
+        if trace is None:
+            return term
+        marker = f"md_operator_{len(trace)}"
+        occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+        while marker in occupied:
+            marker += "_"
+        trace.append(
+            {
+                "marker": marker,
+                "start": node["start"],
+                "end": node["end"],
+                "operatorStart": node.get("operatorStart", node["start"]),
+                "operatorEnd": node["operatorEnd"] if "operatorEnd" in node else node["start"] + len(node["name"]) + 1,
+                "rule": rule,
+                "operandSpans": [
+                    {"start": a["start"], "end": a.get("end", a["start"] + len(a.get("text", "")))}
+                    for a in node["args"]
+                ],
+                "candidate": term,
+            }
+        )
+        # Independently translate source operands in source order. Do not derive
+        # expectations by splitting the generated operator application.
+        saved_trace = trace
+        trace = None
+        try:
+            expected_operands = []
+            expected_implicit = []
+            if "callee" in node:
+                trace_callee = go(node["callee"])
+            else:
+                trace_callee = None
+            if rule in {"application:metric", "application:distance-to-set"}:
+                domain = metric_domain(node["metric"])
+                projection = "toDist" if rule == "application:metric" else "toPseudoMetricSpace"
+                expected_implicit = [
+                    {
+                        "argumentPosition": 0,
+                        "role": "metric-domain",
+                        "candidate": domain,
+                    },
+                    {
+                        "argumentPosition": 1,
+                        "role": "metric-instance",
+                        "candidate": f"({go(node['metric'])}).{projection}",
+                    },
+                ]
+            if rule == "literal:numeral":
+                domain, number = node["numericDomain"]["type"], node["numeral"]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "numeral-type", "candidate": domain},
+                    {
+                        "argumentPosition": 2,
+                        "role": "numeral-instance",
+                        "candidate": f"(inferInstance : OfNat {domain} {number})",
+                    },
+                ]
+            if rule == "cases:real":
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "result-type", "candidate": "ℝ"},
+                    {
+                        "argumentPosition": 2,
+                        "role": "condition-decision",
+                        "candidate": f"Classical.propDecidable ({go(node['args'][0])})",
+                    },
+                ]
+            if rule == "type:homeomorphism":
+                expected_implicit = [
+                    {
+                        "argumentPosition": i + 2,
+                        "sourceOperand": i,
+                        "role": "space-topology",
+                        "candidate": f"(inferInstance : TopologicalSpace ({go(operand)}))",
+                    }
+                    for i, operand in enumerate(node["args"])
+                ]
+            if rule == "type:dependent-sum":
+                expected_implicit = [{"argumentPosition": 0, "role": "index-type", "candidate": "Nat"}]
+            if rule == "constructor:sigma-pair":
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "tag-domain", "candidate": "Nat"},
+                    {"argumentPosition": 1, "role": "fiber-family", "candidate": node["sigmaFamily"]},
+                ]
+            if rule == "predicate:<":
+                expected_operands = [
+                    {"sourceOperand": None, "target": "implicit-radius", "candidate": "«" + node["radiusName"] + "»"},
+                    {"sourceOperand": 0, "candidate": go(node["args"][0])},
+                ]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "radius-type", "candidate": "Real"},
+                    {"argumentPosition": 1, "role": "radius-order", "candidate": "(inferInstance : LT Real)"},
+                ]
+            elif rule == "literal:numeral":
+                expected_operands = [
+                    {"sourceOperand": None, "target": "numeral-value", "candidate": f"({node['numeral']} : Nat)"}
+                ]
+            elif rule == "set:real-upper-ray":
+                expected_operands = [{"sourceOperand": 0, "candidate": f"({go(node['args'][0])} : Real)"}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "interval-type", "candidate": "Real"},
+                    {
+                        "argumentPosition": 1,
+                        "role": "interval-order",
+                        "candidate": "(inferInstance : Preorder Real)",
+                    },
+                ]
+            elif rule == "binder:predicate-set":
+                expected_operands = [{"sourceOperand": 0, "candidate": go(node["args"][0])}]
+                expected_implicit = [{"argumentPosition": 0, "role": "set-domain", "candidate": node["binderType"]}]
+            elif rule in {"coercion:rational-real", "set:singleton", "set:embedded-rationals"}:
+                expected_operands = [{"sourceOperand": 0, "candidate": go(node["args"][0])}]
+                carrier = f"(bookSourceType% ({expected_operands[0]['candidate']}))"
+                implicit = {
+                    "coercion:rational-real": ["Real", "(inferInstance : RatCast Real)"],
+                    "set:singleton": [
+                        carrier,
+                        f"Set {carrier}",
+                        f"(inferInstance : Singleton {carrier} (Set {carrier}))",
+                    ],
+                    "set:embedded-rationals": ["Real", "Rat"],
+                }[rule]
+                expected_implicit = [
+                    {"argumentPosition": i, "role": "ambient-parameter", "candidate": value}
+                    for i, value in enumerate(implicit)
+                ]
+            elif rule == "set:generated-union":
+                expected_operands = [{"sourceOperand": 0, "candidate": go(node["args"][0])}]
+                expected_implicit = [{"argumentPosition": 0, "role": "union-domain", "candidate": node["carrier"]}]
+            elif rule in {"sum:finite", "sum:infinite", "sum:tail"}:
+                function = go(node["args"][-1])
+                if rule == "sum:finite":
+                    expected_operands = [
+                        {"sourceOperand": 0, "candidate": f"Finset.range ({go(node['args'][0])} : ℕ)"},
+                        {"sourceOperand": 1, "candidate": function},
+                    ]
+                    implicit = ["ℕ", "ℝ", "(inferInstance : AddCommMonoid ℝ)"]
+                else:
+                    expected_operands = [
+                        {"sourceOperand": len(node["args"]) - 1, "candidate": function},
+                        {"sourceOperand": None, "candidate": "SummationFilter.unconditional ℕ"},
+                    ]
+                    implicit = ["ℝ", "ℕ", "(inferInstance : AddCommMonoid ℝ)", "(inferInstance : TopologicalSpace ℝ)"]
+                expected_implicit = [
+                    {"argumentPosition": i, "role": "summation-parameter", "candidate": value}
+                    for i, value in enumerate(implicit)
+                ]
+            elif rule == "space:real-lp":
+                expected_operands = [
+                    {"sourceOperand": None, "candidate": "(fun _ : ℕ => ℝ)"},
+                    {"sourceOperand": 0, "candidate": go(node["args"][0])},
+                ]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "sequence-index", "candidate": "Nat"},
+                    {
+                        "argumentPosition": 2,
+                        "role": "coordinate-normed-group",
+                        "candidate": "(fun _ : ℕ => (inferInstance : NormedAddCommGroup ℝ))",
+                    },
+                ]
+            elif rule == "literal:sequence-limit":
+                number = node["numeral"]
+                domain = sequence_numeral_domain(node)
+                expected_operands = [{"sourceOperand": 0, "candidate": f"({number} : Nat)"}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "sequence-codomain", "candidate": domain},
+                    {
+                        "argumentPosition": 2,
+                        "role": "limit-numeral-instance",
+                        "candidate": f"(inferInstance : OfNat ({domain}) {number})",
+                    },
+                ]
+            elif rule == "literal:dimension-level":
+                value = node["dimensionLevel"]
+                expected_operands = [{"sourceOperand": 0, "candidate": f"({value} : Nat)"}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "nonnegative-dimension-level-type", "candidate": "Nat"},
+                    {
+                        "argumentPosition": 2,
+                        "role": "dimension-level-numeral",
+                        "candidate": f"(inferInstance : OfNat Nat {value})",
+                    },
+                ]
+            elif rule == "literal:ennreal-numeral":
+                expected_operands = [
+                    {"sourceOperand": None, "target": "numeral-value", "candidate": f"({node['text']} : Nat)"}
+                ]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "exponent-type", "candidate": "ENNReal"},
+                    {
+                        "argumentPosition": 2,
+                        "role": "exponent-numeral",
+                        "candidate": f"(inferInstance : OfNat ENNReal {node['text']})",
+                    },
+                ]
+            elif rule == "literal:ennreal-top":
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "exponent-type", "candidate": "ENNReal"},
+                    {"argumentPosition": 1, "role": "exponent-top", "candidate": "(inferInstance : Top ENNReal)"},
+                ]
+            elif rule == "power:real-integer":
+                expected_operands = [
+                    {"sourceOperand": 0, "candidate": f"({go(node['args'][0])} : ℝ)"},
+                    {"sourceOperand": 1, "candidate": go(integer_expression(node["args"][1]))},
+                ]
+                expected_implicit = [
+                    {"argumentPosition": i, "role": role, "candidate": value}
+                    for i, role, value in [
+                        (0, "power-base-type", "ℝ"),
+                        (1, "power-exponent-type", "ℤ"),
+                        (2, "power-result-type", "ℝ"),
+                        (3, "power-instance", "(inferInstance : HPow ℝ ℤ ℝ)"),
+                    ]
+                ]
+            elif rule == "operation:restrict":
+                metric = distance_function(node["args"][0])
+                function = "Function.uncurry (" + metric[0] + ")" if metric else go(node["args"][0])
+                expected_operands = [
+                    {"sourceOperand": 1, "candidate": set_operand(node["args"][1])},
+                    {"sourceOperand": 0, "candidate": function},
+                ]
+                if metric:
+                    domain = f"({metric[1]}) × ({metric[1]})"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "restriction-domain", "candidate": domain},
+                        {
+                            "argumentPosition": 1,
+                            "role": "restriction-codomain",
+                            "candidate": f"(fun _ : {domain} => ℝ)",
+                        },
+                    ]
+            elif rule == "relation:metric-le":
+                expected_operands = [
+                    {
+                        "sourceOperand": i,
+                        "candidate": pointwise_distance(operand, node["pointDomain"], node["pointNames"]),
+                    }
+                    for i, operand in enumerate(node["args"])
+                ]
+                function_type = f"({node['pointDomain']}) → ({node['pointDomain']}) → ℝ"
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "pointwise-domain", "candidate": function_type},
+                    {
+                        "argumentPosition": 1,
+                        "role": "pointwise-order",
+                        "candidate": f"(inferInstance : LE ({function_type}))",
+                    },
+                ]
+            elif rule == "relation:sequence-limit":
+                expected_operands = [
+                    {"sourceOperand": 0, "target": "sequence", "candidate": go(node["args"][0])},
+                    {"sourceOperand": None, "target": "source-filter", "candidate": "(Filter.atTop : Filter ℕ)"},
+                    {"sourceOperand": 1, "target": "target-filter", "candidate": "nhds (" + go(node["args"][1]) + ")"},
+                ]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "sequence-domain", "candidate": "Nat"},
+                    {
+                        "argumentPosition": 1,
+                        "role": "sequence-codomain",
+                        "candidate": f"(bookSourceType% ({go(node['args'][1])}))",
+                    },
+                ]
+            elif rule == "operation:composition":
+                outer = go(node["args"][0])
+                inner = distance_function(node["args"][1]) if node.get("metricComposition") else None
+                inner = f"Function.uncurry ({inner[0]})" if inner else go(node["args"][1])
+                expected_operands = [
+                    {"sourceOperand": 0, "candidate": outer},
+                    {"sourceOperand": 1, "candidate": inner},
+                ]
+                expected_implicit = [
+                    {
+                        "argumentPosition": i,
+                        "role": role,
+                        "candidate": f"((fun {{α β : Type _}} (_ : α → β) => {parameter}) ({function}))",
+                    }
+                    for i, (role, parameter, function) in enumerate(
+                        [
+                            ("composition-domain", "α", inner),
+                            ("composition-middle", "β", inner),
+                            ("composition-codomain", "β", outer),
+                        ]
+                    )
+                ]
+            elif rule in {"type:function-arrow", "binder:typed-map"}:
+                expected_operands = [
+                    {"sourceOperand": 0, "target": "forall.body", "candidate": go(node["args"][0])},
+                    {"sourceOperand": 1, "target": "forall.domain", "candidate": go(node["args"][1])},
+                ]
+            elif rule == "binder:repeated-tuple":
+                expected_operands = [
+                    {
+                        "sourceOperand": None,
+                        "target": "lambda.body",
+                        "candidate": f"({repeated_tuple_term(node)}) book_tuple_index",
+                    },
+                    {"sourceOperand": None, "target": "lambda.domain", "candidate": "Nat"},
+                ]
+            elif rule == "application:subtype-argument":
+                expected_operands = [
+                    {
+                        "sourceOperand": 0,
+                        "candidate": f"(bookSubtypeArgument% ({go(node['function'])}), ({go(node['args'][0])}))",
+                    }
+                ]
+            elif rule == "relation:membership-chain-equality":
+                left, middle, ambient = node["args"]
+                expected_operands = [
+                    {"sourceOperand": 0, "candidate": membership_point(left, ambient)},
+                    {"sourceOperand": 1, "candidate": membership_point(middle, ambient)},
+                ]
+                expected_implicit = [
+                    {
+                        "argumentPosition": 0,
+                        "sourceOperand": 2,
+                        "role": "membership-ambient-type",
+                        "candidate": f"((fun {{α : Type _}} (_ : Set α) => α) ({set_operand(ambient)}))",
+                    }
+                ]
+            elif rule == "map:inclusion":
+                left, right = [set_operand(a) for a in node["args"]]
+                expected_operands = [{"sourceOperand": None, "candidate": inclusion_proof(left, right)}]
+                expected_implicit = [
+                    {
+                        "argumentPosition": 0,
+                        "role": "inclusion-ambient-type",
+                        "candidate": f"((fun {{α : Type _}} (_ : Set α) => α) ({left}))",
+                    },
+                    {"argumentPosition": 1, "sourceOperand": 0, "role": "inclusion-source", "candidate": left},
+                    {"argumentPosition": 2, "sourceOperand": 1, "role": "inclusion-target", "candidate": right},
+                ]
+            elif rule == "application:subtype-range":
+                function = go(node["args"][0])
+                carrier = go(node["args"][1])
+                expected_operands = [{"sourceOperand": 0, "candidate": function}]
+                expected_implicit = [
+                    {
+                        "argumentPosition": 0,
+                        "role": "image-codomain",
+                        "candidate": f"((fun {{α β : Type _}} (_ : α → β) => β) ({function}))",
+                    },
+                    {
+                        "argumentPosition": 1,
+                        "sourceOperand": 1,
+                        "role": "image-domain",
+                        "candidate": f"Subtype ({carrier})",
+                    },
+                ]
+            elif rule == "type:subspace-carrier":
+                predicate = go(node["args"][0])
+                expected_operands = [{"sourceOperand": 0, "candidate": predicate}]
+                expected_implicit = [
+                    {
+                        "argumentPosition": 0,
+                        "role": "subspace-ambient-type",
+                        "candidate": f"((fun {{α : Type _}} (_ : Set α) => α) ({predicate}))",
+                    }
+                ]
+            elif rule == "macro:AmbientClosure":
+                domain = go(node["args"][0])
+                expected_operands = [{"sourceOperand": 1, "candidate": set_operand(node["args"][1])}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "sourceOperand": 0, "role": "closure-domain", "candidate": domain},
+                    {
+                        "argumentPosition": 1,
+                        "role": "closure-topology",
+                        "candidate": f"(inferInstance : TopologicalSpace ({domain}))",
+                    },
+                ]
+            elif rule == "macro:MetricBall":
+                metric = go(node["args"][0])
+                domain = f"(bookMetricDomain% ({metric}))"
+                expected_operands = [
+                    {"sourceOperand": 1, "candidate": metric_point(go(node["args"][1]), domain)},
+                    {"sourceOperand": 2, "candidate": go(node["args"][2])},
+                ]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "ball-domain", "candidate": domain},
+                    {
+                        "argumentPosition": 1,
+                        "sourceOperand": 0,
+                        "role": "ball-metric",
+                        "candidate": f"({metric}).toPseudoMetricSpace",
+                    },
+                ]
+            elif rule == "macro:MetricDiameter":
+                domain = metric_domain(node["args"][0])
+                metric = go(node["args"][0])
+                expected_operands = [{"sourceOperand": 1, "candidate": metric_set(node["args"][1], metric)}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "diameter-domain", "candidate": f"(bookMetricDomain% ({metric}))"},
+                    {
+                        "argumentPosition": 1,
+                        "sourceOperand": 0,
+                        "role": "diameter-metric",
+                        "candidate": f"({metric}).toPseudoMetricSpace",
+                    },
+                ]
+            elif rule == "set:empty":
+                witness = set_operand(node["ambient"])
+                domain = f"((fun {{α : Type _}} (_ : Set α) => α) ({witness}))"
+                container = f"Set ({domain})"
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "empty-set-type", "candidate": container},
+                    {
+                        "argumentPosition": 1,
+                        "role": "empty-set-instance",
+                        "candidate": f"(inferInstance : EmptyCollection ({container}))",
+                    },
+                ]
+            elif rule == "relation:decreasing-family":
+                function = go(node["args"][0])
+                codomain = f"((fun {{α β : Type _}} (_ : α → β) => β) ({function}))"
+                expected_operands = [{"sourceOperand": 0, "candidate": function}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "index-type", "candidate": "Nat"},
+                    {"argumentPosition": 1, "role": "set-type", "candidate": codomain},
+                    {"argumentPosition": 2, "role": "index-order", "candidate": "(inferInstance : Preorder Nat)"},
+                    {"argumentPosition": 3, "role": "set-order", "candidate": f"(inferInstance : Preorder {codomain})"},
+                ]
+            elif rule in {"set:indexed-intersection", "set:indexed-union"}:
+                function = go(node["args"][0])
+                codomain = f"((fun {{α β : Type _}} (_ : α → β) => β) ({function}))"
+                instance = "InfSet" if rule == "set:indexed-intersection" else "SupSet"
+                expected_operands = [{"sourceOperand": 0, "candidate": function}]
+                expected_implicit = [
+                    {"argumentPosition": 0, "role": "set-type", "candidate": codomain},
+                    {"argumentPosition": 1, "role": "index-type", "candidate": node.get("indexType", "Nat")},
+                    {
+                        "argumentPosition": 2,
+                        "role": "set-lattice",
+                        "candidate": f"(inferInstance : {instance} {codomain})",
+                    },
+                ]
+            elif rule == "binder:sequence-power":
+                expected_operands = [
+                    {"sourceOperand": 0, "target": "forall.body", "candidate": go(node["args"][0])},
+                    {"sourceOperand": 1, "target": "forall.domain", "candidate": go(node["args"][1])},
+                ]
+            elif rule in {"binder:Sequence", "binder:mapsto", "binder:product", "binder:case", "binder:radius"}:
+                expected_operands = [
+                    {
+                        "sourceOperand": 0,
+                        "target": "forall.body" if rule == "binder:product" else "lambda.body",
+                        "candidate": go(node["args"][0]),
+                    },
+                    {
+                        "sourceOperand": 1 if rule == "binder:Sequence" else None,
+                        "target": "forall.domain" if rule == "binder:product" else "lambda.domain",
+                        "candidate": "Nat" if rule == "binder:Sequence" else node["binderType"],
+                    },
+                ]
+            else:
+                for index, operand in enumerate(node["args"]):
+                    if rule in {"index:subscript", "index:superscript"} and index == 0:
+                        continue  # The base is checked as the callee.
+                    if rule.startswith("set:") or rule == "macro:SetDifference":
+                        other = node["args"][1 - index]
+                        value = (
+                            membership_point(operand, other)
+                            if rule == "set:in" and index == 0
+                            else set_operand(operand, other)
+                        )
+                    else:
+                        value = go(operand)
+                    if rule in {"index:subscript", "index:superscript"} and "indexOrigin" in node:
+                        value = shifted_index(operand, node["indexOrigin"])
+                    if rule in {"application:metric", "application:distance-to-set"} and (
+                        index == 0 or rule == "application:metric"
+                    ):
+                        value = metric_point(value, domain)
+                    expected_operands.append({"sourceOperand": index, "candidate": value})
+                if rule == "definition:=":
+                    expected_implicit = [
+                        {
+                            "argumentPosition": 0,
+                            "role": "defined-value-type",
+                            "candidate": f"(bookSourceType% ({expected_operands[0]['candidate']}))",
+                        }
+                    ]
+                if rule == "binder:image-set":
+                    function = expected_operands[0]["candidate"]
+                    expected_implicit = [
+                        {
+                            "argumentPosition": i,
+                            "role": "image-domain" if i == 0 else "image-codomain",
+                            "candidate": f"((fun {{α β : Type _}} (_ : α → β) => {parameter}) ({function}))",
+                        }
+                        for i, parameter in enumerate(("α", "β"))
+                    ]
+                if rule == "operation:infimum":
+                    source_set = expected_operands[0]["candidate"]
+                    domain = f"((fun {{α : Type _}} (_ : Set α) => α) ({source_set}))"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "infimum-domain", "candidate": domain},
+                        {
+                            "argumentPosition": 1,
+                            "role": "infimum-instance",
+                            "candidate": f"(inferInstance : InfSet {domain})",
+                        },
+                    ]
+                if rule == "unary:-" and node.get("numericDomain") == "ℤ":
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "negation-domain", "candidate": "ℤ"},
+                        {"argumentPosition": 1, "role": "negation-instance", "candidate": "(inferInstance : Neg ℤ)"},
+                    ]
+                if rule == "infix:implicit-multiply":
+                    expected_implicit = [
+                        {"argumentPosition": i, "role": "multiplication-type", "candidate": "ℝ"} for i in range(3)
+                    ] + [
+                        {
+                            "argumentPosition": 3,
+                            "role": "multiplication-instance",
+                            "candidate": "(inferInstance : HMul ℝ ℝ ℝ)",
+                        }
+                    ]
+                if rule == "set:in":
+                    expected_operands.reverse()
+                    source_set = expected_operands[0]["candidate"]
+                    domain = f"((fun {{α : Type _}} (_ : Set α) => α) ({source_set}))"
+                    container = f"Set ({domain})"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "element-type", "candidate": domain},
+                        {"argumentPosition": 1, "role": "container-type", "candidate": container},
+                        {
+                            "argumentPosition": 2,
+                            "role": "membership-instance",
+                            "candidate": f"(inferInstance : Membership {domain} ({container}))",
+                        },
+                    ]
+                if rule == "set:product":
+                    expected_implicit = [
+                        {
+                            "argumentPosition": i,
+                            "role": "left-domain" if i == 0 else "right-domain",
+                            "candidate": f"((fun {{α : Type _}} (_ : Set α) => α) ({operand['candidate']}))",
+                        }
+                        for i, operand in enumerate(expected_operands)
+                    ]
+                if rule in {"set:IncludedIn", "set:cap", "set:cup", "macro:SetDifference", "set:=", "set:≠"}:
+                    ambient = f"(bookSourceType% ({expected_operands[0]['candidate']}))"
+                    expected_implicit = [{"argumentPosition": 0, "role": "set-type", "candidate": ambient}]
+                    operation_class = {
+                        "set:IncludedIn": "LE",
+                        "set:cap": "Inter",
+                        "set:cup": "Union",
+                        "macro:SetDifference": "SDiff",
+                    }.get(rule)
+                    if operation_class:
+                        expected_implicit.append(
+                            {
+                                "argumentPosition": 1,
+                                "role": "set-operation-instance",
+                                "candidate": f"(inferInstance : {operation_class} {ambient})",
+                            }
+                        )
+                arithmetic_class = {
+                    "infix:+": "HAdd",
+                    "infix:-": "HSub",
+                    "infix:*": "HMul",
+                    "infix:/": "HDiv",
+                    "macro:frac": "HDiv",
+                }.get(rule)
+                if arithmetic_class:
+                    # The chapter's scalar arithmetic is homogeneous. Obtain
+                    # its domain from a source operand, never the observed call.
+                    source = next(
+                        (
+                            o["candidate"]
+                            for o in expected_operands
+                            if "«" in o["candidate"] or "bookTypedNumeral%" in o["candidate"]
+                        ),
+                        None,
+                    )
+                    if source is not None:
+                        ambient = f"(bookSourceType% ({source}))"
+                        expected_implicit = [
+                            {"argumentPosition": i, "role": role, "candidate": ambient}
+                            for i, role in enumerate(("left-type", "right-type", "result-type"))
+                        ] + [
+                            {
+                                "argumentPosition": 3,
+                                "role": "arithmetic-instance",
+                                "candidate": f"(inferInstance : {arithmetic_class} {ambient} {ambient} {ambient})",
+                            }
+                        ]
+                if rule in {"macro:ClosedInterval", "macro:OpenInterval", "macro:LeftClosedInterval"}:
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "interval-type", "candidate": "Real"},
+                        {
+                            "argumentPosition": 1,
+                            "role": "interval-order",
+                            "candidate": "(inferInstance : Preorder Real)",
+                        },
+                    ]
+                if rule == "macro:Ball":
+                    center = expected_operands[0]["candidate"]
+                    domain = f"(bookSourceType% ({center}))"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "ball-domain", "candidate": domain},
+                        {
+                            "argumentPosition": 1,
+                            "role": "ball-metric",
+                            "candidate": f"(inferInstance : PseudoMetricSpace {domain})",
+                        },
+                    ]
+                if rule == "macro:Closure":
+                    source_set = expected_operands[0]["candidate"]
+                    domain = f"((fun {{α : Type _}} (_ : Set α) => α) ({source_set}))"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "closure-domain", "candidate": domain},
+                        {
+                            "argumentPosition": 1,
+                            "role": "closure-topology",
+                            "candidate": f"(inferInstance : TopologicalSpace {domain})",
+                        },
+                    ]
+                if rule == "macro:Abs" and "«" in expected_operands[0]["candidate"]:
+                    domain = f"(bookSourceType% ({expected_operands[0]['candidate']}))"
+                    expected_implicit = [
+                        {"argumentPosition": 0, "role": "absolute-value-type", "candidate": domain},
+                        {
+                            "argumentPosition": 1,
+                            "role": "absolute-value-lattice",
+                            "candidate": f"(inferInstance : Lattice {domain})",
+                        },
+                        {
+                            "argumentPosition": 2,
+                            "role": "absolute-value-group",
+                            "candidate": f"(inferInstance : AddGroup {domain})",
+                        },
+                    ]
+                if rule in {"infix:=", "infix:≠", "infix:<", "infix:≤", "infix:>", "infix:≥"}:
+                    # Obtain the type from a source operand in the original
+                    # context, without the observed operator's expected type.
+                    # Pure numeral expressions still need explicit domain evidence.
+                    source = next(
+                        (
+                            o["candidate"]
+                            for o in expected_operands
+                            if "«" in o["candidate"] or "bookTypedNumeral%" in o["candidate"]
+                        ),
+                        None,
+                    )
+                    if source is not None:
+                        ambient = f"(bookSourceType% ({source}))"
+                        expected_implicit = [
+                            {"argumentPosition": 0, "role": "source-operand-type", "candidate": ambient}
+                        ]
+                        order = {"infix:<": "LT", "infix:>": "LT", "infix:≤": "LE", "infix:≥": "LE"}.get(rule)
+                        if order:
+                            expected_implicit.append(
+                                {
+                                    "argumentPosition": 1,
+                                    "role": "source-order-instance",
+                                    "candidate": f"(inferInstance : {order} {ambient})",
+                                }
+                            )
+
+        finally:
+            trace = saved_trace
+        trace[-1]["expectedOperands"] = expected_operands
+        trace[-1]["expectedImplicitArguments"] = expected_implicit
+        if trace_callee is not None:
+            trace[-1]["expectedCallee"] = trace_callee
+        for key in (
+            "interpretationId",
+            "consumer",
+            "expectedVariable",
+            "expectedConstant",
+            "lowering",
+            "expectedBinderName",
+            "expectedBinderKind",
+            "expectedBinderTypeName",
+            "bindingComponents",
+            "allowMultipleCalls",
+            "sourceRestriction",
+            "sourceAmbient",
+        ):
+            if key in node:
+                trace[-1][key] = node[key]
+        return f"(let {marker} := {term}; {marker})"
+
+    def sequence_node(items):
+        items = list(items)
+        while items and items[0].get("text", "?").isspace():
+            items.pop(0)
+        while items and items[-1].get("text", "?").isspace():
+            items.pop()
+        if not items:
+            raise Unsupported("Empty expression operand.")
+        last = items[-1]
+        return {
+            "kind": "sequence",
+            "items": items,
+            "start": items[0]["start"],
+            "end": last.get("end", last["start"] + len(last.get("text", ""))),
+        }
+
+    def infix_node(items, position, left, right):
+        node = sequence_node(items)
+        token = items[position]
+        end = token.get("end", token["start"] + len(token.get("text", "")))
+        return dict(node, operatorStart=token["start"], operatorEnd=end, args=[left, right])
+
+    def atom(node):
+        while node["kind"] == "sequence":
+            items = [n for n in node["items"] if not (n["kind"] == "text" and n["text"].isspace())]
+            if len(items) != 1:
+                break
+            node = items[0]
+        if node["kind"] == "text":
+            return dict(
+                node, text=node["text"].strip(), start=node["start"] + len(node["text"]) - len(node["text"].lstrip())
+            )
+        return node
+
+    def is_carrier(node):
+        node = atom(node)
+        if natural_type_family_shape(node):
+            return True
+        if node["kind"] == "command" and node["name"] in {"R", "QQ", "omega", "TwoPointSpace"} and not node["args"]:
+            return True
+        variable = by_offset.get(node.get("start"))
+        if node["kind"] == "script" and node["marker"] == "_" and variable and variable["status"] == "resolved":
+            # The existing carrier-as-universal-set convention also applies to
+            # a registered Nat-indexed family of types. Lean checks the actual
+            # fiber application; no index is substituted into a printed type.
+            return re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Type(?: \S+)?", variable["leanType"]) is not None
+        return (
+            node["kind"] == "text"
+            and len(node["text"]) == 1
+            and variable is not None
+            and variable["status"] == "resolved"
+            and re.fullmatch(r"Type(?: \S+)?", variable["leanType"]) is not None
+        )
+
+    def is_empty_set(node):
+        simple = atom(node)
+        return (
+            simple["kind"] == "command"
+            and simple["name"] == "emptyset"
+            and not simple["args"]
+            and simple.get("optional") is None
+        )
+
+    def set_operand(node, ambient=None):
+        nonlocal trace
+        simple = atom(node)
+        if is_empty_set(node):
+            if ambient is None or is_empty_set(ambient):
+                raise Unsupported("Empty set needs a source set operand to determine its carrier.")
+            saved_trace = trace
+            trace = None
+            try:
+                witness = set_operand(ambient)
+            finally:
+                trace = saved_trace
+            domain = f"((fun {{α : Type _}} (_ : Set α) => α) ({witness}))"
+            return traced(dict(simple, ambient=ambient), "set:empty", f"(∅ : Set ({domain}))")
+        other = atom(ambient) if ambient is not None else None
+        if (
+            simple["kind"] == "command"
+            and simple["name"] == "QQ"
+            and not simple["args"]
+            and other is not None
+            and other["kind"] == "command"
+            and other["name"] == "R"
+            and not other["args"]
+        ):
+            return "Set.range ((↑) : ℚ → ℝ)"
+        carrier = is_carrier(node)
+        # Inferred types may copy this application into several implicit slots.
+        # Every copy must still receive its own callee and operand checks.
+        value = go(dict(simple, allowMultipleCalls=True) if carrier and simple["kind"] == "script" else node)
+        return f"(@Set.univ ({value}))" if carrier else value
+
+    def is_set_expression(node):
+        simple = atom(node)
+        if simple["kind"] == "group":
+            return is_set_expression(simple["body"])
+        if simple["kind"] == "sequence":
+            for family in natural_type_family_shapes(simple):
+                if family["whole"] and family["marker"]["name"] in {"bigcap", "bigcup"}:
+                    if "carrierOffset" in family["binder"]:
+                        return is_carrier({"kind": "bound-symbol", "start": family["binder"]["carrierOffset"]})
+                    variable = by_offset.get(family["binder"]["familyOffset"], {})
+                    return (
+                        variable.get("status") == "resolved"
+                        and re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Set .+", variable.get("leanType", "")) is not None
+                    )
+        if simple["kind"] == "command" and simple["optional"] is None:
+            if simple["name"] == "MetricBall":
+                return len(simple["args"]) == 3
+            return simple["name"] in {
+                "SetDifference",
+                "Ball",
+                "Closure",
+                "AmbientClosure",
+                "ClosedInterval",
+                "OpenInterval",
+                "LeftClosedInterval",
+            } and len(simple["args"]) == (1 if simple["name"] == "Closure" else 2)
+        variable = by_offset.get(simple.get("start"), {})
+        if simple["kind"] == "script" and simple["marker"] == "_":
+            return (
+                variable.get("status") == "resolved"
+                and re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Set .+", variable.get("leanType", "")) is not None
+            )
+        return (
+            simple["kind"] in {"text", "bound-symbol"}
+            and variable.get("status") == "resolved"
+            and variable.get("leanType", "").startswith("Set ")
+            and simple.get("end", simple["start"] + len(simple.get("text", ""))) - simple["start"]
+            == variable["end"] - variable["start"]
+        )
+
+    def inclusion_proof(left, right):
+        return f"(show ({left}) ⊆ ({right}) from by intro z hz; aesop (config := {{ maxRuleApplications := 100 }}))"
+
+    def metric_point(value, domain):
+        # The source evaluates the ambient metric on subset points. Lean must
+        # verify either identity or the canonical subtype projection; no cast
+        # between unrelated point types is permitted.
+        if case_equalities:
+            return f"(bookEqualMetricPoint% ({domain}), ({value}), «{case_equalities[-1]}»)"
+        return f"(bookMetricPoint% ({domain}), ({value}))"
+
+    def metric_set(node, metric):
+        return f"(bookMetricSet% ({metric}), ({set_operand(node)}))"
+
+    def membership_point(point, set_node):
+        nonlocal trace
+        saved_trace = trace
+        trace = None
+        try:
+            domain_set = set_operand(set_node)
+        finally:
+            trace = saved_trace
+        return f"(bookSetPoint% ({domain_set}), ({go(point)}))"
+
+    def metric_domain(node):
+        nonlocal trace
+        simple = atom(node)
+        variable = by_offset.get(simple.get("start"), {})
+        if variable.get("status") != "resolved":
+            return None
+        ty = variable["leanType"]
+        if simple["kind"] != "script":
+            end = simple.get("end", simple["start"] + len(simple.get("text", "")))
+            if end - simple["start"] != variable["end"] - variable["start"]:
+                return None
+            return ty.removeprefix("MetricSpace ") if ty.startswith("MetricSpace ") else None
+        if simple["marker"] != "_" or not re.search(r"(?:→|->|,)\s*MetricSpace ", ty):
+            return None
+        # Lean obtains the fiber from the actual applied family. Do not
+        # substitute a source index into a pretty-printed dependent type.
+        saved_trace = trace
+        trace = None
+        try:
+            metric = go(simple)
+        finally:
+            trace = saved_trace
+        return f"(bookMetricDomain% ({metric}))"
+
+    def distance_function(node, *, emit=True):
+        nonlocal trace
+        if not emit:
+            saved_trace = trace
+            trace = None
+            try:
+                return distance_function(node)
+            finally:
+                trace = saved_trace
+        domain = metric_domain(node)
+        if domain is not None:
+            return f"(@dist _ ({go(node)}).toDist)", domain
+        simple = atom(node)
+        if simple["kind"] == "bound-symbol" or (
+            simple["kind"] == "text" and by_offset.get(simple["start"], {}).get("symbol") == simple["text"]
+        ):
+            offset = simple["start"]
+        elif simple["kind"] == "sequence":
+            tokens = [
+                t
+                for child in simple["items"]
+                for t in expression_tokens(child)
+                if not (t["kind"] == "text" and t["text"].isspace())
+            ]
+            if (
+                len(tokens) != 2
+                or tokens[0]["kind"] != "command"
+                or tokens[0]["name"] != "hat"
+                or tokens[0]["args"]
+                or tokens[1]["kind"] != "text"
+            ):
+                return None
+            offset = tokens[0]["start"]
+        else:
+            return None
+        variable = by_offset.get(offset)
+        if not variable or variable["status"] != "resolved":
+            return None
+        ty = variable["leanType"]
+        if ty.startswith("MetricSpace "):
+            return f"(@dist _ ({go(node)}).toDist)", ty.removeprefix("MetricSpace ")
+        pieces = [part.strip() for part in ty.split("→")]
+        if len(pieces) == 3 and pieces[0] == pieces[1] and pieces[2] == "ℝ":
+            return "(" + go(node) + ")", pieces[0]
+        return None
+
+    def variable_term(var, *, indexed=False):
+        if "indexOrigin" in var and not indexed:
+            raise Unsupported("Reindexed families require an explicit supported source index.")
+        if var.get("constantDeclaration"):
+            return var["constantDeclaration"]
+        if var["declaration"] is not None:
+            declaration_contexts.add(var["declaration"])
+        name = "«" + var["leanName"] + "»"
+        if var.get("projection") == "Subtype.val":
+            return f"(Subtype.val {name})"
+        if "indexOffset" in var:
+            if var["leanType"] not in {"ℕ", "Nat"}:
+                raise Unsupported("Shifted source indices require a natural-number binder.")
+            return f"(({name} : Nat) + {var['indexOffset']})"
+        return f"(Subtype.val {name})" if "indexLowerBound" in var else name
+
+    def shifted_index(node, origin):
+        simple = atom(node)
+        variable = by_offset.get(simple.get("start"), {})
+        lower = variable.get("indexLowerBound", variable.get("indexOffset"))
+        if simple["kind"] == "text" and simple["text"].isdigit():
+            lower = int(simple["text"])
+        if lower is None or int(lower) < origin:
+            raise Unsupported("Reindexed family needs a source index with the declared lower bound.")
+        return f"(({go(node)}) - {origin})"
+
+    def pointwise_distance(node, domain, names):
+        function = distance_function(node)
+        if function:
+            args = " ".join(metric_point("«" + name + "»", function[1]) for name in names)
+            value = function[0] + " " + args
+        else:
+            value = "(" + go(node) + " : ℝ)"
+        params = " ".join(f"(«{name}» : {domain})" for name in names)
+        return f"(fun {params} => {value})"
+
+    def integer_expression(node):
+        def convert(part):
+            kind = part["kind"]
+            if kind == "group":
+                return dict(part, body=convert(part["body"]))
+            if kind == "sequence":
+                return dict(part, items=[convert(t) for t in part["items"]])
+            if kind != "text":
+                raise Unsupported("Integer exponent requires scalar integer arithmetic.")
+            items = []
+            for match in re.finditer(r"\d+|.", part["text"], re.DOTALL):
+                value = match[0]
+                token = {
+                    "kind": "text",
+                    "text": value,
+                    "start": part["start"] + match.start(),
+                    "end": part["start"] + match.end(),
+                }
+                if value.isdigit():
+                    token["kind"] = "integer-literal"
+                elif value.isalpha():
+                    token["kind"] = "integer-variable"
+                elif value not in "+-*()" and not value.isspace():
+                    raise Unsupported("Unsupported integer-exponent arithmetic.")
+                items.append(token)
+            return dict(part, kind="sequence", items=items)
+
+        return dict(node, kind="integer-expression", body=convert(node))
+
+    def go_untraced(node):
+        nonlocal trace
+        saved = trace
+        trace = None
+        try:
+            return go(node)
+        finally:
+            trace = saved
+
+    def case_condition(node):
+        start = len(trace) if trace is not None else 0
+        value = go(node)
+        if trace is not None:
+            for mapping in trace[start:]:
+                mapping["allowMultipleCalls"] = True
+        return value
+
+    def cases_node(node):
+        tokens = [t for child in node["items"] for t in expression_tokens(child)]
+
+        def delimiter(token, name):
+            return (
+                token.get("name") == name
+                and len(token.get("args", [])) == 1
+                and atom(token["args"][0]).get("text") == "cases"
+            )
+
+        begins = [i for i, t in enumerate(tokens) if delimiter(t, "begin")]
+        if not begins:
+            return None
+        ends = [i for i, t in enumerate(tokens) if delimiter(t, "end")]
+        if len(begins) != 1 or len(ends) != 1 or ends[0] <= begins[0]:
+            raise Unsupported("Cases require one unnested environment.")
+        first, last = begins[0], ends[0]
+        rows, current = [], []
+        for token in tokens[first + 1 : last]:
+            if token.get("name") == "\\":
+                rows.append(current)
+                current = []
+            else:
+                current.append(token)
+        rows.append(current)
+        if len(rows) != 2:
+            raise Unsupported("Cases require two complementary conditions.")
+
+        def clean(ts):
+            ts = list(ts)
+            while ts and (ts[-1].get("text", "?").isspace() or ts[-1].get("text") in {",", "."}):
+                ts.pop()
+            return sequence_node(ts)
+
+        branches = []
+        for row in rows:
+            splits = [i for i, t in enumerate(row) if t.get("text") == "&"]
+            if len(splits) != 1:
+                raise Unsupported("Each cases row needs one value and condition.")
+            split = splits[0]
+            branches.append({"body": clean(row[:split]), "condition": clean(row[split + 1 :]), "separator": row[split]})
+        occupied = {b["name"] for record in (records or {}).values() for b in record.get("binders", [])}
+        for i, branch in enumerate(branches):
+            name = f"book_case_{tokens[first]['start']}_{i}"
+            while name in occupied:
+                name += "_"
+            branch.update(
+                kind="case-branch",
+                proofName=name,
+                equality=(i == 0),
+                start=branch["body"]["start"],
+                end=branch["condition"]["end"],
+            )
+        grouped = dict(
+            node,
+            kind="real-cases",
+            branches=branches,
+            start=tokens[first]["start"],
+            end=tokens[last]["end"],
+            opening=tokens[first],
+        )
+        return dict(node, items=tokens[:first] + [grouped] + tokens[last + 1 :])
+
+    def repeated_tuple_term(node):
+        values = ", ".join(f"({go(point)})" for point in node["args"])
+        return f"(bookRepeatedTuple% ({go_untraced(node['witness'])}), [{values}])"
+
+    def go(node):
+        if node.get("numericExpression"):
+            tokens = [t for child in node["items"] for t in expression_tokens(child)]
+            return go(comparison_operand(tokens))
+        if node["kind"] == "finite-index-type":
+            return traced(dict(node, expectedConstant="Fin"), "type:finite-index", f"Fin ({go(node['args'][0])})")
+        if node["kind"] == "rational-coercion-function":
+            return "((↑) : ℚ → ℝ)"
+        if node["kind"] in {"real-rational-cast", "real-singleton", "embedded-rationals"}:
+            head, rule = {
+                "real-rational-cast": ("Rat.cast", "coercion:rational-real"),
+                "real-singleton": ("Singleton.singleton", "set:singleton"),
+                "embedded-rationals": ("Set.range", "set:embedded-rationals"),
+            }[node["kind"]]
+            annotation = "ℝ" if node["kind"] == "real-rational-cast" else "Set ℝ"
+            return traced(dict(node, expectedConstant=head), rule, f"({head} ({go(node['args'][0])}) : {annotation})")
+        if node["kind"] == "sequence" and "rationalAmbient" in node:
+            shapes = indexed_singleton_shapes(node)
+            tokens = [
+                t for child in node["items"] for t in expression_tokens(child) if not t.get("text", "?").isspace()
+            ]
+            if (
+                len(shapes) != 1
+                or len(tokens) != 6
+                or tokens[0].get("name") != "QQ"
+                or tokens[1].get("text") != "="
+                or shapes[0]["indexType"] != "ℚ"
+                or node["rationalAmbient"].get("type") != "Real"
+            ):
+                raise Unsupported("Rational ambient lowering requires the complete singleton-union equality.")
+            shape = shapes[0]
+            index = by_offset.get(shape["binder"]["start"], {})
+            if not index.get("localBinder") or index.get("leanType") != "ℚ":
+                raise Unsupported("Rational singleton union requires its lexical rational index.")
+            cast = dict(
+                shape["value"],
+                kind="real-rational-cast",
+                args=[shape["value"]],
+                operatorStart=shape["value"]["start"],
+                operatorEnd=shape["value"]["end"],
+            )
+            singleton = dict(
+                shape["opening"],
+                kind="real-singleton",
+                args=[cast],
+                bindingComponents=[dict(shape["closing"], target="singleton.close")],
+            )
+            components = [dict(shape[key], target="lambda.domain") for key in ("domainRelation", "domain", "subscript")]
+            family = dict(
+                shape["binder"],
+                kind="natural-sum-family",
+                args=[singleton],
+                binderType="Rat",
+                bodyType="Set Real",
+                expectedBinderName=index["leanName"],
+                expectedBinderTypeName="Rat",
+                operatorStart=shape["binder"]["start"],
+                operatorEnd=shape["binder"]["end"],
+                bindingComponents=components,
+            )
+            union = dict(
+                shape["marker"],
+                kind="rational-singleton-union",
+                args=[family],
+                indexType="Rat",
+                sourceAmbient=node["rationalAmbient"],
+            )
+            left = dict(tokens[0], kind="embedded-rationals", args=[dict(tokens[0], kind="rational-coercion-function")])
+            equality = dict(
+                node,
+                args=[left, union],
+                operatorStart=tokens[1]["start"],
+                operatorEnd=tokens[1]["start"] + 1,
+                expectedConstant="Eq",
+            )
+            return traced(equality, "set:=", f"({go(left)} = {go(union)})")
+        if node["kind"] == "rational-singleton-union":
+            return traced(dict(node, expectedConstant="iSup"), "set:indexed-union", f"iSup ({go(node['args'][0])})")
+
+        if node["kind"] == "real-scalar-atom":
+            return f"(({go(node['body'])}) : ℝ)"
+        if "prefixPredicate" in node:
+            predicate = node["prefixPredicate"]
+            occupied = {b["name"] for record in (records or {}).values() for b in record.get("binders", [])}
+            name = "book_radius"
+            while name in occupied:
+                name += "_"
+            operator = predicate["operator"]
+            comparison = dict(
+                node,
+                kind="radius-comparison",
+                radiusName=name,
+                args=[predicate["bound"]],
+                operatorStart=operator["start"],
+                operatorEnd=operator["start"] + 1,
+                expectedConstant="LT.lt",
+            )
+            comparison.pop("prefixPredicate")
+            term = f"(fun «{name}» : Real => {go(comparison)})"
+            return traced(
+                dict(
+                    comparison,
+                    args=[comparison],
+                    binderType="Real",
+                    expectedBinderName=name,
+                    expectedBinderTypeName="Real",
+                    expectedConstant=None,
+                    lowering={"kind": "implicit-radius-predicate", **predicate["domain"]},
+                ),
+                "binder:radius",
+                term,
+            )
+        if node["kind"] == "radius-comparison":
+            return traced(node, "predicate:<", f"(«{node['radiusName']}» < ({go(node['args'][0])}))")
+        if "numericDomain" in node:
+            domain = node["numericDomain"]
+            context, name = domain["target"].rsplit("/", 1)
+            constant = name == "@constant"
+            if (
+                records is None
+                or context not in records
+                or (not constant and not any(b["name"] == name for b in records[context]["binders"]))
+            ):
+                raise Unsupported("Missing numeric-domain witness in the original Lean context.")
+            if not constant:
+                declaration_contexts.add(context)
+            witness = f"(@{context})" if constant else f"«{name}»"
+            number = node["numeral"]
+            term = f"(bookTypedNumeral% ({domain['type']}), ({witness}), {number})"
+            return traced(
+                dict(
+                    node,
+                    args=[],
+                    expectedConstant="OfNat.ofNat",
+                    operatorStart=node["numericStart"],
+                    operatorEnd=node["numericEnd"],
+                    lowering={"kind": "witness-result-type", **domain},
+                ),
+                "literal:numeral",
+                term,
+            )
+        if node["kind"] == "case-branch":
+            name = node["proofName"]
+            domain = case_condition(node["condition"])
+            if node["equality"]:
+                case_equalities.append(name)
+            try:
+                term = f"(fun «{name}» : ({domain}) => ({go(node['body'])} : ℝ))"
+                branch = dict(
+                    node,
+                    args=[node["body"]],
+                    binderType=go_untraced(node["condition"]),
+                    expectedBinderName=name,
+                    operatorStart=node["separator"]["start"],
+                    operatorEnd=node["separator"]["start"] + 1,
+                )
+                return traced(branch, "binder:case", term)
+            finally:
+                if node["equality"]:
+                    case_equalities.pop()
+        if node["kind"] == "real-cases":
+            first, second = node["branches"]
+            cond = case_condition(first["condition"])
+            term = f"(@dite ℝ ({cond}) (Classical.propDecidable _) ({go(first)}) ({go(second)}))"
+            return traced(
+                dict(
+                    node,
+                    args=[first["condition"], first, second],
+                    expectedConstant="dite",
+                    operatorStart=node["opening"]["start"],
+                    operatorEnd=node["opening"]["end"],
+                ),
+                "cases:real",
+                term,
+            )
+        if node["kind"] == "subspace-carrier":
+            return traced(node, "type:subspace-carrier", f"Subtype ({go(node['args'][0])})")
+        if node["kind"] == "typed-function-type":
+            return traced(
+                node,
+                "type:function-arrow",
+                f"(∀ ({node['expectedBinderName']} : {go(node['args'][1])}), {go(node['args'][0])})",
+            )
+        if node["kind"] == "natural-sum-family":
+            body = go(node["args"][0])
+            if "bodyType" in node:
+                body = f"({body} : {node['bodyType']})"
+            term = f"(fun «{node['expectedBinderName']}» : {node.get('binderType', 'ℕ')} => {body})"
+            return traced(node, "binder:mapsto", term)
+        nonlocal integer_depth
+        kind = node["kind"]
+        if kind == "interpreted-literal":
+            if records is None or any(
+                name not in records
+                for name in (node["expectedConstant"], node["consumer"]["declaration"], node["consumer"]["callee"])
+            ):
+                raise Unsupported("Missing declaration evidence for a contextual literal")
+            return traced(node, "literal:contextual-constant", node["expectedConstant"])
+        if kind == "integer-expression":
+            integer_depth += 1
+            try:
+                return go(node["body"])
+            finally:
+                integer_depth -= 1
+        if kind == "integer-literal":
+            return f"({node['text']} : ℤ)"
+        if kind == "integer-variable":
+            variable = by_offset.get(node["start"], {})
+            if variable.get("status") != "resolved" or variable.get("leanType") not in {"ℕ", "Nat", "ℤ", "Int"}:
+                raise Unsupported("Integer exponent needs an explicitly resolved Nat or Int variable.")
+            value = variable_term(variable)
+            return f"(Int.ofNat ({value}))" if variable["leanType"] in {"ℕ", "Nat"} else value
+        if kind == "repeated-tuple":
+            return traced(node, "binder:repeated-tuple", repeated_tuple_term(node))
+        if kind == "sequence-limit-numeral":
+            domain = sequence_numeral_domain(node)
+            return traced(node, "literal:sequence-limit", f"({node['numeral']} : {domain})")
+        if kind == "convergence-sequence":
+            body = f"(bookConvergencePoint% ({go_untraced(node['limit'])}), ({go(node['body'])}))"
+            return "(fun «" + node["binderName"] + "» : ℕ => " + body + ")"
+        if kind == "bound-symbol":
+            var = by_offset[node["start"]]
+            if var["status"] != "resolved":
+                raise Unsupported(var["reason"])
+            return variable_term(var)
+        if kind == "text":
+            parts = []
+            skip_until = node["start"]
+            for i, char in enumerate(node["text"]):
+                if node["start"] + i < skip_until:
+                    continue
+                if char.isalpha():
+                    var = by_offset[node["start"] + i]
+                    if var["status"] != "resolved":
+                        raise Unsupported(var["reason"])
+                    parts.append(variable_term(var))
+                    skip_until = node["start"] + i + var["end"] - var["start"]
+                elif char == ":":
+                    raise Unsupported("Application or local-definition grammar is not registered.")
+                elif char == ",":
+                    raise Unsupported("Comma syntax needs a reviewed tuple, application or list rule.")
+                elif char in "0123456789 .+-*/=<>()":
+                    parts.append(char)
+                elif char.isspace():
+                    parts.append(" ")
+                else:
+                    raise Unsupported("Unsupported text operator: " + repr(char))
+            return "".join(parts)
+        if kind == "sequence":
+            membership_tokens = [
+                t for child in node["items"] for t in expression_tokens(child) if not t.get("text", "?").isspace()
+            ]
+            if (
+                len(membership_tokens) == 3
+                and all(
+                    t.get("kind") == "command"
+                    and t.get("name") == name
+                    and not t.get("args")
+                    and t.get("optional") is None
+                    for t, name in ((membership_tokens[0], "{"), (membership_tokens[2], "}"))
+                )
+                and membership_tokens[1].get("kind") == "text"
+                and len(membership_tokens[1].get("text", "")) == 1
+                and membership_tokens[1]["text"].isalpha()
+            ):
+                opening, point, closing = membership_tokens
+                variable = by_offset.get(point["start"], {})
+                if variable.get("status") != "resolved":
+                    raise Unsupported("Singleton requires a resolved source point.")
+                value = go(point)
+                carrier = f"(bookSourceType% ({go_untraced(point)}))"
+                return traced(
+                    dict(
+                        node,
+                        args=[point],
+                        expectedConstant="Singleton.singleton",
+                        operatorStart=opening["start"],
+                        operatorEnd=opening["end"],
+                        bindingComponents=[dict(closing, target="singleton.close")],
+                    ),
+                    "set:singleton",
+                    f"(Singleton.singleton ({value}) : Set {carrier})",
+                )
+            if (
+                len(membership_tokens) == 5
+                and membership_tokens[1].get("text") == ","
+                and membership_tokens[3].get("name") == "in"
+                and not membership_tokens[3].get("args")
+                and membership_tokens[3].get("optional") is None
+                and all(
+                    t.get("kind") == "text" and len(t.get("text", "")) == 1 and t["text"].isalpha()
+                    for t in membership_tokens[::2][:2]
+                )
+            ):
+                first, comma, second, relation, domain = membership_tokens
+                if not is_carrier(domain) and not is_set_expression(domain):
+                    raise Unsupported("Shared membership requires a resolved carrier or set domain.")
+                clauses = [
+                    dict(
+                        node,
+                        kind="shared-membership",
+                        args=[point, domain],
+                        start=point["start"],
+                        operatorStart=relation["start"],
+                        operatorEnd=relation["end"],
+                        lowering={"kind": "shared-membership-domain", "member": index},
+                    )
+                    for index, point in enumerate((first, second))
+                ]
+                return traced(
+                    dict(
+                        node,
+                        args=clauses,
+                        expectedConstant="And",
+                        operatorStart=comma["start"],
+                        operatorEnd=comma["start"] + 1,
+                    ),
+                    "logic:and",
+                    f"And ({go(clauses[0])}) ({go(clauses[1])})",
+                )
+            conjunction = conjunction_shape(node)
+            if conjunction:
+                clauses = [dict(c, kind="logical-clause", body=c) for c in conjunction["clauses"]]
+                marker = conjunction["operator"]
+                return traced(
+                    dict(
+                        node,
+                        args=clauses,
+                        expectedConstant="And",
+                        operatorStart=marker["start"],
+                        operatorEnd=marker["end"],
+                    ),
+                    "logic:and",
+                    f"And ({go(clauses[0])}) ({go(clauses[1])})",
+                )
+            finite_tokens = [
+                t for child in node["items"] for t in expression_tokens(child) if not t.get("text", "?").isspace()
+            ]
+            if (
+                len(finite_tokens) == 5
+                and [t.get("name") for t in finite_tokens[1::2]] == ["supseteq", "supseteq"]
+                and finite_tokens[4].get("name") == "cdots"
+            ):
+                first, second = finite_tokens[0], finite_tokens[2]
+                if not all(t.get("kind") == "script" and t.get("marker") == "_" for t in (first, second)):
+                    raise Unsupported("Decreasing chain requires indexed endpoints.")
+                endpoints = [atom(t["argument"]) for t in (first, second)]
+                if not all(t["kind"] == "text" and t["text"].isdigit() for t in endpoints):
+                    raise Unsupported("Decreasing chain requires consecutive literal indices.")
+                start, following = (int(t["text"]) for t in endpoints)
+                left = by_offset.get(atom(first["base"])["start"], {})
+                right = by_offset.get(atom(second["base"])["start"], {})
+                if (
+                    following != start + 1
+                    or not all(v.get("status") == "resolved" for v in (left, right))
+                    or any(left.get(k) != right.get(k) for k in ("declaration", "leanName", "indexOrigin"))
+                ):
+                    raise Unsupported("Decreasing chain requires one family and consecutive indices.")
+                if not re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Set .+", left.get("leanType", "")) or start < left.get(
+                    "indexOrigin", 0
+                ):
+                    raise Unsupported("Decreasing chain requires a natural-indexed set family above its origin.")
+                function = dict(
+                    sequence_node(finite_tokens),
+                    kind="natural-tail-family",
+                    family=variable_term(left, indexed=True),
+                    firstIndex=start,
+                    origin=left.get("indexOrigin", 0),
+                )
+                components = [
+                    {"start": t["argument"]["start"] - 1, "end": t["argument"]["start"], "role": "chain-index"}
+                    for t in (first, second)
+                ] + [{"start": t["start"], "end": t["end"], "role": "chain-continuation"} for t in finite_tokens[3:]]
+                return traced(
+                    dict(
+                        sequence_node(finite_tokens),
+                        args=[function],
+                        expectedConstant="Antitone",
+                        operatorStart=finite_tokens[1]["start"],
+                        operatorEnd=finite_tokens[1]["end"],
+                        bindingComponents=components,
+                        lowering={
+                            "kind": "decreasing-natural-tail",
+                            "firstIndex": start,
+                            "sourceOrigin": left.get("indexOrigin", 0),
+                        },
+                    ),
+                    "relation:decreasing-family",
+                    f"Antitone ({go(function)})",
+                )
+            if (
+                len(finite_tokens) == 5
+                and [t.get("name") for t in finite_tokens[1:4]] == ["cap", "cdots", "cap"]
+                and all(not t.get("args") and t.get("optional") is None for t in finite_tokens[1:4])
+                and all(
+                    t.get("kind") == "script" and t.get("marker") == "_" for t in (finite_tokens[0], finite_tokens[4])
+                )
+            ):
+                first, last = finite_tokens[0], finite_tokens[4]
+                left_var = by_offset.get(atom(first["base"])["start"], {})
+                right_var = by_offset.get(atom(last["base"])["start"], {})
+                if not all(v.get("status") == "resolved" for v in (left_var, right_var)) or any(
+                    left_var.get(k) != right_var.get(k) for k in ("declaration", "leanName", "indexOrigin")
+                ):
+                    raise Unsupported("Finite intersection endpoints must name the same resolved family.")
+                if not re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Set .+", left_var.get("leanType", "")):
+                    raise Unsupported("Finite intersection needs a natural-number-indexed set family.")
+                lower = atom(first["argument"])
+                upper = atom(last["argument"])
+                if lower["kind"] != "text" or not lower["text"].isdigit():
+                    raise Unsupported("Finite intersection needs a literal lower endpoint.")
+                start = int(lower["text"])
+                origin = left_var.get("indexOrigin", 0)
+                upper_var = by_offset.get(upper["start"], {})
+                guaranteed = (
+                    int(upper["text"])
+                    if upper["kind"] == "text" and upper["text"].isdigit()
+                    else upper_var.get("indexOffset", upper_var.get("indexLowerBound"))
+                )
+                if guaranteed is None and upper_var.get("leanType") in {"ℕ", "Nat"}:
+                    guaranteed = 0
+                if start < origin or guaranteed is None or int(guaranteed) < start:
+                    raise Unsupported("Finite intersection needs ordered endpoints above the family's index origin.")
+                if upper_var and upper_var.get("leanType") not in {"ℕ", "Nat"}:
+                    raise Unsupported("Finite intersection upper endpoint must be natural.")
+                family = variable_term(left_var, indexed=True)
+                upper_term = go(last["argument"])
+                index_type = f"Fin (({upper_term}) - {start} + 1)"
+                binder = f"book_finite_index_{first['start']}"
+                occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+                while binder in occupied:
+                    binder += "_"
+                function = dict(
+                    sequence_node(finite_tokens),
+                    kind="finite-set-family",
+                    family=family,
+                    indexType=index_type,
+                    binder=binder,
+                    firstIndex=start,
+                    origin=origin,
+                )
+                components = [
+                    {"start": t["argument"]["start"] - 1, "end": t["argument"]["start"], "role": role}
+                    for t, role in ((first, "range-start-subscript"), (last, "range-end-subscript"))
+                ] + [
+                    {"start": t["start"], "end": t["end"], "role": role}
+                    for t, role in zip(finite_tokens[2:4], ("finite-range-ellipsis", "range-separator"))
+                ]
+                return traced(
+                    dict(
+                        sequence_node(finite_tokens),
+                        args=[function],
+                        expectedConstant="iInf",
+                        indexType=index_type,
+                        operatorStart=finite_tokens[1]["start"],
+                        operatorEnd=finite_tokens[1]["end"],
+                        bindingComponents=components,
+                        lowering={
+                            "kind": "finite-natural-interval",
+                            "firstIndex": start,
+                            "lastIndex": upper_term,
+                            "sourceOrigin": origin,
+                            "family": left_var["leanName"],
+                        },
+                    ),
+                    "set:indexed-intersection",
+                    f"iInf ({go(function)})",
+                )
+            declaration_tokens = [
+                t for child in node["items"] for t in expression_tokens(child) if not t.get("text", "?").isspace()
+            ]
+            if (
+                len(declaration_tokens) == 5
+                and declaration_tokens[1].get("text") == ":"
+                and declaration_tokens[3].get("name") == "to"
+                and not declaration_tokens[3].get("args")
+                and declaration_tokens[3].get("optional") is None
+            ):
+                function, colon, domain, arrow, codomain = declaration_tokens
+                if not is_carrier(domain) or not is_carrier(codomain):
+                    raise Unsupported("Function declaration requires resolved domain and codomain carriers.")
+                function_type = dict(
+                    node,
+                    kind="typed-function-type",
+                    args=[codomain, domain],
+                    expectedBinderName=f"book_arrow_input_{arrow['start']}",
+                    expectedBinderKind="forall",
+                    operatorStart=arrow["start"],
+                    operatorEnd=arrow["end"],
+                )
+                return traced(
+                    dict(
+                        node,
+                        args=[function_type, function],
+                        expectedConstant="bookHasType",
+                        operatorStart=colon["start"],
+                        operatorEnd=colon["start"] + 1,
+                    ),
+                    "declaration:function-type",
+                    f"bookHasType ({go(function_type)}) ({go(function)})",
+                )
+            signature = typed_map_shape(node) if node is tree else None
+            if signature:
+                point = by_offset[signature["point"]["start"]]
+                if not point.get("localBinder") or point["status"] != "resolved":
+                    raise Unsupported("Typed map input needs a resolved source domain.")
+                declaration_contexts.add(point["binderContext"])
+                domain = dict(
+                    sequence_node([signature["domain"]]),
+                    kind="subspace-carrier",
+                    args=[signature["domain"]],
+                    expectedConstant="Subtype",
+                    operatorStart=signature["domain"]["start"],
+                    operatorEnd=signature["domain"]["start"] + 1,
+                )
+                codomain = sequence_node(signature["codomain"])
+                arrow = signature["arrow"]
+                function_type = dict(
+                    node,
+                    kind="typed-function-type",
+                    expectedBinderName=f"book_arrow_input_{arrow['start']}",
+                    args=[codomain, domain],
+                    operatorStart=arrow["start"],
+                    operatorEnd=arrow["end"],
+                    expectedBinderKind="forall",
+                )
+                colon = signature["colon"]
+                typed = traced(
+                    dict(
+                        node,
+                        args=[function_type, signature["function"]],
+                        expectedConstant="bookHasType",
+                        operatorStart=colon["start"],
+                        operatorEnd=colon["start"] + 1,
+                    ),
+                    "declaration:function-type",
+                    f"bookHasType ({go(function_type)}) ({go(signature['function'])})",
+                )
+                equation = sequence_node(signature["equation"])
+                quantified = traced(
+                    dict(
+                        node,
+                        args=[equation, domain],
+                        expectedBinderKind="forall",
+                        expectedBinderName=point["leanName"],
+                        operatorStart=signature["point"]["start"],
+                        operatorEnd=signature["point"]["start"] + 1,
+                    ),
+                    "binder:typed-map",
+                    f"(∀ «{point['leanName']}» : {go_untraced(domain)}, {go(equation)})",
+                )
+                return f"({typed} ∧ {quantified})"
+            grouped = cases_node(node)
+            if grouped:
+                return go(grouped)
+            set_family = next(
+                (
+                    s
+                    for s in natural_type_family_shapes(node)
+                    if s["whole"] and s["marker"]["name"] in {"bigcap", "bigcup"}
+                ),
+                None,
+            )
+            if set_family:
+                index = by_offset.get(set_family["index"]["start"], {})
+                if index.get("status") != "resolved" or not index.get("localBinder") or index.get("leanType") != "ℕ":
+                    raise Unsupported("Indexed set operation requires a registered Nat-indexed set family.")
+                marker = set_family["marker"]
+                node = dict(node, start=marker["start"], end=set_family["end"])
+                if "carrierOffset" in set_family["binder"]:
+                    carrier = variable_term(by_offset[set_family["binder"]["carrierOffset"]])
+                else:
+                    source_family = variable_term(by_offset[set_family["binder"]["familyOffset"]], indexed=True)
+                    carrier = f"((fun {{α : Type _}} (_ : Nat → Set α) => α) ({source_family}))"
+                lower_bound = set_family["binder"].get("lowerBound")
+                index_type = f"{{n : Nat // {lower_bound} ≤ n}}" if lower_bound is not None else "Nat"
+                family = dict(
+                    node,
+                    kind="natural-sum-family",
+                    args=[set_family["family"]],
+                    binderType=index_type,
+                    bodyType=f"Set ({carrier})",
+                    expectedBinderName=index["leanName"],
+                    **({"expectedBinderTypeName": "Nat"} if lower_bound is None else {}),
+                    operatorStart=set_family["binder"]["declarationOffset"],
+                    operatorEnd=set_family["binder"]["declarationOffset"] + 1,
+                    bindingComponents=set_family["binder"]["components"],
+                )
+                head = "iInf" if marker["name"] == "bigcap" else "iSup"
+                operation = "intersection" if marker["name"] == "bigcap" else "union"
+                term = f"{head} ({go(family)})"
+                return traced(
+                    dict(
+                        node,
+                        args=[family],
+                        expectedConstant=head,
+                        indexType=index_type,
+                        lowering={
+                            "kind": "restricted-natural-index" if lower_bound is not None else "natural-index",
+                            "lowerBound": lower_bound,
+                            "projection": "Subtype.val" if lower_bound is not None else None,
+                        },
+                        operatorStart=marker["start"],
+                        operatorEnd=marker["end"],
+                    ),
+                    "set:indexed-" + operation,
+                    term,
+                )
+            product = natural_type_family_shape(node)
+            if product:
+                index = by_offset.get(product["index"]["start"], {})
+                if index.get("status") != "resolved" or not index.get("localBinder") or index.get("leanType") != "ℕ":
+                    raise Unsupported("Indexed type construction requires a registered Nat-indexed type family.")
+                body = dict(product["family"], allowMultipleCalls=True)
+                family_variable = by_offset.get(product["binder"]["familyOffset"], {})
+                if product["marker"]["name"] == "prod" and re.fullmatch(
+                    r"(?:ℕ|Nat)\s*(?:→|->)\s*Set .+", family_variable.get("leanType", "")
+                ):
+                    body = dict(
+                        body,
+                        kind="subspace-carrier",
+                        args=[body],
+                        expectedConstant="Subtype",
+                        operatorStart=body["base"]["start"],
+                        operatorEnd=body["base"]["start"] + len(body["base"]["text"]),
+                        lowering={"kind": "set-as-subspace-carrier"},
+                    )
+                if product["marker"]["name"] == "ExternalDisjointUnion":
+                    family = dict(
+                        node,
+                        kind="natural-sum-family",
+                        args=[body],
+                        binderType="ℕ",
+                        expectedBinderName=index["leanName"],
+                        expectedBinderTypeName="Nat",
+                        operatorStart=product["marker"]["start"],
+                        operatorEnd=product["marker"]["end"],
+                        bindingComponents=product["binder"]["components"],
+                        allowMultipleCalls=True,
+                    )
+                    return traced(
+                        dict(
+                            node,
+                            args=[family],
+                            expectedConstant="Sigma",
+                            operatorStart=product["marker"]["start"],
+                            operatorEnd=product["marker"]["end"],
+                        ),
+                        "type:dependent-sum",
+                        f"Sigma ({go(family)})",
+                    )
+                term = f"((«{index['leanName']}» : ℕ) → ({go(body)}))"
+                return traced(
+                    dict(
+                        node,
+                        args=[body],
+                        start=product["marker"]["start"],
+                        end=product["family"]["end"],
+                        binderType="ℕ",
+                        expectedBinderName=index["leanName"],
+                        expectedBinderKind="forall",
+                        expectedBinderTypeName="Nat",
+                        allowMultipleCalls=True,
+                        operatorStart=product["marker"]["start"],
+                        operatorEnd=product["marker"]["end"],
+                        bindingComponents=product["binder"]["components"],
+                    ),
+                    "binder:product",
+                    term,
+                )
+            mapping = mapsto_shape(node) if node is tree else None
+            if mapping:
+                if "point" not in mapping:
+                    raise Unsupported("Mapsto requires one scalar binder with a reviewed domain.")
+                variable = by_offset[mapping["point"]["start"]]
+                if not variable.get("localBinder") or variable.get("status") != "resolved":
+                    raise Unsupported(variable.get("reason", "Unresolved mapsto binder"))
+                declaration_contexts.add(variable["binderContext"])
+                body = sequence_node(mapping["body"])
+                term = f"(fun «{variable['leanName']}» : {variable['leanType']} => {go(body)})"
+                return traced(
+                    dict(
+                        node,
+                        args=[body],
+                        binderType=variable["leanType"],
+                        expectedBinderName=variable["leanName"],
+                        operatorStart=mapping["arrow"]["start"],
+                        operatorEnd=mapping["arrow"]["end"],
+                        bindingComponents=[
+                            {
+                                "start": mapping["point"]["start"],
+                                "end": mapping["point"]["start"] + 1,
+                                "target": "lambda.binder",
+                            }
+                        ],
+                    ),
+                    "binder:mapsto",
+                    term,
+                )
+            tokens = [t for child in node["items"] for t in expression_tokens(child)]
+            depth, definitions = 0, []
+            for i, token in enumerate(tokens):
+                if token.get("text") == "(" or token.get("name") == "{":
+                    depth += 1
+                elif token.get("text") == ")" or token.get("name") == "}":
+                    depth -= 1
+                elif (
+                    depth == 0 and token.get("text") == ":" and i + 1 < len(tokens) and tokens[i + 1].get("text") == "="
+                ):
+                    definitions.append(i)
+            if definitions:
+                if len(definitions) != 1:
+                    raise Unsupported("Chained local definitions are not registered.")
+                i = definitions[0]
+                rhs = tokens[i + 2 :]
+                if rhs and rhs[-1].get("text") in {",", "."}:
+                    rhs = rhs[:-1]
+                if not tokens[:i] or not rhs:
+                    raise Unsupported("Local definition has an empty side.")
+                left, right = sequence_node(tokens[:i]), sequence_node(rhs)
+                term = f"(({go(left)}) = ({go(right)}))"
+                definition = dict(
+                    node, operatorStart=tokens[i]["start"], operatorEnd=tokens[i + 1]["start"] + 1, args=[left, right]
+                )
+                return traced(definition, "definition:=", term)
+            infimum = bounded_infimum(node)
+            if infimum:
+                variable = by_offset[infimum["binder"]["start"]]
+                if variable.get("status") != "resolved" or not variable.get("localBinder"):
+                    raise Unsupported("Infimum binder has not been resolved lexically.")
+                domain = sequence_node([infimum["domain"]])
+                body = sequence_node(infimum["body"])
+                family = dict(
+                    body,
+                    kind="image-lambda",
+                    body=body,
+                    binderName=variable["leanName"],
+                    binderType=variable["leanType"],
+                )
+                ts = infimum["tokens"]
+                image = dict(
+                    sequence_node(ts[1:]),
+                    kind="image-set",
+                    args=[family, domain],
+                    operatorStart=ts[1]["start"],
+                    operatorEnd=ts[1]["end"],
+                    bindingComponents=[
+                        {
+                            "start": infimum["binder"]["start"],
+                            "end": infimum["binder"]["start"] + 1,
+                            "target": "image.lambda.binder",
+                        },
+                        {
+                            "start": infimum["relation"]["start"],
+                            "end": infimum["relation"]["end"],
+                            "target": "image.domain",
+                        },
+                    ],
+                )
+                term = "sInf (" + go(image) + ")"
+                return traced(
+                    dict(node, operatorStart=ts[0]["start"], operatorEnd=ts[0]["end"], args=[image]),
+                    "operation:infimum",
+                    term,
+                )
+            convergence = convergence_shape(node) if node is tree else None
+            if convergence:
+                if "binder" not in convergence:
+                    raise Unsupported("Convergence needs a single reviewed sequence index.")
+                binder = convergence["binder"]
+                variable = by_offset[binder["declarationOffset"]]
+                if not variable.get("localBinder") or variable["status"] != "resolved":
+                    raise Unsupported(variable.get("reason", "Convergence index has not been resolved lexically."))
+                for script in convergence["scripts"]:
+                    base = expression_tokens(script["base"])[-1]
+                    family = by_offset.get(base["start"], {})
+                    domain = family.get("leanType", "").split("→", 1)[0].strip()
+                    if family.get("status") != "resolved" or domain not in {"ℕ", "Nat"}:
+                        raise Unsupported("Convergence requires natural-number-indexed families.")
+                arrow = convergence["arrow"]
+                if any(v["symbol"] == binder["symbol"] and v["formulaOffset"] > arrow["start"] for v in variables):
+                    raise Unsupported("The limit must not contain the sequence's bound index.")
+                left, right = sequence_node(convergence["left"]), sequence_node(convergence["right"])
+                if right["items"][-1].get("text") in {".", ","}:
+                    right = sequence_node(right["items"][:-1])
+                number = atom(right)
+                if number["kind"] == "text" and number["text"].isascii() and number["text"].isdigit():
+                    right = dict(
+                        right,
+                        kind="sequence-limit-numeral",
+                        args=[number],
+                        numeral=number["text"],
+                        sequenceBody=left,
+                        binderName=variable["leanName"],
+                        operatorStart=number["start"],
+                        operatorEnd=number["start"] + len(number["text"]),
+                        expectedConstant="OfNat.ofNat",
+                        lowering={"kind": "sequence-codomain-numeral"},
+                    )
+                elif atom(left).get("name") == "MetricDiameter":
+                    right = real_scalar_operand(right) or right
+                sequence = dict(
+                    left, kind="convergence-sequence", body=left, limit=right, binderName=variable["leanName"]
+                )
+                term = f"Filter.Tendsto ({go(sequence)}) Filter.atTop (nhds ({go(right)}))"
+                traced_node = dict(
+                    node,
+                    operatorStart=arrow["start"],
+                    operatorEnd=arrow["end"],
+                    args=[sequence, right],
+                    lowering={"kind": "shifted-natural-sequence-convergence", "sourceOrigin": variable["indexOffset"]}
+                    if "indexOffset" in variable
+                    else "natural-sequence-convergence",
+                    bindingComponents=binder["components"],
+                )
+                return traced(traced_node, "relation:sequence-limit", term)
+            ball_shapes = [s for s in ball_family_chunks(node) if "union" in s]
+            restrictions = {r["generatorOffset"]: r for r in tree.get("generatorRestrictions", [])}
+            ball_shapes = [s for s in ball_shapes if s["opening"]["start"] in restrictions]
+            if ball_shapes:
+                items = [token for child in node["items"] for token in expression_tokens(child)]
+                for shape in reversed(ball_shapes):
+                    first = next(i for i, t in enumerate(items) if t["start"] == shape["union"]["start"])
+                    last = next(i for i, t in enumerate(items) if t["start"] == shape["closing"]["start"])
+                    items[first : last + 1] = [
+                        dict(
+                            shape,
+                            kind="generated-ball-union",
+                            start=shape["union"]["start"],
+                            end=shape["closing"]["end"],
+                            restriction=restrictions[shape["opening"]["start"]],
+                        )
+                    ]
+                return go(dict(node, items=items))
+            set_chunks = predicate_set_chunks(node)
+            if set_chunks:
+                items = set_chunks[0]["tokens"][:]
+                for shape in reversed(set_chunks):
+                    items[shape["first"] : shape["last"]] = [
+                        dict(shape, kind="predicate-set", start=shape["opening"]["start"], end=shape["closing"]["end"])
+                    ]
+                return go(dict(node, items=items))
+            chunks = summation_chunks(node)
+            if chunks:
+                items = chunks[0]["tokens"][:]
+                for shape in reversed(chunks):
+                    items[shape["first"] : shape["last"]] = [
+                        dict(shape, kind="summation", start=shape["script"]["start"], end=shape["body"]["end"])
+                    ]
+            else:
+                items = [token for child in node["items"] for token in expression_tokens(child)]
+            # Delimiter sizing has no mathematical action. Only erase a size
+            # command attached to the corresponding ordinary parenthesis;
+            # retain every surviving token's original source coordinates.
+            sized = []
+            for position, item in enumerate(items):
+                if item["kind"] == "command" and item["name"] in {
+                    "big",
+                    "Big",
+                    "bigg",
+                    "Bigg",
+                    "bigl",
+                    "Bigl",
+                    "biggl",
+                    "Biggl",
+                    "bigr",
+                    "Bigr",
+                    "biggr",
+                    "Biggr",
+                }:
+                    following = next((t for t in items[position + 1 :] if not t.get("text", "?").isspace()), None)
+                    delimiters = (
+                        {"("} if item["name"].endswith("l") else ({")"} if item["name"].endswith("r") else {"(", ")"})
+                    )
+                    if item["args"] or following is None or following.get("text") not in delimiters:
+                        raise Unsupported("Delimiter sizing is supported only for ordinary parentheses.")
+                    continue
+                sized.append(item)
+            items = sized
+            # x = y ∈ A asserts two relations, with equality in A's ambient
+            # type. A subtype point is projected canonically, never identified
+            # with an arbitrary point of that ambient type.
+            chain_relations, chain_depth = [], 0
+            for position, item in enumerate(items):
+                token = item.get("text")
+                if token == "(":
+                    chain_depth += 1
+                elif token == ")":
+                    chain_depth -= 1
+                elif chain_depth == 0:
+                    if token in {"=", "<", ">"}:
+                        chain_relations.append((position, token))
+                    elif (
+                        item["kind"] == "command"
+                        and not item["args"]
+                        and item["name"]
+                        in {
+                            "in",
+                            "IncludedIn",
+                            "le",
+                            "ge",
+                            "ne",
+                        }
+                    ):
+                        chain_relations.append((position, item["name"]))
+            if [relation for _, relation in chain_relations] == ["=", "in"]:
+                equals, member = [position for position, _ in chain_relations]
+                left = sequence_node(items[:equals])
+                middle = sequence_node(items[equals + 1 : member])
+                ambient = sequence_node(items[member + 1 :])
+                equality_node = dict(
+                    infix_node(items, equals, left, middle),
+                    args=[left, middle, ambient],
+                    expectedConstant="Eq",
+                    lowering={"kind": "equality-membership-chain", "pointAdapter": "identity-or-Subtype.val"},
+                )
+                equality = traced(
+                    equality_node,
+                    "relation:membership-chain-equality",
+                    f"(({membership_point(left, ambient)}) = ({membership_point(middle, ambient)}))",
+                )
+                membership = traced(
+                    infix_node(items, member, middle, ambient),
+                    "set:in",
+                    f"(({membership_point(middle, ambient)}) ∈ ({set_operand(ambient)}))",
+                )
+                return f"(({equality}) ∧ ({membership}))"
+            # A comparison chain asserts every adjacent relation. Split only
+            # outside ordinary parentheses; macro arguments recurse separately.
+            relations = {"le": "≤", "ge": "≥", "ne": "≠"}
+            operands, operators, operator_positions, current, depth = [], [], [], [], 0
+            for item_index, item in enumerate(items):
+                token = item.get("text")
+                if token == "(":
+                    depth += 1
+                elif token == ")":
+                    depth -= 1
+                operator = None
+                if depth == 0:
+                    if token in {"=", "<", ">"}:
+                        operator = token
+                    elif item["kind"] == "command" and not item["args"]:
+                        operator = relations.get(item["name"])
+                if operator is None:
+                    current.append(item)
+                else:
+                    operands.append(current)
+                    operators.append(operator)
+                    operator_positions.append(item_index)
+                    current = []
+            # A final comma or period after a complete top-level relation is sentence
+            # punctuation, not a tuple constructor. Interior commas still
+            # require the explicit application/variable-list rules below.
+            if node.get("start") == tree["start"] and node.get("end") == tree["end"] and operators and depth == 0:
+                final = len(current) - 1
+                while final >= 0 and current[final].get("text", "?").isspace():
+                    final -= 1
+                if final >= 0 and current[final].get("text") in {",", "."}:
+                    current = current[:final]
+            if len(operators) > 1:
+                operands.append(current)
+                if any(not operand for operand in operands):
+                    raise Unsupported("Empty operand in comparison chain.")
+                comparisons = []
+                for i, operation in enumerate(operators):
+                    left, right = ennreal_comparison_operands(
+                        comparison_operand(operands[i]), comparison_operand(operands[i + 1])
+                    )
+                    term = f"(({go(left)}) {operation} ({go(right)}))"
+                    comparisons.append(
+                        traced(infix_node(items, operator_positions[i], left, right), "infix:" + operation, term)
+                    )
+                return "(" + " ∧ ".join(comparisons) + ")"
+            if len(operators) == 1 and operators[0] in {"=", "≠"}:
+                left, right = sequence_node(operands[0]), sequence_node(current)
+                rhs = atom(right)
+                if rhs["kind"] == "command" and rhs["name"] == "Tuple" and len(rhs["args"]) == 1:
+                    if rhs["args"][0]["kind"] != "sequence":
+                        raise Unsupported("Repeated tuple needs a displayed list followed by an ellipsis.")
+                    tokens = [t for child in rhs["args"][0]["items"] for t in expression_tokens(child)]
+                    groups, group = [], []
+                    for token in tokens:
+                        if token.get("text") == ",":
+                            groups.append(sequence_node(group))
+                            group = []
+                        else:
+                            group.append(token)
+                    ending = atom(sequence_node(group))
+                    if ending.get("name") != "ldots" or len(groups) < 2:
+                        raise Unsupported("Repeated tuple needs at least two points followed by an ellipsis.")
+                    right = dict(
+                        rhs,
+                        kind="repeated-tuple",
+                        args=groups,
+                        witness=left,
+                        operatorStart=rhs["start"],
+                        operatorEnd=rhs["start"] + len("\\Tuple"),
+                        expectedBinderKind="lambda",
+                        expectedBinderName="book_tuple_index",
+                        lowering="repeated-natural-product-coordinates",
+                    )
+                    operation = operators[0]
+                    term = f"(({go(left)}) {operation} ({go(right)}))"
+                    return traced(infix_node(items, operator_positions[0], left, right), "infix:" + operation, term)
+                if (
+                    (is_set_expression(left) and is_carrier(right))
+                    or (is_carrier(left) and is_set_expression(right))
+                    or is_empty_set(left)
+                    or is_empty_set(right)
+                ):
+                    operation = operators[0]
+                    term = f"(({set_operand(left, right)}) {operation} ({set_operand(right, left)}))"
+                    return traced(infix_node(items, operator_positions[0], left, right), "set:" + operation, term)
+            if operators == ["≤"]:
+                left = sequence_node(operands[0])
+                right = sequence_node(current)
+                lhs, rhs = distance_function(left, emit=False), distance_function(right, emit=False)
+                if lhs or rhs:
+                    domain = (lhs or rhs)[1]
+                    if lhs and rhs and lhs[1] != rhs[1]:
+                        lmetric = by_offset.get(atom(left)["start"], {}).get("leanType", "").startswith("MetricSpace ")
+                        rmetric = by_offset.get(atom(right)["start"], {}).get("leanType", "").startswith("MetricSpace ")
+                        if lmetric == rmetric:
+                            raise Unsupported("Different metric domains need an explicit restriction convention.")
+                        domain = rhs[1] if lmetric else lhs[1]
+                    occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+                    names = []
+                    for initial in ("book_point_a", "book_point_b"):
+                        while initial in occupied:
+                            initial += "_"
+                        names.append(initial)
+                    lterm = pointwise_distance(left, domain, names)
+                    rterm = pointwise_distance(right, domain, names)
+                    comparison = dict(
+                        infix_node(items, operator_positions[0], left, right), pointDomain=domain, pointNames=names
+                    )
+                    return traced(comparison, "relation:metric-le", f"({lterm} ≤ {rterm})")
+            if len(operators) == 1:
+                left, right = ennreal_comparison_operands(sequence_node(operands[0]), sequence_node(current))
+                operation = operators[0]
+                real_comparison = atom(left).get("name") == "MetricDiameter"
+                distance_tokens = [
+                    t for child in operands[0] for t in expression_tokens(child) if not t.get("text", "?").isspace()
+                ]
+                if (
+                    operation in {"<", "≤", ">", "≥", "=", "≠"}
+                    and len(distance_tokens) > 3
+                    and metric_domain(distance_tokens[0]) is not None
+                    and distance_tokens[1].get("text") == "("
+                    and distance_tokens[-1].get("text") == ")"
+                ):
+                    real_comparison = True
+                if real_comparison:
+                    scalar = real_scalar_operand(right)
+                    real_comparison = scalar is not None
+                    right = scalar if scalar is not None else right
+                groups, group, comma_depth = [], [], 0
+                for item in operands[0]:
+                    token = item.get("text")
+                    if token == "(":
+                        comma_depth += 1
+                    elif token == ")":
+                        comma_depth -= 1
+                    if token == "," and comma_depth == 0:
+                        groups.append(sequence_node(group))
+                        group = []
+                    else:
+                        group.append(item)
+                if groups:
+                    groups.append(sequence_node(group))
+                    if operation not in {"<", ">", "≤", "≥"} or any(
+                        not (atom(g)["kind"] == "text" and len(atom(g)["text"]) == 1 and atom(g)["text"].isalpha())
+                        for g in groups
+                    ):
+                        raise Unsupported("Comma comparison needs a reviewed variable-list convention.")
+                    comparisons = []
+                    for left in groups:
+                        term = f"(({go(left)}) {operation} ({go(right)}))"
+                        comparison = dict(
+                            infix_node(items, operator_positions[0], left, right), lowering="variable-list-conjunction"
+                        )
+                        comparisons.append(traced(comparison, "infix:" + operation, term))
+                    return "(" + " ∧ ".join(comparisons) + ")"
+                term = f"(({go(left)}) {operation} ({go(right)}))"
+                comparison = infix_node(items, operator_positions[0], left, right)
+                if real_comparison:
+                    comparison["lowering"] = {"kind": "real-scalar-comparison", "witness": "MetricDiameter"}
+                return traced(comparison, "infix:" + operation, term)
+            # A metric is a binary distance function. Compose on its values
+            # through the product domain, then restore its curried interface.
+            depth, compositions = 0, []
+            for position, item in enumerate(items):
+                if item.get("text") == "(":
+                    depth += 1
+                elif item.get("text") == ")":
+                    depth -= 1
+                elif depth == 0 and item.get("kind") == "command" and item.get("name") == "circ":
+                    compositions.append(position)
+            if compositions:
+                if len(compositions) != 1:
+                    raise Unsupported("Composition chains require explicit grouping.")
+                position = compositions[0]
+                if not items[:position] or not items[position + 1 :]:
+                    raise Unsupported("Composition requires both functions.")
+                left, right = sequence_node(items[:position]), sequence_node(items[position + 1 :])
+                metric = distance_function(right)
+                outer_variable = by_offset.get(atom(left).get("start"), {})
+                if metric and metric_domain(right) is None and outer_variable.get("leanType") != "ℝ → ℝ":
+                    # An ordinary binary function can also be the inner term
+                    # of unary composition with a function-valued middle type.
+                    metric = None
+                inner = f"Function.uncurry ({metric[0]})" if metric else go(right)
+                composition = dict(
+                    infix_node(items, position, left, right),
+                    expectedConstant="Function.comp",
+                    metricComposition=metric is not None,
+                    lowering={
+                        "kind": "metric-value-composition" if metric else "function-composition",
+                        "inputAdapter": "Function.uncurry" if metric else None,
+                        "outputAdapter": "Function.curry" if metric else None,
+                    },
+                )
+                result = traced(composition, "operation:composition", f"Function.comp ({go(left)}) ({inner})")
+                return f"Function.curry ({result})" if metric else result
+            # Set relations use an explicit carrier-to-universe convention.
+            inclusions = [
+                i
+                for i, item in enumerate(items)
+                if item["kind"] == "command" and item["name"] == "hookrightarrow" and not item["args"]
+            ]
+            if inclusions:
+                if len(inclusions) != 1:
+                    raise Unsupported("Inclusion arrows require one source and target set.")
+                position = inclusions[0]
+                left, right = sequence_node(items[:position]), sequence_node(items[position + 1 :])
+                if not is_set_expression(left) or not is_set_expression(right):
+                    raise Unsupported("Canonical inclusion requires two registered subsets of one ambient type.")
+                proof = inclusion_proof(set_operand(left), set_operand(right))
+                return traced(
+                    dict(infix_node(items, position, left, right), expectedConstant="Set.inclusion"),
+                    "map:inclusion",
+                    f"Set.inclusion ({proof})",
+                )
+            depth, positions = 0, []
+            for position, item in enumerate(items):
+                if item.get("text") == "(":
+                    depth += 1
+                elif item.get("text") == ")":
+                    depth -= 1
+                elif (
+                    depth == 0
+                    and item["kind"] == "command"
+                    and not item["args"]
+                    and item["name"] in {"in", "IncludedIn", "cup", "cap", "times"}
+                ):
+                    positions.append((position, item["name"]))
+            for level in ({"in", "IncludedIn"}, {"cup"}, {"cap"}, {"times"}):
+                choices = [(i, name) for i, name in positions if name in level]
+                if not choices:
+                    continue
+                if level == {"in", "IncludedIn"} and len(choices) != 1:
+                    raise Unsupported("Chained set relations require an explicit relation rule.")
+                position, operator = choices[-1]
+                if node is tree and operator in {"in", "IncludedIn", "cap"} and depth == 0:
+                    last = len(items) - 1
+                    while last >= 0 and items[last].get("text", "?").isspace():
+                        last -= 1
+                    if last >= 0 and items[last].get("text") in {".", ","}:
+                        items = items[:last]
+                if not items[:position] or not items[position + 1 :]:
+                    raise Unsupported("Missing operand in set relation.")
+                left = {"kind": "sequence", "items": items[:position]}
+                right = {"kind": "sequence", "items": items[position + 1 :]}
+                if operator == "times":
+                    if len(choices) != 1 or not (
+                        (is_set_expression(left) and (is_set_expression(right) or is_carrier(right)))
+                        or (is_carrier(left) and is_set_expression(right))
+                    ):
+                        raise Unsupported("Set product requires two registered set operands and explicit grouping.")
+                    term = f"Set.prod ({set_operand(left)}) ({set_operand(right)})"
+                    return traced(
+                        infix_node(
+                            items, position, sequence_node(items[:position]), sequence_node(items[position + 1 :])
+                        ),
+                        "set:product",
+                        term,
+                    )
+                lhs = membership_point(left, right) if operator == "in" else set_operand(left, right)
+                rhs = set_operand(right, left)
+                symbol = {"in": "∈", "IncludedIn": "⊆", "cup": "∪", "cap": "∩"}[operator]
+                term = f"(({lhs}) {symbol} ({rhs}))"
+                return traced(
+                    infix_node(items, position, sequence_node(items[:position]), sequence_node(items[position + 1 :])),
+                    "set:" + operator,
+                    term,
+                )
+            # Refine the shared parser's text leaves using standard arithmetic
+            # precedence. Parenthesized and macro subtrees retain their scope.
+            depth, arithmetic, previous = 0, [], None
+            for position, item in enumerate(items):
+                token = item.get("text")
+                if token == "(":
+                    depth += 1
+                elif token == ")":
+                    depth -= 1
+                elif (
+                    depth == 0
+                    and token in {"+", "-", "*", "/"}
+                    and previous is not None
+                    and previous not in {"+", "-", "*", "/", "(", ","}
+                ):
+                    arithmetic.append((position, token))
+                if not (token is not None and token.isspace()):
+                    previous = token if token is not None else "operand"
+            for level in ({"+", "-"}, {"*", "/"}):
+                choices = [(i, op) for i, op in arithmetic if op in level]
+                if choices:
+                    position, operation = choices[-1]
+                    left, right = sequence_node(items[:position]), sequence_node(items[position + 1 :])
+                    term = f"(({go(left)}) {operation} ({go(right)}))"
+                    return traced(infix_node(items, position, left, right), "infix:" + operation, term)
+            if items and items[0].get("text") == "-":
+                operand = sequence_node(items[1:])
+                negation = dict(
+                    sequence_node(items),
+                    args=[operand],
+                    operatorStart=items[0]["start"],
+                    operatorEnd=items[0]["start"] + 1,
+                    numericDomain="ℤ" if integer_depth else None,
+                )
+                return traced(negation, "unary:-", f"(-({go(operand)}))")
+            significant = [item for item in items if not item.get("text", "?").isspace()]
+            if (
+                len(significant) > 2
+                and numeric_power(significant[0])
+                and significant[2].get("text") == "("
+                and metric_domain(significant[1]) is not None
+            ):
+                left, right = significant[0], sequence_node(significant[1:])
+                boundary = left["end"]
+                multiplication = dict(
+                    sequence_node(items),
+                    args=[left, right],
+                    operatorStart=boundary,
+                    operatorEnd=boundary,
+                    lowering="juxtaposition",
+                )
+                return traced(multiplication, "infix:implicit-multiply", f"({go(left)} * {go(right)})")
+            if items and items[0].get("text") == "(" and items[-1].get("text") == ")":
+                depth, closes_early = 0, False
+                for position, item in enumerate(items):
+                    if item.get("text") == "(":
+                        depth += 1
+                    elif item.get("text") == ")":
+                        depth -= 1
+                    if depth == 0 and position != len(items) - 1:
+                        closes_early = True
+                if not closes_early:
+                    return "(" + go(sequence_node(items[1:-1])) + ")"
+            # Decorations are source identities, not operations on a bare name.
+            decorated, pos = [], 0
+            while pos < len(items):
+                item = items[pos]
+                var = by_offset.get(item["start"])
+                if var and var["symbol"].endswith("'") and item["kind"] in {"text", "command", "bound-symbol"}:
+                    end_offset = item["start"] + var["end"] - var["start"]
+                    end = pos + 1
+                    while end < len(items) and items[end]["start"] < end_offset:
+                        end += 1
+                    decorated.append({"kind": "bound-symbol", "start": item["start"], "end": end_offset})
+                    pos = end
+                    continue
+                if item["kind"] == "command" and item["name"] == "hat" and not item["args"]:
+                    end = pos + 1
+                    while end < len(items) and items[end].get("text", "?").isspace():
+                        end += 1
+                    var = by_offset.get(item["start"])
+                    if end < len(items) and var and var["symbol"] == "\\hat " + items[end].get("text", ""):
+                        decorated.append({"kind": "bound-symbol", "start": item["start"]})
+                        pos = end + 1
+                        continue
+                decorated.append(item)
+                pos += 1
+            items = decorated
+            parts, i = [], 0
+            while i < len(items):
+                child = items[i]
+                var = by_offset.get(child["start"])
+                if var and i + 1 < len(items) and items[i + 1].get("text") == "(":
+                    depth, j, arguments, current = 1, i + 2, [], []
+                    while j < len(items):
+                        token = items[j].get("text")
+                        if token == "(":
+                            depth += 1
+                        elif token == ")":
+                            depth -= 1
+                            if depth == 0:
+                                arguments.append(current)
+                                break
+                        if token == "," and depth == 1:
+                            arguments.append(current)
+                            current = []
+                        else:
+                            current.append(items[j])
+                        j += 1
+                    if depth or any(not a for a in arguments):
+                        raise Unsupported("Unclosed or empty function application.")
+                    function = "(" + go(child) + ")"
+                    ty = var.get("leanType", "")
+                    domain = metric_domain(child)
+                    metric_rule = "application:metric"
+                    if domain is not None:
+                        if len(arguments) != 2:
+                            raise Unsupported("Metric evaluation requires two points or a point and a set.")
+                        if is_set_expression(sequence_node(arguments[1])):
+                            metric_rule = "application:distance-to-set"
+                            function = f"@Metric.infDist _ ({function}).toPseudoMetricSpace"
+                        else:
+                            function = f"@dist _ ({function}).toDist"
+                    elif "→" not in ty and "->" not in ty and not ty.startswith("∀"):
+                        raise Unsupported("Application requires a function or metric binder.")
+                    if domain is None and len(arguments) == 1:
+                        argument = sequence_node(arguments[0])
+                        target = by_offset.get(atom(argument).get("start"), {})
+                        # This narrow convention applies only to f(A) where the
+                        # source set A is the defining predicate of f's subtype
+                        # domain. Lean rechecks that identity before using range.
+                        if (
+                            is_set_expression(argument)
+                            and target.get("status") == "resolved"
+                            and target.get("leanType", "").startswith("Set ")
+                            and re.match(r"^↑" + re.escape(target["leanName"]) + r"\s*(?:→|->)", ty)
+                        ):
+                            image_node = dict(
+                                sequence_node(items[i : j + 1]),
+                                args=[child, argument],
+                                expectedConstant="Set.range",
+                                operatorStart=child["start"],
+                                operatorEnd=child["start"] + var["end"] - var["start"],
+                                lowering={"kind": "image-of-entire-subtype-domain", "domainSet": target["leanName"]},
+                            )
+                            parts.append(
+                                traced(
+                                    image_node,
+                                    "application:subtype-range",
+                                    f"(bookSubtypeRange% ({go(child)}), ({go(argument)}))",
+                                )
+                            )
+                            i = j + 1
+                            continue
+                    args = [go({"kind": "sequence", "items": a}) for a in arguments]
+                    if domain is not None:
+                        args[0] = metric_point(args[0], domain)
+                        if metric_rule == "application:metric":
+                            args[1] = metric_point(args[1], domain)
+                    application = "(" + function + " " + " ".join("(" + a + ")" for a in args) + ")"
+                    application_node = dict(
+                        sequence_node(items[i : j + 1]),
+                        operatorStart=child["start"],
+                        operatorEnd=child["start"] + var["end"] - var["start"],
+                        args=[sequence_node(a) for a in arguments],
+                    )
+                    if domain is not None:
+                        application_node["metric"] = child
+                        if case_equalities:
+                            application_node["lowering"] = {
+                                "kind": "equality-transport-between-fibers",
+                                "branchProof": case_equalities[-1],
+                                "operation": "Eq.mp",
+                            }
+                        application = traced(application_node, metric_rule, application)
+                    else:
+                        application_node[
+                            "expectedConstant" if var.get("constantDeclaration") else "expectedVariable"
+                        ] = var["leanName"]
+                        if len(arguments) == 1 and ty.startswith("↑"):
+                            application_node["function"] = child
+                            application_node["lowering"] = {"kind": "subtype-argument-from-local-membership"}
+                            argument = f"(bookSubtypeArgument% {function}, ({args[0]}))"
+                            application = f"({function} {argument})"
+                            application = traced(application_node, "application:subtype-argument", application)
+                        else:
+                            application = traced(application_node, "application:function", application)
+                    parts.append(application)
+                    i = j + 1
+                else:
+                    parts.append(go(child))
+                    i += 1
+            return "".join(parts).strip()
+        if kind == "shared-membership":
+            point, domain = node["args"]
+            return traced(node, "set:in", f"(({membership_point(point, domain)}) ∈ ({set_operand(domain, point)}))")
+        if kind == "logical-clause":
+            local = [v for v in variables if node["start"] <= v["formulaOffset"] < node["end"]]
+            term, context = translate(node["body"], local, records, trace=trace)
+            if context is not None:
+                declaration_contexts.add(context)
+            return term
+        if kind == "natural-tail-family":
+            binder = f"book_tail_index_{node['start']}"
+            occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+            while binder in occupied:
+                binder += "_"
+            return (
+                f"(fun «{binder}» : Nat => ({node['family']}) («{binder}» + {node['firstIndex']} - {node['origin']}))"
+            )
+        if kind == "finite-set-family":
+            return f"(fun «{node['binder']}» : {node['indexType']} => ({node['family']}) («{node['binder']}».val + {node['firstIndex']} - {node['origin']}))"
+        if kind == "generated-ball-predicate":
+            point = by_offset[node["pointDomain"][0]["start"]]
+            radius = by_offset[node["radiusCondition"][0]["start"]]
+            metric = go_untraced(node["traceCondition"][0]["args"][0])
+            lifted = f"(bookMetricSet% ({metric}), ({go_untraced(node['traceCondition'][0]['args'][1])}))"
+            bounded = f"@Bornology.IsBounded (bookMetricDomain% ({metric})) ({metric}).toPseudoMetricSpace.toBornology ({lifted})"
+            positive = case_condition(sequence_node(node["radiusCondition"]))
+            value = go(node["value"])
+            diameter = go(sequence_node(node["traceCondition"]))
+            return (
+                f"(fun «{node['setName']}» : Set ({node['carrier']}) => "
+                f"∃ «{point['leanName']}» : {node['carrier']}, ∃ «{radius['leanName']}» : ℝ, "
+                f"∃ «{node['positiveName']}» : ({positive}), ∃ «{node['boundedName']}» : ({bounded}), "
+                f"«{node['setName']}» = ({value}) ∧ ({diameter}))"
+            )
+        if kind == "generated-ball-union":
+            point = by_offset[node["pointDomain"][0]["start"]]
+            radius = by_offset[node["radiusCondition"][0]["start"]]
+            if (
+                point.get("binderRole") != "ball-generator-point"
+                or radius.get("binderRole") != "ball-generator-radius"
+                or radius.get("leanType") != "ℝ"
+                or point["leanName"] == radius["leanName"]
+            ):
+                raise Unsupported("Generated ball family requires distinct registered point and radius binders.")
+            diameter = node["traceCondition"][0]
+            metric_var = by_offset.get(atom(diameter["args"][0])["start"], {})
+            trace_tokens = [
+                t
+                for child in diameter["args"][1]["items"]
+                for t in expression_tokens(child)
+                if not t.get("text", "?").isspace()
+            ]
+            subset_var = by_offset.get(trace_tokens[-1]["start"], {})
+            for role, var in (("metric", metric_var), ("subset", subset_var)):
+                actual = var.get("declaration", "") + "/" + var.get("leanName", "")
+                if actual != node["restriction"][role]["target"]:
+                    raise Unsupported("Bounded-trace premise does not match the active " + role + " binding.")
+            carrier = go_untraced(node["pointDomain"][2])
+            if point["leanType"] != by_offset[node["pointDomain"][2]["start"]]["leanName"]:
+                raise Unsupported("Generated point has a different carrier.")
+            occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+            occupied.update(v["leanName"] for v in variables if v.get("leanName"))
+            names = []
+            for stem in ("book_ball_set", "book_ball_positive", "book_ball_bounded"):
+                name = stem
+                while name in occupied:
+                    name += "_"
+                occupied.add(name)
+                names.append(name)
+            function = dict(
+                node,
+                kind="generated-ball-predicate",
+                carrier=carrier,
+                setName=names[0],
+                positiveName=names[1],
+                boundedName=names[2],
+            )
+            components = [
+                {"start": t["start"], "end": t["end"], "target": role}
+                for t, role in [
+                    (node["pointDomain"][0], "generator.exists.point"),
+                    (node["pointDomain"][1], "generator.exists.point-domain"),
+                    (node["radiusCondition"][0], "generator.exists.radius"),
+                    (node["colon"], "generator.conditions"),
+                    (node["closing"], "generator.scope-end"),
+                ]
+            ] + [
+                {"start": t["start"], "end": t["end"], "target": "generator.condition-separator"}
+                for t in node["separators"]
+            ]
+            family = dict(
+                node,
+                kind="generated-ball-set",
+                args=[function],
+                binderType=f"Set ({carrier})",
+                operatorStart=node["opening"]["start"],
+                operatorEnd=node["opening"]["end"],
+                bindingComponents=components,
+                sourceRestriction=node["restriction"],
+            )
+            term = f"Set.sUnion ({go(family)})"
+            return traced(
+                dict(
+                    node,
+                    args=[family],
+                    carrier=carrier,
+                    expectedConstant="Set.sUnion",
+                    operatorStart=node["union"]["start"],
+                    operatorEnd=node["union"]["end"],
+                    sourceRestriction=node["restriction"],
+                ),
+                "set:generated-union",
+                term,
+            )
+        if kind == "generated-ball-set":
+            return traced(node, "binder:predicate-set", f"Set.ofPred ({go(node['args'][0])})")
+        if kind == "predicate-lambda":
+            return f"(fun «{node['binderName']}» : {node['binderType']} => ({go(node['body'])} : Prop))"
+        if kind == "predicate-set":
+            variable = by_offset[node["binder"]["start"]]
+            if not variable.get("localBinder") or variable.get("status") != "resolved":
+                raise Unsupported("Set generator needs a source-owned Lean domain mapping.")
+            declaration_contexts.add(variable["binderContext"])
+            function = dict(
+                node["body"],
+                kind="predicate-lambda",
+                body=node["body"],
+                binderName=variable["leanName"],
+                binderType=variable["leanType"],
+            )
+            term = f"Set.ofPred ({go(function)})"
+            return traced(
+                dict(
+                    node,
+                    args=[function],
+                    binderType=variable["leanType"],
+                    operatorStart=node["opening"]["start"],
+                    operatorEnd=node["opening"]["end"],
+                    bindingComponents=[
+                        {"start": node["binder"]["start"], "end": node["binder"]["end"], "target": "set.lambda.binder"},
+                        {"start": node["colon"]["start"], "end": node["colon"]["end"], "target": "set.lambda.body"},
+                        *(
+                            [
+                                {
+                                    "start": node["domainRelation"]["start"],
+                                    "end": node["domainRelation"]["end"],
+                                    "target": "set.lambda.domain",
+                                }
+                            ]
+                            if "domain" in node
+                            else []
+                        ),
+                        {
+                            "start": node["closing"]["start"],
+                            "end": node["closing"]["end"],
+                            "target": "set.lambda.scope-end",
+                        },
+                    ],
+                ),
+                "binder:predicate-set",
+                term,
+            )
+        if kind == "sum-lambda":
+            if "tailBound" in node:
+                # The fresh offset has no source spelling; the source index keeps
+                # its identity as a let-bound natural number in the original body.
+                offset = node["binderName"] + "_tail_offset"
+                return (
+                    f"(fun «{offset}» : ℕ => let «{node['binderName']}» : ℕ := "
+                    f"«{offset}» + ({go(node['tailBound'])} : ℕ); ({go(node['body'])} : ℝ))"
+                )
+            return f"(fun «{node['binderName']}» : ℕ => ({go(node['body'])} : ℝ))"
+        if kind == "summation":
+            variable = by_offset[node["binder"]["start"]]
+            if variable.get("status") != "resolved" or not variable.get("localBinder"):
+                raise Unsupported("Sum index has no resolved lexical binder.")
+            function = dict(node["body"], kind="sum-lambda", body=node["body"], binderName=variable["leanName"])
+            if node["mode"] == "tail":
+                function["tailBound"] = node["bound"]
+            components = [
+                {"start": node["binder"]["start"], "end": node["binder"]["start"] + 1, "target": "sum.lambda.binder"},
+                {
+                    "start": node["script"]["argument"]["start"] - 1,
+                    "end": node["script"]["argument"]["start"],
+                    "target": "sum.range",
+                },
+                {
+                    "start": node["relation"]["start"],
+                    "end": node["relation"].get("end", node["relation"]["start"] + 1),
+                    "target": "sum.range",
+                },
+            ]
+            if node["mode"] == "finite":
+                args = [node["bound"], function]
+                term = f"Finset.sum (Finset.range ({go(node['bound'])} : ℕ)) ({go(function)})"
+            else:
+                args = [node["bound"], function] if node["mode"] == "tail" else [function]
+                term = f"tsum ({go(function)})"
+            marker = node["script"]["base"]
+            return traced(
+                dict(
+                    node,
+                    args=args,
+                    operatorStart=marker["start"],
+                    operatorEnd=marker["end"],
+                    bindingComponents=components,
+                ),
+                "sum:" + node["mode"],
+                term,
+            )
+        if kind == "image-lambda":
+            return f"(fun «{node['binderName']}» : {node['binderType']} => {go(node['body'])})"
+        if kind == "image-set":
+            term = f"Set.image ({go(node['args'][0])}) ({go(node['args'][1])})"
+            return traced(node, "binder:image-set", term)
+        if kind == "ennreal-numeral":
+            return traced(
+                dict(node, args=[], expectedConstant="OfNat.ofNat"),
+                "literal:ennreal-numeral",
+                f"({node['text']} : ENNReal)",
+            )
+        if kind == "ennreal-top":
+            return traced(dict(node, args=[], expectedConstant="Top.top"), "literal:ennreal-top", "(⊤ : ENNReal)")
+        if kind == "script":
+            base = atom(node["base"])
+            if node["marker"] == "^" and base.get("kind") == "command" and base.get("name") == "ell":
+                exponent = node["argument"]
+                while exponent["kind"] == "group":
+                    exponent = exponent["body"]
+                exponent = atom(exponent)
+                if exponent.get("kind") == "command" and exponent.get("name") == "infty":
+                    exponent = dict(exponent, kind="ennreal-top")
+                elif exponent.get("kind") == "text" and exponent.get("text", "").isdigit():
+                    exponent = dict(
+                        exponent,
+                        kind="ennreal-numeral",
+                        operatorStart=exponent["start"],
+                        operatorEnd=exponent.get("end", exponent["start"] + len(exponent["text"])),
+                    )
+                else:
+                    variable = by_offset.get(exponent.get("start"), {})
+                    if variable.get("status") != "resolved" or variable.get("leanType") not in {"ENNReal", "ℝ≥0∞"}:
+                        raise Unsupported(
+                            "Sequence-space exponent needs a reviewed extended-nonnegative-real interpretation."
+                        )
+                space = dict(
+                    node,
+                    args=[exponent],
+                    expectedConstant="lp",
+                    operatorStart=node["argument"]["start"] - 1,
+                    operatorEnd=node["argument"]["start"],
+                    bindingComponents=[{"start": base["start"], "end": base["end"], "target": "real-sequence-space"}],
+                    lowering={"kind": "real-sequence-lp", "index": "Nat", "scalar": "Real"},
+                )
+                term = traced(space, "space:real-lp", f"lp (fun _ : ℕ => ℝ) ({go(exponent)})")
+                return f"↥({term})"
+            named = numeric_subscript_name(node)
+            variable = by_offset.get(named["start"], {}) if named else {}
+            if variable.get("namedSubscript"):
+                if variable.get("status") != "resolved" or variable.get("symbol") != named["symbol"]:
+                    raise Unsupported("Named subscript requires its own resolved source binding.")
+                target = "expectedConstant" if variable.get("constantDeclaration") else "expectedVariable"
+                return traced(
+                    dict(
+                        node,
+                        args=[],
+                        operatorStart=node["argument"]["start"] - 1,
+                        operatorEnd=node["argument"]["start"],
+                        **{target: variable["leanName"]},
+                    ),
+                    "name:subscript",
+                    variable_term(variable),
+                )
+            star = starred_name(node)
+            if star:
+                var = by_offset.get(star["start"], {})
+                if var.get("status") != "resolved" or var.get("symbol") != star["symbol"]:
+                    raise Unsupported("Starred names require an explicit binding for the decorated symbol.")
+                target = "expectedConstant" if var.get("constantDeclaration") else "expectedVariable"
+                return traced(
+                    dict(
+                        node,
+                        args=[],
+                        operatorStart=star["start"] + 1,
+                        operatorEnd=node["end"],
+                        **{target: var["leanName"]},
+                    ),
+                    "name:star",
+                    variable_term(var),
+                )
+            if node["marker"] == "^" and is_carrier(node["base"]):
+                exponent = node["argument"]
+                while exponent["kind"] == "group":
+                    exponent = exponent["body"]
+                exponent = atom(exponent)
+                variable = by_offset.get(exponent.get("start"), {})
+                natural = (exponent.get("kind") == "text" and exponent.get("text", "").isdigit()) or (
+                    variable.get("status") == "resolved" and variable.get("leanType") in {"Nat", "ℕ"}
+                )
+                if not natural:
+                    raise Unsupported("Finite carrier power requires a natural-number dimension.")
+                finite = dict(
+                    exponent,
+                    kind="finite-index-type",
+                    args=[node["argument"]],
+                    operatorStart=exponent["start"],
+                    operatorEnd=exponent.get("end", exponent["start"] + len(exponent.get("text", ""))),
+                )
+                occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+                binder = "book_finite_index"
+                while binder in occupied:
+                    binder += "_"
+                power = dict(
+                    node,
+                    args=[node["base"], finite],
+                    expectedBinderKind="forall",
+                    expectedBinderName=binder,
+                    operatorStart=node["argument"]["start"] - 1,
+                    operatorEnd=node["argument"]["start"],
+                    lowering={"kind": "finite-coordinate-space", "indexConstructor": "Fin"},
+                )
+                return traced(power, "binder:sequence-power", f"((«{binder}» : {go(finite)}) → ({go(node['base'])}))")
+            if numeric_power(node):
+                exponent = integer_expression(node["argument"])
+                term = f"(({go(node['base'])} : ℝ) ^ ({go(exponent)}))"
+                power = dict(
+                    node,
+                    args=[node["base"], node["argument"]],
+                    operatorStart=node["argument"]["start"] - 1,
+                    operatorEnd=node["argument"]["start"],
+                )
+                return traced(power, "power:real-integer", term)
+            base = node["base"]
+            var = by_offset.get(base["start"])
+            if not var or var["status"] != "resolved":
+                raise Unsupported("Indexed base has no resolved family binder.")
+            ty = var.get("leanType", "")
+            if node["marker"] == "^" and (
+                var.get("occurrenceSelector") != "superscript-base" or ty.split("→", 1)[0].strip() not in {"ℕ", "Nat"}
+            ):
+                raise Unsupported("Sequence superscripts need an explicit source selector and a Nat-indexed family.")
+            if "→" not in ty and "->" not in ty and not ty.startswith("∀"):
+                raise Unsupported("Subscript requires a function-valued family binder.")
+            origin = var.get("indexOrigin")
+            if origin is not None:
+                if ty.split("→", 1)[0].strip() not in {"ℕ", "Nat"} or base["kind"] != "text":
+                    raise Unsupported("Reindexing requires a named natural-number family.")
+                function = variable_term(var, indexed=True)
+                argument = shifted_index(node["argument"], origin)
+            else:
+                function, argument = go(base), go(node["argument"])
+            term = f"(({function}) ({argument}))"
+            traced_node = dict(
+                node,
+                operatorStart=node["argument"]["start"] - 1,
+                operatorEnd=node["argument"]["start"],
+                args=[base, node["argument"]],
+            )
+            if origin is not None:
+                traced_node.update(
+                    indexOrigin=origin,
+                    lowering={"kind": "natural-index-origin", "sourceOrigin": origin, "targetOrigin": 0},
+                )
+            if base["kind"] == "script":
+                traced_node["callee"] = base
+            else:
+                traced_node["expectedConstant" if var.get("constantDeclaration") else "expectedVariable"] = var[
+                    "leanName"
+                ]
+            return traced(traced_node, "index:superscript" if node["marker"] == "^" else "index:subscript", term)
+
+        if kind == "group":
+            return "(" + go(node["body"]) + ")"
+        if kind == "homeomorphism-type":
+            return traced(
+                dict(node, expectedConstant="Homeomorph"),
+                "type:homeomorphism",
+                f"@Homeomorph ({go(node['args'][0])}) ({go(node['args'][1])}) "
+                f"(inferInstance : TopologicalSpace ({go_untraced(node['args'][0])})) "
+                f"(inferInstance : TopologicalSpace ({go_untraced(node['args'][1])}))",
+            )
+        if kind == "binary-alphabet":
+            return traced(node, "type:binary-alphabet", "Bool")
+        if kind == "command":
+            name, args = node["name"], node["args"]
+            if node["optional"] is not None:
+                raise Unsupported("Optional argument has no expression rule.")
+            if name == "seqPower" and len(args) == 2:
+                alphabet, index = args
+                tokens = [
+                    t
+                    for child in alphabet.get("items", [])
+                    for t in expression_tokens(child)
+                    if not t.get("text", "?").isspace()
+                ]
+                spelling = [t.get("text", "\\" + t.get("name", "")) for t in tokens]
+                if spelling == [r"\{", "0", ",", "1", r"\}"]:
+                    alphabet = dict(
+                        alphabet,
+                        kind="binary-alphabet",
+                        args=[],
+                        expectedConstant="Bool",
+                        operatorStart=tokens[0]["start"],
+                        operatorEnd=tokens[0]["end"],
+                        lowering={
+                            "kind": "binary-alphabet",
+                            "zero": "Bool.false",
+                            "one": "Bool.true",
+                            "realSequenceEmbedding": CONVENTIONS.get("realSequenceEmbedding"),
+                        },
+                    )
+                elif not is_carrier(alphabet):
+                    raise Unsupported("Sequence power needs a registered carrier or the binary alphabet {0,1}.")
+                if not is_carrier(index):
+                    raise Unsupported("Sequence power needs a registered index carrier.")
+                occupied = {b["name"] for record in (records or {}).values() for b in record["binders"]}
+                binder = "book_power_index"
+                while binder in occupied:
+                    binder += "_"
+                power = dict(node, args=[alphabet, index], expectedBinderKind="forall", expectedBinderName=binder)
+                term = f"((«{binder}» : {go(index)}) → ({go(alphabet)}))"
+                return traced(power, "binder:sequence-power", term)
+            if name == "restrict" and len(args) == 2:
+                metric = distance_function(args[0])
+                function = "Function.uncurry (" + metric[0] + ")" if metric else go(args[0])
+                return traced(node, "operation:restrict", f"Set.domRestrict ({set_operand(args[1])}) ({function})")
+            if name == "Sequence":
+                binder = sequence_binder(node)
+                if binder is None:
+                    raise Unsupported("Sequence index range requires a reviewed binding rule.")
+                variable = by_offset[binder["declarationOffset"]]
+                if not variable.get("localBinder") or variable["status"] != "resolved":
+                    raise Unsupported("Sequence binder has not been resolved lexically.")
+                term = "(fun «" + variable["leanName"] + "» : ℕ => " + go(args[0]) + ")"
+                traced_node = dict(
+                    node,
+                    expectedBinderName=variable["leanName"],
+                    expectedBinderTypeName="Nat",
+                    bindingComponents=binder["components"],
+                )
+                if binder.get("indexOffset", 0):
+                    traced_node["lowering"] = {"kind": "natural-sequence-start", "sourceOrigin": binder["indexOffset"]}
+                return traced(traced_node, "binder:Sequence", term)
+            if name == "NonnegativeDimensionLevel" and len(args) == 1:
+                level = atom(args[0])
+                if level.get("kind") != "text" or not level.get("text", "").isascii() or not level["text"].isdigit():
+                    raise Unsupported("A nonnegative dimension level requires a natural numeral.")
+                return traced(
+                    dict(
+                        node,
+                        expectedConstant="OfNat.ofNat",
+                        dimensionLevel=level["text"],
+                        lowering={"kind": "nonnegative-dimension-level"},
+                    ),
+                    "literal:dimension-level",
+                    f"({level['text']} : Nat)",
+                )
+            if name == "Homeomorphic" and len(args) == 2:
+                space = dict(node, kind="homeomorphism-type")
+                return traced(
+                    dict(node, args=[space], expectedConstant="Nonempty"),
+                    "relation:homeomorphic",
+                    f"Nonempty ({go(space)})",
+                )
+            if name == "TwoPointSpace" and not args:
+                return traced(
+                    dict(
+                        node,
+                        expectedConstant="Bool",
+                        lowering={"kind": "binary-alphabet", "zero": "Bool.false", "one": "Bool.true"},
+                    ),
+                    "type:binary-alphabet",
+                    "Bool",
+                )
+            if name in CONSTANTS and not args:
+                return CONSTANTS[name]
+            if name in VARIABLE_COMMANDS and not args:
+                var = by_offset[node["start"]]
+                if var["status"] != "resolved":
+                    raise Unsupported(var["reason"])
+                return variable_term(var)
+            operators = {
+                "le": " ≤ ",
+                "ge": " ≥ ",
+                "ne": " ≠ ",
+                "in": " ∈ ",
+                "IncludedIn": " ⊆ ",
+                "cap": " ∩ ",
+                "cup": " ∪ ",
+            }
+            if name in operators and not args:
+                return operators[name]
+
+            # In these real-line set expressions the printed carriers denote
+            # their embedded subsets. Bare QQ remains the rational type.
+            def command_is(arg, expected):
+                while arg["kind"] == "sequence" and len(arg["items"]) == 1:
+                    arg = arg["items"][0]
+                return (
+                    arg["kind"] == "command" and arg["name"] == expected and not arg["args"] and arg["optional"] is None
+                )
+
+            if name == "SetDifference" and len(args) == 2 and command_is(args[0], "R") and command_is(args[1], "QQ"):
+                return traced(node, "macro:SetDifference", "((Set.univ : Set ℝ) \\ Set.range ((↑) : ℚ → ℝ))")
+            if name == "SetDifference" and len(args) == 2:
+                return traced(
+                    node,
+                    "macro:SetDifference",
+                    f"(({set_operand(args[0], args[1])}) \\ ({set_operand(args[1], args[0])}))",
+                )
+            if name in {"OpenInterval", "LeftClosedInterval"} and len(args) == 2 and command_is(args[1], "infty"):
+                endpoint = go(args[0])
+                interval = "Ioi" if name == "OpenInterval" else "Ici"
+                return traced(
+                    dict(
+                        node,
+                        expectedConstant=f"Set.{interval}",
+                        lowering={"kind": "unbounded-real-interval", "upperEndpoint": "unbounded"},
+                    ),
+                    "set:real-upper-ray",
+                    f"Set.{interval} ({endpoint} : ℝ)",
+                )
+            if name == "Pair" and len(args) == 2:
+                point = by_offset.get(atom(args[1]).get("start"), {})
+                if point.get("status") != "resolved" or records is None:
+                    raise Unsupported("Tagged Pair requires a resolved point in a dependent fiber.")
+                # Recognize only a named family applied to a named index. Lean
+                # checks the actual dependent application and rejects a different tag.
+                fiber = re.fullmatch(r"([\w]+) ([\w]+)", point["leanType"])
+                context = records.get(point["declaration"], {})
+                families = [
+                    b
+                    for b in context.get("binders", [])
+                    if fiber
+                    and b["name"] == fiber[1]
+                    and re.fullmatch(r"(?:ℕ|Nat)\s*(?:→|->)\s*Type(?: \S+)?", b["type"])
+                ]
+                if len(families) != 1:
+                    raise Unsupported("Tagged Pair requires a named Nat-indexed type family.")
+                family = "«" + families[0]["name"] + "»"
+                return traced(
+                    dict(node, expectedConstant="Sigma.mk", sigmaFamily=family),
+                    "constructor:sigma-pair",
+                    f"Sigma.mk (β := {family}) ({go(args[0])}) ({go(args[1])})",
+                )
+            if name == "MetricBall" and len(args) == 3:
+                domain = metric_domain(args[0])
+                if domain is None:
+                    raise Unsupported("Metric ball needs a source-owned MetricSpace parameter.")
+                radius = real_scalar_operand(args[2]) or args[2]
+                ball = dict(node, args=[args[0], args[1], radius], lowering={"kind": "explicit-metric-ball"})
+                metric = go(args[0])
+                center = metric_point(go(args[1]), f"(bookMetricDomain% ({go_untraced(args[0])}))")
+                return traced(
+                    ball,
+                    "macro:MetricBall",
+                    f"(@Metric.ball ({domain}) ({metric}).toPseudoMetricSpace ({center}) ({go(radius)} : ℝ))",
+                )
+            if name == "MetricDiameter" and len(args) == 2:
+                domain = metric_domain(args[0])
+                if domain is None:
+                    raise Unsupported("Metric diameter needs a source-owned MetricSpace parameter.")
+                metric, subset = go(args[0]), metric_set(args[1], go_untraced(args[0]))
+                return traced(
+                    node, "macro:MetricDiameter", f"(@Metric.diam ({domain}) ({metric}).toPseudoMetricSpace ({subset}))"
+                )
+            if name == "AmbientClosure":
+                if len(args) != 2 or not is_carrier(args[0]):
+                    raise Unsupported("AmbientClosure requires an explicitly resolved ambient carrier.")
+                return traced(
+                    node,
+                    "macro:AmbientClosure",
+                    f"(@closure ({go(args[0])}) inferInstance ({set_operand(args[1])}))",
+                )
+            if name in MACROS:
+                arity, operation = MACROS[name]
+                if len(args) == arity:
+                    return traced(node, "macro:" + name, operation([go(a) for a in args]))
+            raise Unsupported("No reviewed operation rule for \\" + name)
+        raise Unsupported("Unsupported syntax node: " + kind)
+
+    term = go(tree)
+    context = shared_context(declaration_contexts, records)
+    if not term:
+        raise Unsupported("Empty expression")
+    if not declaration_contexts and re.fullmatch(r"[\s\d.+*/()=-]+", term):
+        raise Unsupported("Standalone numeric expression has no reviewed ambient number type.")
+    # Two adjacent identifiers/parentheses are not automatically function application.
+    if re.search(r"»\s*(?:«|\()", term):
+        raise Unsupported("Application or local-definition grammar is not registered.")
+    return term, context

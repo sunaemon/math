@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "formalization-viewer",
+      "runtimeExecutable": "make",
+      "runtimeArgs": ["formalization-viewer", "BOOKLINK_OPEN_BROWSER=0"],
+      "port": 8765
+    }
+  ]
+}
