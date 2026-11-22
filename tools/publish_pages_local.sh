@@ -12,6 +12,7 @@ case "${2:-}" in
   exit 2
   ;;
 esac
+make chapter-pdfs BOOKS="polish-space-book polish-space-ch1"
 site=build/pages-local
 full=build/pages-local-full
 make dist BOOKLINK_PROJECT=polish-space-ch1 BOOKLINK_DIST_DIR="$site" BOOKLINK_DIST_FLAGS="$flags"
