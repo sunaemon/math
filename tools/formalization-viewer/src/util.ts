@@ -5,6 +5,7 @@
 // call back into app.ts, so the dependency runs one way: util -> state.
 
 import { state, project } from "./state.js";
+import { projectRelativePath } from "./repo-path.js";
 
 export function reportError(error: unknown): void {
   console.error(error);
@@ -31,13 +32,12 @@ export function logEvent(type: string, detail: Record<string, any> = {}): void {
 // repoPath normalizes any path to that project-relative form; repoUrl maps it
 // back to a fetchable URL under the project directory.
 export function repoPath(path: string | null | undefined): string {
-  if (!path) return "";
-  const dir = project.dir || "";
-  const root = state.map?.root || "";
-  let rel = root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path.replace(/^\/+/, "");
-  if (dir && rel === dir) return "";
-  if (dir && rel.startsWith(dir + "/")) rel = rel.slice(dir.length + 1);
-  return rel;
+  return projectRelativePath(
+    path,
+    project.dir || "",
+    state.map?.root || "",
+    project.mount ? `${mountPrefix()}${project.mount}` : "",
+  );
 }
 
 // Prefix of the site that the mount is served under: empty for the live
