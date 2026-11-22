@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "language": "ja",
+  "terms": [
+    {
+      "id": "meager-borel-set",
+      "english": "meager-borel-set",
+      "japanese": "痩せたBorel集合",
+      "status": "approved",
+      "avoid": [
+        "痩Borel集合",
+        "痩なBorel集合"
+      ]
+    },
+    {
+      "id": "section-of-product",
+      "english": "section-of-product",
+      "japanese": "切片",
+      "status": "approved",
+      "avoid": [
+        "同じ切断"
+      ],
+      "source_terms": [
+        "points in the same section"
+      ]
+    },
+    {
+      "id": "prefix-pair",
+      "english": "prefix-pair",
+      "japanese": "接頭辞の対",
+      "status": "approved",
+      "avoid": [
+        "始切片の対",
+        "接頭辞対"
+      ],
+      "source_terms": [
+        "prefix",
+        "prefixes"
+      ]
+    },
+    {
+      "id": "numerical-predecessor",
+      "english": "numerical-predecessor",
+      "japanese": "直前の自然数を求める手続き",
+      "status": "approved",
+      "avoid": [
+        "1を引く手続き",
+        "先行数"
+      ],
+      "source_terms": [
+        "predecessor"
+      ]
+    },
+    {
+      "id": "forcing-decision-set",
+      "english": "forcing-decision-set",
+      "japanese": "判定集合",
+      "status": "approved",
+      "avoid": [
+        "稠密テスト集合"
+      ]
+    },
+    {
+      "id": "axiom-schema-instance",
+      "english": "axiom-schema-instance",
+      "japanese": "公理図式の当該公理",
+      "status": "approved",
+      "avoid": [
+        "分出公理の例",
+        "置換公理の例",
+        "公理図式の例"
+      ]
+    },
+    {
+      "id": "externally-countable",
+      "english": "externally-countable",
+      "japanese": "外部から見て可算",
+      "status": "approved",
+      "avoid": [
+        "外部で可算",
+        "外部の宇宙で可算"
+      ]
+    },
+    {
+      "id": "bounded-separation",
+      "english": "bounded-separation",
+      "japanese": "有界論理式による分出",
+      "status": "approved",
+      "avoid": [
+        "有界分出"
+      ]
+    },
+    {
+      "id": "separation-axiom",
+      "english": "separation-axiom",
+      "japanese": "分出公理",
+      "status": "approved",
+      "avoid": [
+        "Separationにより"
+      ]
+    },
+    {
+      "id": "randomness-test",
+      "english": "randomness-test",
+      "japanese": "テスト",
+      "status": "approved",
+      "avoid": [
+        "検定"
+      ],
+      "source_terms": [
+        "Martin-Lof",
+        "Martin-Löf",
+        "null-set tests",
+        "Randomness Tests"
+      ]
+    },
+    {
+      "id": "valid-input-name",
+      "english": "valid-input-name",
+      "japanese": "妥当な入力名",
+      "status": "approved",
+      "avoid": [
+        "有効な入力名"
+      ],
+      "source_terms": [
+        "valid input name",
+        "valid input names"
+      ]
+    },
+    {
+      "id": "silver-splitting",
+      "english": "silver-splitting",
+      "japanese": "分裂",
+      "status": "approved",
+      "avoid": [
+        "Silver分割補題",
+        "分割の議論",
+        "分割の証明",
+        "ランク，分割，融合",
+        "点対の分割",
+        "Silverの分割補題",
+        "ジェネリックな対の分割",
+        "分割の段階",
+        "分割構成"
+      ],
+      "source_terms": [
+        "splitting"
+      ],
+      "definition_keys": [
+        "Silver splitting lemma"
+      ],
+      "definition_forms": [
+        "Silver分裂補題"
+      ]
+    },
+    {
+      "id": "hkl-finite-refinement",
+      "english": "hkl-finite-refinement",
+      "japanese": "HKLの有限段階の細分",
+      "status": "approved",
+      "avoid": [
+        "HKLの整合的な有限精密化"
+      ]
+    },
+    {
+      "id": "strict-inequality",
+      "english": "strict-inequality",
+      "japanese": "狭義の不等号",
+      "status": "approved",
+      "avoid": [
+        "厳密な不等号"
+      ]
+    },
+    {
+      "id": "fusion-witness-requirement",
+      "english": "fusion-witness-requirement",
+      "japanese": "証拠要件",
+      "status": "approved",
+      "avoid": [
+        "証拠要求",
+        "証拠に関する要求"
+      ],
+      "source_terms": [
+        "witness requirement",
+        "witness requirements"
+      ]
+    },
+    {
+      "id": "common-right-limit",
+      "english": "common-right-limit",
+      "japanese": "右側の条件列に共通する極限点",
+      "status": "approved",
+      "avoid": [
+        "共通の右極限"
+      ],
+      "source_terms": [
+        "common right limit"
+      ]
+    },
+    {
+      "id": "valid-output-prefix",
+      "english": "valid-output-prefix",
+      "japanese": "妥当な出力の先頭部分",
+      "status": "approved",
+      "avoid": [
+        "有効な出力の先頭部分"
+      ],
+      "source_terms": [
+        "valid output prefix"
+      ]
+    }
+  ]
+}

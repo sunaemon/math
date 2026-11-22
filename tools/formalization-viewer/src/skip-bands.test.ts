@@ -9,6 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   groupTextLines,
+  isPageFolio,
+  clipFlowToTextLines,
   SNAP_TOL,
   snapBandTop,
   snapBandBottom,
@@ -19,8 +21,20 @@ import {
   endLineResolve,
   endLineBottom,
   flowBandSegments,
+  resolveEntryFlowSegments,
+  resolveSkipFlowSegments,
+  skipSyncLocation,
   type LineBox,
 } from "./skip-bands.ts";
+
+test("skip sync bridges preface heading gaps without falling through to the first marker", () => {
+  const ranges = [
+    { key: "introduction", start: 4461, end: 5026 },
+    { key: "comparison", start: 5052, end: 5367 },
+  ];
+  assert.deepEqual(skipSyncLocation(5037, 9061, ranges), { key: "introduction", progress: 1 });
+  assert.equal(skipSyncLocation(9070, 9061, ranges), null);
+});
 
 // Map a PDF y (origin bottom-left) to a top-down fraction of an 800-pt page,
 // like pdf.js convertToViewportPoint / viewport.height does.
@@ -49,11 +63,56 @@ test("groupTextLines: merges runs on one baseline and sorts top→bottom", () =>
   assert.ok(lines[0].top < lines[0].baseline && lines[0].baseline < lines[0].bottom);
 });
 
+test("groupTextLines: folds a full-size combining accent into its text line", () => {
+  // Real geometry from a LuaTeX-ja render of "…so that $\hat d=\phi\circ d$…":
+  // the hat is a full-height (10pt) run 2.5pt above the 141.1 text baseline.
+  // It must not become its own line — a proof-start anchor at y 171 would then
+  // snap the band onto the accent, starting the highlight mid-sentence.
+  const lines = groupTextLines(
+    [
+      { baseline: 141.1, height: 9.2, x: 51, width: 200 },
+      { baseline: 143.6, height: 10, x: 267.7, width: 6 }, // the hat of $\hat d$
+      { baseline: 125.2, height: 9.2, x: 51, width: 300 }, // genuine next line
+    ],
+    toFrac,
+    (x: number) => x / 400,
+  );
+  assert.equal(lines.length, 2);
+  // The merged line keeps the wide text run's baseline and spans both boxes.
+  assert.ok(approx(lines[0].baseline, toFrac(141.1)));
+  assert.ok(approx(lines[0].top, toFrac(143.6 + 0.8 * 10)));
+  assert.ok(approx(lines[0].left, 51 / 400));
+  assert.ok(approx(lines[1].baseline, toFrac(125.2)));
+});
+
 test("groupTextLines: skips blankless runs of zero height without NaN", () => {
   const lines = groupTextLines([{ baseline: 500, height: 0 }], toFrac);
   assert.equal(lines.length, 1);
   assert.ok(approx(lines[0].top, toFrac(500)));
   assert.ok(approx(lines[0].bottom, toFrac(500)));
+});
+
+test("groupTextLines: tracks a line's leftmost and rightmost glyph extents", () => {
+  // Two runs on one baseline of a 400-pt-wide text column: [40, 40+100] and
+  // [200, 200+80]. The line box spans x 40 → 280.
+  const xToFrac = (x: number) => x / 400;
+  const lines = groupTextLines(
+    [
+      { baseline: 700, height: 10, x: 200, width: 80 },
+      { baseline: 700, height: 10, x: 40, width: 100 },
+    ],
+    toFrac,
+    xToFrac,
+  );
+  assert.equal(lines.length, 1);
+  assert.ok(approx(lines[0].left, 0.1));
+  assert.ok(approx(lines[0].right, 0.7));
+});
+
+test("groupTextLines: defaults to full width when no x mapping is supplied", () => {
+  const lines = groupTextLines([{ baseline: 700, height: 10, x: 40, width: 100 }], toFrac);
+  assert.equal(lines[0].left, 0);
+  assert.equal(lines[0].right, 1);
 });
 
 // A realistic page slice: a section heading, a three-line skipped paragraph,
@@ -138,12 +197,77 @@ test("skipBandSegments: adjacent pages have no intermediate full page", () => {
   ]);
 });
 
+test("entry flow: a raised start left at a page foot advances to text on the next page", async () => {
+  const pages = new Map<number, LineBox[]>([
+    [22, [{ top: 0.7, bottom: 0.73, baseline: 0.72, left: 0.04, right: 0.96 }]],
+    [
+      23,
+      [
+        { top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.05, right: 0.96 },
+        { top: 0.18, bottom: 0.22, baseline: 0.21, left: 0.05, right: 0.72 },
+      ],
+    ],
+  ]);
+  const lines = async (pageNumber: number) => pages.get(pageNumber) || [];
+  const segments = await resolveEntryFlowSegments(
+    { pageNumber: 22, frac: 0.95, xFrac: 0.05 },
+    { pageNumber: 23, frac: 0.21, xFrac: 0.72 },
+    lines,
+  );
+  assert.deepEqual(segments, [
+    { pageNumber: 23, top: 0.1, bottom: 0.14, left: 0.05, right: 0.96 },
+    { pageNumber: 23, top: 0.18, bottom: 0.22, left: 0.05, right: 0.72 },
+  ]);
+  assert.ok(
+    segments.every((segment) => segment.pageNumber === 23),
+    "page 22 whitespace must remain unshaded",
+  );
+});
+
+test("skip flow: page-break starts use the same next-page normalization", async () => {
+  const pages = new Map<number, LineBox[]>([
+    [22, [{ top: 0.7, bottom: 0.73, baseline: 0.72, left: 0.04, right: 0.96 }]],
+    [23, [{ top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.05, right: 0.72 }]],
+  ]);
+  // Block-form anchors: the start is raised into page-22 whitespace, the end
+  // sits on the last baseline at the left margin, so the last line is covered
+  // to its own right edge.
+  const segments = await resolveSkipFlowSegments(
+    { pageNumber: 22, frac: 0.95, xFrac: 0.04 },
+    { pageNumber: 23, frac: 0.13, xFrac: 0.05 },
+    async (pageNumber) => pages.get(pageNumber) || [],
+  );
+  assert.deepEqual(segments, [{ pageNumber: 23, top: 0.1, bottom: 0.14, left: 0.05, right: 0.72 }]);
+});
+
+test("skip flow: a mid-paragraph skip is bounded by its anchors' x", async () => {
+  // A skip whose comments sit inside a paragraph: the start anchor lands on
+  // its first glyph's baseline mid-line, the end anchor mid-line with glyphs
+  // to its left. The wash starts at the start anchor's x and stops at the end
+  // anchor's x instead of swallowing the neighbors on the shared lines.
+  const lines: LineBox[] = [
+    { top: 0.1, bottom: 0.16, baseline: 0.15, left: 0.1, right: 1 },
+    { top: 0.2, bottom: 0.26, baseline: 0.25, left: 0.1, right: 1 },
+    { top: 0.3, bottom: 0.36, baseline: 0.35, left: 0.1, right: 1 },
+  ];
+  const segments = await resolveSkipFlowSegments(
+    { pageNumber: 1, frac: 0.15, xFrac: 0.5 },
+    { pageNumber: 1, frac: 0.35, xFrac: 0.6 },
+    async () => lines,
+  );
+  assert.deepEqual(segments, [
+    { pageNumber: 1, top: 0.1, bottom: 0.16, left: 0.5, right: 1 },
+    { pageNumber: 1, top: 0.2, bottom: 0.26, left: 0.1, right: 1 },
+    { pageNumber: 1, top: 0.3, bottom: 0.36, left: 0.1, right: 0.6 },
+  ]);
+});
+
 // --- Booklink text-flow highlighting (mid-line start/end) ---
 
 const FLOW_LINES: LineBox[] = [
-  { top: 0.1, bottom: 0.16, baseline: 0.15, left: 0.1 },
-  { top: 0.2, bottom: 0.26, baseline: 0.25, left: 0.1 },
-  { top: 0.3, bottom: 0.36, baseline: 0.35, left: 0.1 },
+  { top: 0.1, bottom: 0.16, baseline: 0.15, left: 0.1, right: 1 },
+  { top: 0.2, bottom: 0.26, baseline: 0.25, left: 0.1, right: 1 },
+  { top: 0.3, bottom: 0.36, baseline: 0.35, left: 0.1, right: 1 },
 ];
 
 test("lineIndexBelow: picks the first line below a raised start anchor", () => {
@@ -179,8 +303,8 @@ test("start: lineIndexAt picks the paragraph's own first line (un-raised)", () =
 
 // endLineResolve: reading-order end against the exact end marker.
 const END_LINES: LineBox[] = [
-  { top: 0.59, bottom: 0.61, baseline: 0.6, left: 0.32 }, // 0 centered display formula (last content line)
-  { top: 0.79, bottom: 0.81, baseline: 0.8, left: 0.03 }, // 1 a left-aligned text line
+  { top: 0.59, bottom: 0.61, baseline: 0.6, left: 0.32, right: 1 }, // 0 centered display formula (last content line)
+  { top: 0.79, bottom: 0.81, baseline: 0.8, left: 0.03, right: 1 }, // 1 a left-aligned text line
 ];
 
 test("endLineResolve: a mid-line end covers up to the marker x on its own line", () => {
@@ -338,9 +462,9 @@ function resolveBand(lines: LineBox[], start: { frac: number; x: number }, end: 
 // the start sits on its own first line, so it never reaches up into the preceding
 // entry's last line. Modeled on entries 41 and 42.
 const ADJACENT_LINES: LineBox[] = [
-  { top: 0.232, bottom: 0.25, baseline: 0.244, left: 0.04 }, // 0 "P∈Γ." — prev entry (41) last line
-  { top: 0.256, bottom: 0.274, baseline: 0.268, left: 0.03 }, // 1 "At the first…" — next entry (42) first line
-  { top: 0.43, bottom: 0.448, baseline: 0.442, left: 0.18 }, // 2 a centered display sub-line — entry 42 end
+  { top: 0.232, bottom: 0.25, baseline: 0.244, left: 0.04, right: 1 }, // 0 "P∈Γ." — prev entry (41) last line
+  { top: 0.256, bottom: 0.274, baseline: 0.268, left: 0.03, right: 1 }, // 1 "At the first…" — next entry (42) first line
+  { top: 0.43, bottom: 0.448, baseline: 0.442, left: 0.18, right: 1 }, // 2 a centered display sub-line — entry 42 end
 ];
 
 test("regression: a paragraph-start booklink does not overlap the preceding entry's last line", () => {
@@ -363,9 +487,9 @@ test("regression: a paragraph-start booklink does not overlap the preceding entr
 // recall, where the motivation skip band sits directly above. The end marker is
 // exact on line 1.
 const STATEMENT_AFTER_GAP_LINES: LineBox[] = [
-  { top: 0.232, bottom: 0.25, baseline: 0.244, left: 0.04 }, // 0 motivation last line — the skip band above ends here
-  { top: 0.27, bottom: 0.288, baseline: 0.282, left: 0.04 }, // 1 "Recall (…). For metrizable…" — statement first line
-  { top: 0.294, bottom: 0.312, baseline: 0.306, left: 0.04 }, // 2 "…equivalent to second countability." — statement end
+  { top: 0.232, bottom: 0.25, baseline: 0.244, left: 0.04, right: 1 }, // 0 motivation last line — the skip band above ends here
+  { top: 0.27, bottom: 0.288, baseline: 0.282, left: 0.04, right: 1 }, // 1 "Recall (…). For metrizable…" — statement first line
+  { top: 0.294, bottom: 0.312, baseline: 0.306, left: 0.04, right: 1 }, // 2 "…equivalent to second countability." — statement end
 ];
 
 test("regression: a statement start raised into the gap snaps onto its heading, not the line above", () => {
@@ -392,10 +516,10 @@ test("regression: a statement start raised into the gap snaps onto its heading, 
 // snap-down the green proof band's start lands on line 1 and paints over the
 // statement (the "proposition covered in green" report). It must snap onto line 2.
 const PROOF_AFTER_STATEMENT_LINES: LineBox[] = [
-  { top: 0.2, bottom: 0.218, baseline: 0.212, left: 0.04 }, // 0 "Proposition (Open subspaces)." — statement heading
-  { top: 0.224, bottom: 0.242, baseline: 0.236, left: 0.04 }, // 1 "…are Polish." — statement last line
-  { top: 0.3, bottom: 0.318, baseline: 0.312, left: 0.04 }, // 2 "Proof. Let U⊆X be open…" — proof first line
-  { top: 0.324, bottom: 0.342, baseline: 0.336, left: 0.04 }, // 3 "…separability of U." — proof last line
+  { top: 0.2, bottom: 0.218, baseline: 0.212, left: 0.04, right: 1 }, // 0 "Proposition (Open subspaces)." — statement heading
+  { top: 0.224, bottom: 0.242, baseline: 0.236, left: 0.04, right: 1 }, // 1 "…are Polish." — statement last line
+  { top: 0.3, bottom: 0.318, baseline: 0.312, left: 0.04, right: 1 }, // 2 "Proof. Let U⊆X be open…" — proof first line
+  { top: 0.324, bottom: 0.342, baseline: 0.336, left: 0.04, right: 1 }, // 3 "…separability of U." — proof last line
 ];
 
 test("regression: a \\begin{proof} booklink start does not paint over the statement above it", () => {
@@ -416,9 +540,9 @@ test("regression: a \\begin{proof} booklink start does not paint over the statem
 // the start line — the text before the start ("one prefix that falls out of the
 // tree.") must stay uncovered. Modeled on the real page-68 geometry of entry 54.
 const SUBSCRIPT_START_LINES: LineBox[] = [
-  { top: 0.85, bottom: 0.864, baseline: 0.862, left: 0.04 }, // 0 "…A Δ⁰₁ set …, so" (start mid-line at x 0.5)
-  { top: 0.857, bottom: 0.869, baseline: 0.867, left: 0.5 }, // 1 the ₁ subscript sub-line (box overlaps line 0 in y)
-  { top: 0.9, bottom: 0.915, baseline: 0.91, left: 0.04 }, // 2 a later content line — the span flows down to here
+  { top: 0.85, bottom: 0.864, baseline: 0.862, left: 0.04, right: 1 }, // 0 "…A Δ⁰₁ set …, so" (start mid-line at x 0.5)
+  { top: 0.857, bottom: 0.869, baseline: 0.867, left: 0.5, right: 1 }, // 1 the ₁ subscript sub-line (box overlaps line 0 in y)
+  { top: 0.9, bottom: 0.915, baseline: 0.91, left: 0.04, right: 1 }, // 2 a later content line — the span flows down to here
 ];
 
 test("regression: a mid-line start with a subscript sub-line does not cover the text before it", () => {
@@ -442,12 +566,12 @@ test("regression: a mid-line start with a subscript sub-line does not cover the 
 // lands in the gap below them. The whole equation must be covered full width, not
 // a left sliver (the reported "half split"). Modeled on entry 36.
 const FORMULA_END_LINES: LineBox[] = [
-  { top: 0.718, bottom: 0.735, baseline: 0.732, left: 0.038 }, // 0 "Recall from Alexandrov…" (paragraph start)
-  { top: 0.738, bottom: 0.755, baseline: 0.752, left: 0.038 }, // 1 "a countable union of closed sets…"
-  { top: 0.759, bottom: 0.775, baseline: 0.772, left: 0.038 }, // 2 "open sets. The two classes are dual:"
-  { top: 0.795, bottom: 0.812, baseline: 0.809, left: 0.322 }, // 3 "A is Fσ ⟺ X∖A is Gδ." (centered, main)
-  { top: 0.803, bottom: 0.815, baseline: 0.813, left: 0.401 }, // 4 "σδ" (formula subscripts, lower sub-baseline)
-  { top: 0.862, bottom: 0.879, baseline: 0.876, left: 0.038 }, // 5 "Longer strings…" (next paragraph)
+  { top: 0.718, bottom: 0.735, baseline: 0.732, left: 0.038, right: 1 }, // 0 "Recall from Alexandrov…" (paragraph start)
+  { top: 0.738, bottom: 0.755, baseline: 0.752, left: 0.038, right: 1 }, // 1 "a countable union of closed sets…"
+  { top: 0.759, bottom: 0.775, baseline: 0.772, left: 0.038, right: 1 }, // 2 "open sets. The two classes are dual:"
+  { top: 0.795, bottom: 0.812, baseline: 0.809, left: 0.322, right: 1 }, // 3 "A is Fσ ⟺ X∖A is Gδ." (centered, main)
+  { top: 0.803, bottom: 0.815, baseline: 0.813, left: 0.401, right: 1 }, // 4 "σδ" (formula subscripts, lower sub-baseline)
+  { top: 0.862, bottom: 0.879, baseline: 0.876, left: 0.038, right: 1 }, // 5 "Longer strings…" (next paragraph)
 ];
 
 test("regression: a booklink ending in a display formula covers the whole formula, not a left sliver", () => {
@@ -475,11 +599,11 @@ test("regression: a booklink ending in a display formula covers the whole formul
 // the real page-63 geometry of entries 47 ("…Π⁰ = ⋃ Π⁰") and 46 ("The class Σ⁰ …"),
 // where entry 47 was shading the top half of "The class …".
 const FORMULA_THEN_PARA_LINES: LineBox[] = [
-  { top: 0.52, bottom: 0.535, baseline: 0.53, left: 0.03 }, // 0 "Taking complements …" (entry 47 first line)
-  { top: 0.575, bottom: 0.59, baseline: 0.585, left: 0.18 }, // 1 "Π⁰ = ⋃ Π⁰" formula main (centered)
-  { top: 0.596, bottom: 0.608, baseline: 0.605, left: 0.1 }, // 2 formula's lowest sub-line — entry 47 end (box dips low)
-  { top: 0.599, bottom: 0.616, baseline: 0.612, left: 0.03 }, // 3 "The class Σ⁰ …" entry 46 first line (overlaps line 2 in y)
-  { top: 0.66, bottom: 0.678, baseline: 0.672, left: 0.03 }, // 4 "then β := …" (entry 46 second line)
+  { top: 0.52, bottom: 0.535, baseline: 0.53, left: 0.03, right: 1 }, // 0 "Taking complements …" (entry 47 first line)
+  { top: 0.575, bottom: 0.59, baseline: 0.585, left: 0.18, right: 1 }, // 1 "Π⁰ = ⋃ Π⁰" formula main (centered)
+  { top: 0.596, bottom: 0.608, baseline: 0.605, left: 0.1, right: 1 }, // 2 formula's lowest sub-line — entry 47 end (box dips low)
+  { top: 0.599, bottom: 0.616, baseline: 0.612, left: 0.03, right: 1 }, // 3 "The class Σ⁰ …" entry 46 first line (overlaps line 2 in y)
+  { top: 0.66, bottom: 0.678, baseline: 0.672, left: 0.03, right: 1 }, // 4 "then β := …" (entry 46 second line)
 ];
 
 test("regression: adjacent entries split at a formula→paragraph boundary without overlapping", () => {
@@ -508,17 +632,17 @@ test("regression: adjacent entries split at a formula→paragraph boundary witho
 // must be skipped, while a full-height following line is capped against.
 test("endLineBottom: skips the end line's own subscript sub-run, covering the whole line", () => {
   const lines: LineBox[] = [
-    { top: 0.109, bottom: 0.126, baseline: 0.122, left: 0.04 }, // 0 main text (end line)
-    { top: 0.117, bottom: 0.129, baseline: 0.127, left: 0.16 }, // 1 its subscripts (shorter, lower baseline)
-    { top: 0.139, bottom: 0.156, baseline: 0.153, left: 0.12 }, // 2 next paragraph (full height)
+    { top: 0.109, bottom: 0.126, baseline: 0.122, left: 0.04, right: 1 }, // 0 main text (end line)
+    { top: 0.117, bottom: 0.129, baseline: 0.127, left: 0.16, right: 1 }, // 1 its subscripts (shorter, lower baseline)
+    { top: 0.139, bottom: 0.156, baseline: 0.153, left: 0.12, right: 1 }, // 2 next paragraph (full height)
   ];
   // The shorter sub-run (1) is skipped, so the bottom is the main line's own bottom,
   // not the sub-run's top (0.117) — the bug that chopped the wash to a sliver.
   assert.ok(approx(endLineBottom(lines, 0), 0.126), "must reach the main line's bottom");
   // A full-height following line that overlaps would still cap (display→tight text).
   const overlapping: LineBox[] = [
-    { top: 0.596, bottom: 0.608, baseline: 0.605, left: 0.18 }, // 0 short formula sub-line (end line)
-    { top: 0.599, bottom: 0.616, baseline: 0.612, left: 0.03 }, // 1 full-height next paragraph, dips up
+    { top: 0.596, bottom: 0.608, baseline: 0.605, left: 0.18, right: 1 }, // 0 short formula sub-line (end line)
+    { top: 0.599, bottom: 0.616, baseline: 0.612, left: 0.03, right: 1 }, // 1 full-height next paragraph, dips up
   ];
   assert.ok(approx(endLineBottom(overlapping, 0), 0.599), "a full-height following line still caps");
 });
@@ -529,11 +653,11 @@ test("endLineBottom: skips the end line's own subscript sub-run, covering the wh
 // line, not stop at the subscript box's top (the reported "half-covered" marker).
 // Line boxes modeled on the real debug-PDF page-51 geometry.
 const SUBSCRIPT_END_LINES: LineBox[] = [
-  { top: 0.08906, bottom: 0.1058, baseline: 0.10245, left: 0.0356 }, // 0 "For n≥1 … any common" (first line)
-  { top: 0.09721, bottom: 0.10893, baseline: 0.10658, left: 0.4286 }, // 1 first line's subscripts (shorter)
-  { top: 0.10915, bottom: 0.12588, baseline: 0.12253, left: 0.0356 }, // 2 "divisor of … lowest terms" (last line)
-  { top: 0.1173, bottom: 0.12902, baseline: 0.12668, left: 0.16 }, // 3 last line's subscripts (shorter, lower)
-  { top: 0.13927, bottom: 0.15601, baseline: 0.15266, left: 0.1208 }, // 4 next paragraph
+  { top: 0.08906, bottom: 0.1058, baseline: 0.10245, left: 0.0356, right: 1 }, // 0 "For n≥1 … any common" (first line)
+  { top: 0.09721, bottom: 0.10893, baseline: 0.10658, left: 0.4286, right: 1 }, // 1 first line's subscripts (shorter)
+  { top: 0.10915, bottom: 0.12588, baseline: 0.12253, left: 0.0356, right: 1 }, // 2 "divisor of … lowest terms" (last line)
+  { top: 0.1173, bottom: 0.12902, baseline: 0.12668, left: 0.16, right: 1 }, // 3 last line's subscripts (shorter, lower)
+  { top: 0.13927, bottom: 0.15601, baseline: 0.15266, left: 0.1208, right: 1 }, // 4 next paragraph
 ];
 
 test("regression: a prose booklink whose last line has subscripts is covered in full", () => {
@@ -558,11 +682,11 @@ test("regression: a prose booklink whose last line has subscripts is covered in 
 // must advance onto the heading line. Line boxes are the real page-39 debug-PDF
 // geometry (page height 595.276pt, body crop 50pt margins).
 const STATEMENT_SUPERSCRIPT_HEADING_LINES: LineBox[] = [
-  { top: 0.71712, bottom: 0.73392, baseline: 0.73056, left: 0.00313 }, // 0 preceding skip block's last line
-  { top: 0.77523, bottom: 0.78699, baseline: 0.78464, left: 0.37527 }, // 1 "<ω" superscript of 2^{<ω} (shorter, higher)
-  { top: 0.77724, bottom: 0.79404, baseline: 0.79068, left: 0.00313 }, // 2 "Lemma (König). If T⊆2…" heading (main)
-  { top: 0.79539, bottom: 0.80715, baseline: 0.80479, left: 0.64413 }, // 3 "n" superscript of 2^n on the last line
-  { top: 0.79741, bottom: 0.8142, baseline: 0.81084, left: 0.00125 }, // 4 "level is empty: … belongs to T." last line
+  { top: 0.71712, bottom: 0.73392, baseline: 0.73056, left: 0.00313, right: 1 }, // 0 preceding skip block's last line
+  { top: 0.77523, bottom: 0.78699, baseline: 0.78464, left: 0.37527, right: 1 }, // 1 "<ω" superscript of 2^{<ω} (shorter, higher)
+  { top: 0.77724, bottom: 0.79404, baseline: 0.79068, left: 0.00313, right: 1 }, // 2 "Lemma (König). If T⊆2…" heading (main)
+  { top: 0.79539, bottom: 0.80715, baseline: 0.80479, left: 0.64413, right: 1 }, // 3 "n" superscript of 2^n on the last line
+  { top: 0.79741, bottom: 0.8142, baseline: 0.81084, left: 0.00125, right: 1 }, // 4 "level is empty: … belongs to T." last line
 ];
 
 test("mainLineBelow: advances past a heading's superscript sub-run onto the main line", () => {
@@ -573,6 +697,38 @@ test("mainLineBelow: advances past a heading's superscript sub-run onto the main
   assert.equal(mainLineBelow(2, STATEMENT_SUPERSCRIPT_HEADING_LINES), 2);
   // -1 (no line below the anchor) passes straight through.
   assert.equal(mainLineBelow(-1, STATEMENT_SUPERSCRIPT_HEADING_LINES), -1);
+});
+
+// A three-line skipped paragraph: the wash must flow first glyph → last glyph
+// (indented first line, full-width middle, last line cut at its last glyph), not
+// cover the paragraph as a full-width block.
+const SKIP_FLOW_LINES: LineBox[] = [
+  { top: 0.2, bottom: 0.218, baseline: 0.212, left: 0.08, right: 0.97 }, // 0 first line (paragraph indent)
+  { top: 0.224, bottom: 0.242, baseline: 0.236, left: 0.03, right: 0.97 }, // 1 middle line
+  { top: 0.248, bottom: 0.266, baseline: 0.26, left: 0.03, right: 0.55 }, // 2 last line, ends mid-column
+];
+
+test("skip flow: a paragraph skip runs from its first glyph to its last glyph", async () => {
+  // Raised start in the gap above line 0 (frac 0.19); end anchor on line 2's baseline.
+  const segs = await resolveSkipFlowSegments(
+    { pageNumber: 1, frac: 0.19, xFrac: 0.08 },
+    { pageNumber: 1, frac: 0.26, xFrac: 0.03 },
+    async () => SKIP_FLOW_LINES,
+  );
+  assert.deepEqual(segs, [
+    { pageNumber: 1, top: 0.2, bottom: 0.221, left: 0.08, right: 0.97 }, // first line from its indent
+    { pageNumber: 1, top: 0.221, bottom: 0.245, left: 0.03, right: 0.97 }, // middle follows its glyph bounds
+    { pageNumber: 1, top: 0.245, bottom: 0.266, left: 0.03, right: 0.55 }, // last line to its last glyph
+  ]);
+});
+
+test("skip flow: a one-line skip covers exactly that line's glyph extent", async () => {
+  const segs = await resolveSkipFlowSegments(
+    { pageNumber: 1, frac: 0.23, xFrac: 0.03 },
+    { pageNumber: 1, frac: 0.236, xFrac: 0.03 },
+    async () => SKIP_FLOW_LINES,
+  );
+  assert.deepEqual(segs, [{ pageNumber: 1, top: 0.224, bottom: 0.242, left: 0.03, right: 0.97 }]);
 });
 
 test("regression: a statement heading carrying a superscript starts the band on the heading, not the superscript", () => {
@@ -597,3 +753,110 @@ test("regression: a statement heading carrying a superscript starts the band on 
     "no segment over the heading may be indented past its left edge",
   );
 });
+
+// A chapter's opening paragraph has no indent: its start is exactly at the
+// left edge on the first baseline, as in the Borel reducibility synthesis.
+test("skip flow: a baseline start at the left margin includes the first line", async () => {
+  const lines = SKIP_FLOW_LINES.map((line) => ({ ...line, left: 0.03 }));
+  const segments = await resolveSkipFlowSegments(
+    { pageNumber: 1, frac: 0.212, xFrac: 0.03 },
+    { pageNumber: 1, frac: 0.26, xFrac: 0.55 },
+    async () => lines,
+  );
+  assert.deepEqual(segments, [
+    { pageNumber: 1, top: 0.2, bottom: 0.221, left: 0.03, right: 0.97 },
+    { pageNumber: 1, top: 0.221, bottom: 0.245, left: 0.03, right: 0.97 },
+    { pageNumber: 1, top: 0.245, bottom: 0.266, left: 0.03, right: 0.55 },
+  ]);
+});
+
+for (const [kind, resolve] of [
+  ["entry", resolveEntryFlowSegments],
+  ["skip", resolveSkipFlowSegments],
+] as const) {
+  test(`${kind}: every row follows its glyph edges across pages, retaining partial anchors`, async () => {
+    const pages: Record<number, LineBox[]> = {
+      1: [
+        { top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.12, right: 0.92 },
+        { top: 0.16, bottom: 0.2, baseline: 0.19, left: 0.08, right: 0.94 },
+      ],
+      2: [
+        { top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.09, right: 0.91 },
+        { top: 0.2, bottom: 0.24, baseline: 0.23, left: 0.3, right: 0.7 }, // display
+        { top: 0.3, bottom: 0.34, baseline: 0.33, left: 0.08, right: 0.95 },
+      ],
+      3: [{ top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.1, right: 0.85 }],
+    };
+    const segments = await resolve(
+      { pageNumber: 1, frac: 0.13, xFrac: 0.4 },
+      { pageNumber: 3, frac: 0.13, xFrac: 0.6 },
+      async (page) => pages[page],
+    );
+    assert.deepEqual(segments, [
+      { pageNumber: 1, top: 0.1, bottom: 0.15000000000000002, left: 0.4, right: 0.92 },
+      { pageNumber: 1, top: 0.15000000000000002, bottom: 0.2, left: 0.08, right: 0.94 },
+      { pageNumber: 2, top: 0.1, bottom: 0.14, left: 0.09, right: 0.91 },
+      { pageNumber: 2, top: 0.2, bottom: 0.24, left: 0.3, right: 0.7 },
+      { pageNumber: 2, top: 0.3, bottom: 0.34, left: 0.08, right: 0.95 },
+      { pageNumber: 3, top: 0.1, bottom: 0.14, left: 0.1, right: 0.6 },
+    ]);
+  });
+}
+
+test("row height includes later tall glyphs and shifted small math runs", () => {
+  const lines = groupTextLines(
+    [
+      { baseline: 700, height: 8, x: 10, width: 10 }, // first glyph
+      { baseline: 700, height: 12, x: 20, width: 150 }, // taller glyph later
+      { baseline: 705, height: 7, x: 100, width: 4 }, // superscript
+      { baseline: 695, height: 7, x: 120, width: 4 }, // subscript
+      { baseline: 680, height: 12, x: 10, width: 150 },
+    ],
+    toFrac,
+    (x) => x / 400,
+  );
+  assert.equal(lines.length, 2);
+  assert.ok(approx(lines[0].top, toFrac(705 + 0.8 * 7)));
+  assert.ok(approx(lines[0].bottom, toFrac(695 - 0.2 * 7)));
+  assert.ok(approx(lines[0].left, 10 / 400));
+  assert.ok(approx(lines[0].right, 170 / 400));
+});
+
+test("row bands share boundaries for normal leading and overlapping tall math, keeping paragraph gaps", async () => {
+  const lines: LineBox[] = [
+    { top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.1, right: 0.9 },
+    { top: 0.15, bottom: 0.2, baseline: 0.18, left: 0.1, right: 0.8 },
+    { top: 0.19, bottom: 0.24, baseline: 0.23, left: 0.1, right: 0.9 },
+    { top: 0.3, bottom: 0.34, baseline: 0.33, left: 0.1, right: 0.7 },
+  ];
+  const rows = await clipFlowToTextLines(
+    [{ pageNumber: 1, top: 0.1, bottom: 0.34, left: 0, right: 1 }],
+    async () => lines,
+  );
+  assert.equal(rows[0].bottom, rows[1].top);
+  assert.equal(rows[1].bottom, rows[2].top);
+  assert.ok(rows[2].bottom! < rows[3].top);
+  assert.ok(approx(rows[0].bottom!, 0.145));
+  assert.ok(approx(rows[1].bottom!, 0.195));
+});
+
+test("page folios are excluded in the margins, while numeric mathematical content remains", () => {
+  assert.equal(isPageFolio("255", 0.06), true);
+  assert.equal(isPageFolio("31", 0.94), true);
+  assert.equal(isPageFolio("xiv", 0.06), true);
+  assert.equal(isPageFolio("255", 0.3), false);
+  assert.equal(isPageFolio("0", 0.86), false);
+  assert.equal(isPageFolio("13.3", 0.06), false);
+  assert.equal(isPageFolio("E₀", 0.06), false);
+});
+
+for (const resolve of [resolveEntryFlowSegments, resolveSkipFlowSegments]) {
+  test(`${resolve.name}: includes Proof heading for a body-start span only`, async () => {
+    const lines: LineBox[] = [{ top: 0.1, bottom: 0.14, baseline: 0.13, left: 0.1, right: 0.9, proofLabelRight: 0.18 }];
+    const end = { pageNumber: 1, frac: 0.13, xFrac: 0.8 };
+    const full = await resolve({ pageNumber: 1, frac: 0.13, xFrac: 0.19 }, end, async () => lines);
+    assert.equal(full[0].left, 0.1);
+    const later = await resolve({ pageNumber: 1, frac: 0.13, xFrac: 0.4 }, end, async () => lines);
+    assert.equal(later[0].left, 0.4);
+  });
+}

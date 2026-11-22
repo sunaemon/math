@@ -2,48 +2,119 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="require-trusted-types-for 'script'; trusted-types viewer-html dompurify viewer-script-url"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <script src="./build/view-bootstrap.js"></script>
+    <meta
+      name="description"
+      content="Read the book alongside its Lean proofs, with synchronized source and PDF panes and linked definitions."
+    />
     <title>Formalization Viewer</title>
     <link rel="icon" href="./favicon.svg" />
-    <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="ai-catalog" href="./ai-catalog.json" type="application/ai-catalog+json" />
+    <link rel="stylesheet" href="./build/styles.css" />
   </head>
   <body>
+    <svg class="pdf-render-filters" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="dark-pdf-weight" color-interpolation-filters="sRGB">
+          <feMorphology operator="dilate" radius="0.35" />
+        </filter>
+      </defs>
+    </svg>
+    <div class="view-startup">
+      <div class="startup-card">
+        <h1 data-ui-text="Loading viewer…">Loading viewer…</h1>
+        <p id="startup-detail" role="status" aria-live="polite" data-ui-text="Loading application modules…">
+          Loading application modules…
+        </p>
+        <progress
+          id="startup-progress"
+          max="7"
+          value="0"
+          aria-label="Viewer loading progress"
+          data-ui-aria-label="Viewer loading progress"
+        ></progress>
+        <ol class="startup-steps">
+          <li data-startup-step="manifest" data-ui-text="Book settings">Book settings</li>
+          <li data-startup-step="map" data-ui-text="Source map">Source map</li>
+          <li data-startup-step="files" data-ui-text="Document list">Document list</li>
+          <li data-startup-step="panes" data-ui-text="Pane layout and controls">Pane layout and controls</li>
+          <li data-startup-step="pdf" data-ui-text="PDF download and page preparation">
+            PDF download and page preparation
+          </li>
+          <li data-startup-step="sources">Markdown / Lean / TeX</li>
+          <li data-startup-step="position" data-ui-text="Reading position">Reading position</li>
+        </ol>
+      </div>
+    </div>
     <header class="toolbar">
       <div class="toolbar-selects">
-        <label class="select-label" id="book-select-label" hidden>
-          <select id="book-select" aria-label="Book"></select>
-        </label>
         <div class="marker-combo select-label-grow" id="marker-combo">
           <button
             id="marker-field"
-            class="marker-field"
+            class="marker-field select-field"
             type="button"
             aria-haspopup="listbox"
+            aria-controls="marker-list"
             aria-expanded="false"
             title="Jump to linked passage"
+            data-ui-title="Jump to linked passage"
           >
-            <span class="select-caption">Marker</span>
-            <span id="marker-field-label" class="marker-field-label">—</span>
-            <span class="marker-field-caret" aria-hidden="true">&#9662;</span>
+            <span class="select-caption" data-ui-text="Marker">Marker</span>
+            <span id="marker-field-label" class="marker-field-label select-field-label">—</span>
+            <span class="select-caret" aria-hidden="true"></span>
           </button>
-          <div id="marker-popover" class="marker-popover" hidden>
+          <div id="marker-popover" class="marker-popover" popover="manual" hidden>
             <input
               id="marker-search"
+              role="combobox"
+              aria-controls="marker-list"
+              aria-expanded="true"
               class="marker-search"
               type="search"
               placeholder="Search markers…"
+              data-ui-placeholder="Search markers…"
               aria-label="Search markers"
+              data-ui-aria-label="Search markers"
               autocomplete="off"
               spellcheck="false"
             />
-            <ul id="marker-list" class="marker-list" role="listbox" aria-label="Markers"></ul>
+            <ul
+              id="marker-list"
+              class="marker-list"
+              role="listbox"
+              aria-label="Markers"
+              data-ui-aria-label="Markers"
+              tabindex="-1"
+            ></ul>
             <div class="marker-hints"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>↵</kbd> jump · <kbd>esc</kbd> close</div>
           </div>
         </div>
       </div>
-      <button id="prev-entry" type="button" title="Previous marker" aria-label="Previous marker">&larr;</button>
-      <button id="next-entry" type="button" title="Next marker" aria-label="Next marker">&rarr;</button>
+      <button
+        id="prev-entry"
+        type="button"
+        title="Previous marker"
+        data-ui-title="Previous marker"
+        aria-label="Previous marker"
+        data-ui-aria-label="Previous marker"
+      >
+        &larr;
+      </button>
+      <button
+        id="next-entry"
+        type="button"
+        title="Next marker"
+        data-ui-title="Next marker"
+        aria-label="Next marker"
+        data-ui-aria-label="Next marker"
+      >
+        &rarr;
+      </button>
       <div class="settings">
         <button
           id="settings-toggle"
@@ -52,33 +123,50 @@
           aria-expanded="false"
           aria-haspopup="true"
           aria-label="View options"
+          data-ui-aria-label="View options"
           title="View options"
+          data-ui-title="View options"
+          popovertarget="settings-menu"
         >
           &#9776;
         </button>
-        <div id="settings-menu" class="settings-menu view-options" hidden aria-label="View options">
-          <h2 class="vo-title">View options</h2>
+        <div
+          id="settings-menu"
+          class="settings-menu view-options"
+          popover="auto"
+          aria-label="View options"
+          data-ui-aria-label="View options"
+        >
+          <h2 class="vo-title" data-ui-text="View options">View options</h2>
+
+          <section class="vo-section" aria-label="Documents" data-ui-aria-label="Documents">
+            <h3 class="vo-label" data-ui-text="Documents">Documents</h3>
+            <label class="vo-document" id="book-select-label" for="book-select" hidden>
+              <span class="vo-row-label" data-ui-text="Book">Book</span>
+              <select id="book-select" aria-label="Book" data-ui-aria-label="Book"></select>
+            </label>
+          </section>
+
+          <hr class="vo-divider" />
 
           <section class="vo-section">
-            <h3 class="vo-label">Panels</h3>
+            <h3 class="vo-label" data-ui-text="Panels">Panels</h3>
             <div class="vo-panels">
               <label><input class="pane-check" type="checkbox" value="pdf" checked /> PDF</label>
               <label><input class="pane-check" type="checkbox" value="md" checked /> Markdown</label>
+              <label id="pdf-peer-pane-option" hidden
+                ><input class="pane-check" type="checkbox" value="pdf-peer" />
+                <span data-ui-text="Parallel PDF">Parallel PDF</span></label
+              >
               <label><input class="pane-check" type="checkbox" value="lean" checked /> Lean</label>
               <label><input class="pane-check" type="checkbox" value="tex" /> TeX</label>
               <label><input class="pane-check" type="checkbox" value="infoview" checked /> Lean Infoview</label>
             </div>
-          </section>
-
-          <hr class="vo-divider" />
-
-          <section class="vo-section">
-            <h3 class="vo-label">Sync</h3>
             <div class="vo-row">
-              <span class="vo-row-label">Scroll sync</span>
-              <div class="segmented" id="sync-seg" role="group" aria-label="Scroll sync">
-                <button type="button" data-value="on" aria-pressed="true">On</button>
-                <button type="button" data-value="off" aria-pressed="false">Off</button>
+              <span class="vo-row-label" data-ui-text="Layout">Layout</span>
+              <div class="segmented" id="layout-seg" role="group" aria-label="Layout" data-ui-aria-label="Layout">
+                <button type="button" data-value="columns" aria-pressed="true" data-ui-text="Columns">Columns</button>
+                <button type="button" data-value="rows" aria-pressed="false" data-ui-text="Rows">Rows</button>
               </div>
             </div>
           </section>
@@ -86,12 +174,37 @@
           <hr class="vo-divider" />
 
           <section class="vo-section">
-            <h3 class="vo-label">Editor</h3>
+            <h3 class="vo-label">PDF</h3>
+            <label class="vo-row" for="pdf-paper">
+              <span class="vo-row-label" data-ui-text="Page size">Page size</span>
+              <select id="pdf-paper">
+                <option value="default" data-ui-text="Book default">Book default</option>
+                <option value="a4">A4 · 210 × 297 mm</option>
+                <option value="a5">A5 · 148 × 210 mm</option>
+                <option value="b5">B5 · 182 × 257 mm</option>
+                <option value="b6">B6 · 128 × 182 mm</option>
+              </select>
+            </label>
+            <label class="vo-row" for="pdf-font-size">
+              <span class="vo-row-label" data-ui-text="Text size">Text size</span>
+              <select id="pdf-font-size">
+                <option value="default" data-ui-text="Book default">Book default</option>
+                <option value="10">10 pt</option>
+                <option value="11">11 pt</option>
+                <option value="12">12 pt</option>
+              </select>
+            </label>
             <div class="vo-row">
-              <span class="vo-row-label">Line numbers</span>
-              <div class="segmented" id="linenum-seg" role="group" aria-label="Line numbers">
-                <button type="button" data-value="on" aria-pressed="false">On</button>
-                <button type="button" data-value="off" aria-pressed="true">Off</button>
+              <span class="vo-row-label" data-ui-text="Display">Display</span>
+              <div
+                class="segmented"
+                id="pdf-mode-seg"
+                role="group"
+                aria-label="PDF display mode"
+                data-ui-aria-label="PDF display mode"
+              >
+                <button type="button" data-value="chapter" aria-pressed="true" data-ui-text="Chapter">Chapter</button>
+                <button type="button" data-value="full" aria-pressed="false" data-ui-text="Full">Full</button>
               </div>
             </div>
           </section>
@@ -99,17 +212,123 @@
           <hr class="vo-divider" />
 
           <section class="vo-section">
-            <h3 class="vo-label">Layout</h3>
-            <div class="segmented segmented-full" id="layout-seg" role="group" aria-label="Layout">
-              <button type="button" data-value="columns" aria-pressed="true">Columns</button>
-              <button type="button" data-value="rows" aria-pressed="false">Rows</button>
+            <h3 class="vo-label" data-ui-text="Sync">Sync</h3>
+            <div class="vo-row">
+              <span class="vo-row-label" data-ui-text="Scroll sync">Scroll sync</span>
+              <div
+                class="segmented"
+                id="sync-seg"
+                role="group"
+                aria-label="Scroll sync"
+                data-ui-aria-label="Scroll sync"
+              >
+                <button type="button" data-value="on" aria-pressed="true" data-ui-text="On">On</button>
+                <button type="button" data-value="off" aria-pressed="false" data-ui-text="Off">Off</button>
+              </div>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <section class="vo-section">
+            <h3 class="vo-label" data-ui-text="Overlays">Overlays</h3>
+            <div class="vo-row">
+              <span class="vo-row-label" data-ui-text="Highlights">Highlights</span>
+              <div
+                class="segmented"
+                id="highlights-seg"
+                role="group"
+                aria-label="Marker highlights"
+                data-ui-aria-label="Marker highlights"
+              >
+                <button type="button" data-value="on" aria-pressed="true" data-ui-text="On">On</button>
+                <button type="button" data-value="off" aria-pressed="false" data-ui-text="Off">Off</button>
+              </div>
+            </div>
+            <div class="vo-row">
+              <span class="vo-row-label" data-ui-text="Links">Links</span>
+              <div
+                class="segmented"
+                id="links-seg"
+                role="group"
+                aria-label="Link outlines"
+                data-ui-aria-label="Link outlines"
+              >
+                <button type="button" data-value="on" aria-pressed="false" data-ui-text="On">On</button>
+                <button type="button" data-value="off" aria-pressed="true" data-ui-text="Off">Off</button>
+              </div>
+            </div>
+          </section>
+
+          <hr class="vo-divider" />
+
+          <section class="vo-section">
+            <h3 class="vo-label" data-ui-text="Editor">Editor</h3>
+            <label class="vo-row" for="ui-language">
+              <span class="vo-row-label" data-ui-text="UI language">UI language</span>
+              <select id="ui-language">
+                <option value="auto" data-ui-text="Browser language">Browser language</option>
+                <option value="en">English</option>
+                <option value="ja" lang="ja">日本語</option>
+              </select>
+            </label>
+            <div class="vo-row">
+              <span class="vo-row-label" data-ui-text="Appearance">Appearance</span>
+              <div
+                class="segmented"
+                id="appearance-mode"
+                role="group"
+                aria-label="Appearance"
+                data-ui-aria-label="Appearance"
+              >
+                <button type="button" data-value="system" aria-pressed="false" data-ui-text="System">System</button>
+                <button type="button" data-value="light" aria-pressed="true" data-ui-text="Light">Light</button>
+                <button type="button" data-value="dark" aria-pressed="false" data-ui-text="Dark">Dark</button>
+              </div>
+            </div>
+            <label class="vo-row" for="color-scheme">
+              <span class="vo-row-label" data-ui-text="Color scheme">Color scheme</span>
+              <select id="color-scheme">
+                <option value="solarized">Solarized</option>
+                <option value="classic" data-ui-text="Classic">Classic</option>
+              </select>
+            </label>
+            <label class="vo-row" for="code-font">
+              <span class="vo-row-label" data-ui-text="Font">Font</span>
+              <select id="code-font">
+                <option value="system" data-ui-text="System monospace">System monospace</option>
+                <option value="menlo">Menlo</option>
+                <option value="monaco">Monaco</option>
+                <option value="consolas">Consolas</option>
+                <option value="jetbrains-mono">JetBrains Mono</option>
+                <option value="fira-code">Fira Code</option>
+              </select>
+            </label>
+            <div class="vo-row">
+              <span class="vo-row-label" data-ui-text="Line numbers">Line numbers</span>
+              <div
+                class="segmented"
+                id="linenum-seg"
+                role="group"
+                aria-label="Line numbers"
+                data-ui-aria-label="Line numbers"
+              >
+                <button type="button" data-value="on" aria-pressed="false" data-ui-text="On">On</button>
+                <button type="button" data-value="off" aria-pressed="true" data-ui-text="Off">Off</button>
+              </div>
             </div>
           </section>
 
           <hr class="vo-divider" />
 
           <footer class="vo-footer">
-            <button id="about-open" type="button" class="vo-link" aria-haspopup="dialog">
+            <button
+              id="about-open"
+              type="button"
+              class="vo-link"
+              aria-haspopup="dialog"
+              data-ui-text="About — version &amp; license"
+            >
               About — version &amp; license
             </button>
           </footer>
@@ -118,45 +337,163 @@
     </header>
 
     <main class="workspace">
-      <section class="pane" data-pane="pdf">
+      <section class="pane" data-pane="pdf" aria-label="Rendered PDF" data-ui-aria-label="Rendered PDF">
         <div class="pane-header">
-          <div class="pdf-controls">
-            <span>Rendered PDF</span>
-            <select id="pdf-select" aria-label="PDF document"></select>
+          <div class="file-controls" id="pdf-document-control">
+            <select id="pdf-select" aria-label="PDF document" data-ui-aria-label="PDF document"></select>
           </div>
           <div class="pane-actions">
-            <span id="pdf-build-status" class="build-status" role="status" aria-live="polite" hidden></span>
-            <a id="pdf-link" target="_blank" rel="noreferrer">Open</a>
+            <button
+              type="button"
+              id="pdf-build-status"
+              class="build-status"
+              aria-label="Show build log"
+              data-ui-aria-label="Show build log"
+              hidden
+            >
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                <rect
+                  x="2"
+                  y="2"
+                  width="12"
+                  height="12"
+                  rx="2"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                ></rect>
+                <path
+                  d="m5 5 2 2-2 2m3 1h3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                ></path>
+              </svg>
+              <span class="build-status-text" role="status" aria-live="polite"></span>
+            </button>
+            <a
+              id="pdf-link"
+              class="icon-button pane-open"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open PDF in new tab"
+              data-ui-aria-label="Open PDF in new tab"
+              title="Open PDF in new tab"
+              data-ui-title="Open PDF in new tab"
+            >
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                <path
+                  d="M6 3H3v10h10v-3M9 2h5v5M14 2 7 9"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                ></path>
+              </svg>
+            </a>
           </div>
         </div>
-        <div id="pdf-viewer" class="pdf-viewer" role="region" aria-label="PDF preview">
-          <div class="pdf-message">Loading PDF...</div>
+        <div id="pdf-viewer" class="pdf-viewer" role="region" aria-label="PDF preview" data-ui-aria-label="PDF preview">
+          <div class="pdf-message" data-ui-text="Loading PDF...">Loading PDF...</div>
         </div>
       </section>
 
-      <section class="pane" data-pane="md">
+      <section class="pane" data-pane="pdf-peer" aria-label="Parallel PDF" data-ui-aria-label="Parallel PDF">
         <div class="pane-header">
-          <div class="file-controls">
-            <span>Book source</span>
-            <select id="md-select" aria-label="Markdown file"></select>
+          <div class="pane-actions">
+            <button
+              type="button"
+              id="pdf-peer-build-status"
+              class="build-status"
+              aria-label="Show build log"
+              data-ui-aria-label="Show build log"
+              hidden
+            >
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                <rect
+                  x="2"
+                  y="2"
+                  width="12"
+                  height="12"
+                  rx="2"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                ></rect>
+                <path
+                  d="m5 5 2 2-2 2m3 1h3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                ></path>
+              </svg>
+              <span class="build-status-text" role="status" aria-live="polite"></span>
+            </button>
+            <a
+              id="pdf-peer-link"
+              class="icon-button pane-open"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open parallel PDF in new tab"
+              data-ui-aria-label="Open parallel PDF in new tab"
+              title="Open parallel PDF in new tab"
+              data-ui-title="Open parallel PDF in new tab"
+            >
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                <path
+                  d="M6 3H3v10h10v-3M9 2h5v5M14 2 7 9"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                ></path>
+              </svg>
+            </a>
           </div>
+        </div>
+        <div
+          id="pdf-peer-viewer"
+          class="pdf-viewer"
+          role="region"
+          aria-label="Parallel PDF preview"
+          data-ui-aria-label="Parallel PDF preview"
+        >
+          <div class="pdf-message" data-ui-text="Loading PDF...">Loading PDF...</div>
+        </div>
+      </section>
+
+      <section class="pane" data-pane="md" aria-label="Book source" data-ui-aria-label="Book source">
+        <div class="pane-header">
+          <div class="file-controls" id="md-document-control">
+            <select id="md-select" aria-label="Markdown file" data-ui-aria-label="Markdown file"></select>
+          </div>
+          <button id="correspondence-open" type="button" data-ui-text="Correspondence / AST">
+            Correspondence / AST
+          </button>
+          <button id="formula-overlays-toggle" type="button" aria-pressed="true" data-ui-text="Formula overlays">
+            Formula overlays
+          </button>
         </div>
         <pre id="md-source" class="source"></pre>
       </section>
 
-      <section class="pane" data-pane="lean">
+      <section class="pane" data-pane="lean" aria-label="Lean formalization" data-ui-aria-label="Lean formalization">
         <div class="pane-header">
-          <div class="file-controls">
-            <span>Lean formalization</span>
-            <select id="lean-select" aria-label="Lean file"></select>
+          <div class="file-controls" id="lean-document-control">
+            <select id="lean-select" aria-label="Lean file" data-ui-aria-label="Lean file"></select>
           </div>
         </div>
         <pre id="lean-source" class="source"></pre>
       </section>
 
-      <section class="pane" data-pane="tex">
+      <section class="pane" data-pane="tex" aria-label="TeX source" data-ui-aria-label="TeX source">
         <div class="pane-header">
-          <span>TeX</span>
           <div class="pane-actions">
             <span id="tex-meta" class="meta"></span>
           </div>
@@ -164,25 +501,65 @@
         <pre id="tex-source" class="source"></pre>
       </section>
 
-      <section class="pane" data-pane="infoview">
+      <section class="pane" data-pane="infoview" aria-label="Lean proof state" data-ui-aria-label="Lean proof state">
         <div class="pane-header">
-          <span>Lean proof state</span>
           <div class="pane-actions">
-            <span id="infoview-status" class="meta" data-status="connecting">LSP: connecting…</span>
+            <span id="infoview-status" class="meta" data-status="connecting" data-ui-text="LSP: connecting…"
+              >LSP: connecting…</span
+            >
           </div>
         </div>
         <div id="infoview-body" class="infoview"></div>
       </section>
     </main>
 
-    <div id="about-overlay" class="about-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
-      <div class="about-dialog" role="document">
-        <button id="about-close" class="about-close" type="button" aria-label="Close">&times;</button>
+    <dialog id="correspondence-dialog" aria-labelledby="correspondence-title">
+      <div class="correspondence-header">
+        <h2 id="correspondence-title" data-ui-text="Correspondence / AST">Correspondence / AST</h2>
+        <button id="correspondence-refresh" type="button" data-ui-text="Refresh">Refresh</button>
+        <button id="correspondence-close" type="button" data-ui-text="Close">Close</button>
+      </div>
+      <p id="correspondence-status" role="status"></p>
+      <label
+        ><span data-ui-text="Formula">Formula</span>
+        <select id="correspondence-formula"></select
+      ></label>
+      <p class="meta" data-ui-text="Offsets are zero-based Unicode characters; line numbers start at one.">
+        Offsets are zero-based Unicode characters; line numbers start at one.
+      </p>
+      <div id="correspondence-body"></div>
+    </dialog>
+
+    <div
+      id="pane-tools"
+      class="pane-tools"
+      role="group"
+      aria-label="Focused pane controls"
+      data-ui-aria-label="Focused pane controls"
+      hidden
+    >
+      <button
+        id="pane-restore"
+        class="icon-button pane-restore"
+        type="button"
+        aria-label="Restore pane layout"
+        data-ui-aria-label="Restore pane layout"
+        title="Restore pane layout"
+        data-ui-title="Restore pane layout"
+        hidden
+      ></button>
+    </div>
+
+    <dialog id="about-overlay" class="about-overlay" aria-labelledby="about-title">
+      <div class="about-dialog">
+        <button id="about-close" class="about-close" type="button" aria-label="Close" data-ui-aria-label="Close">
+          &times;
+        </button>
         <h2 id="about-title">Formalization Viewer</h2>
         <dl class="about-meta">
-          <dt>Book</dt>
+          <dt data-ui-text="Book">Book</dt>
           <dd id="about-book">—</dd>
-          <dt>Version</dt>
+          <dt data-ui-text="Version">Version</dt>
           <dd class="about-version">
             <span id="about-version-text">—</span>
             <button
@@ -190,7 +567,9 @@
               class="about-copy"
               type="button"
               aria-label="Copy commit hash"
+              data-ui-aria-label="Copy commit hash"
               title="Copy commit hash"
+              data-ui-title="Copy commit hash"
             >
               <svg class="icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
                 <rect
@@ -207,14 +586,14 @@
               </svg>
             </button>
           </dd>
-          <dt>Repository</dt>
+          <dt data-ui-text="Repository">Repository</dt>
           <dd><a id="about-repo" target="_blank" rel="noreferrer">—</a></dd>
         </dl>
-        <h3>License</h3>
+        <h3 data-ui-text="License">License</h3>
         <p id="about-license-summary" class="about-license-summary"></p>
         <ul id="about-license-list" class="about-license-list"></ul>
       </div>
-    </div>
+    </dialog>
 
     <script type="module" src="./build/app.js"></script>
   </body>

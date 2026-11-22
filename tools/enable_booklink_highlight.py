@@ -5,7 +5,6 @@ import re
 import sys
 from pathlib import Path
 
-
 # The macros \input line is emitted per book, so its directory varies
 # (polish-space/tex/macros.tex, polish-space-ch1/tex/macros.tex, ...).
 MACROS_INPUT = re.compile(r"\\input\{[^}]*/tex/macros\.tex\}")

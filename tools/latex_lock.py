@@ -16,7 +16,6 @@ import sys
 import time
 from pathlib import Path
 
-
 LOCK_DIR = Path("build/.latex-build.lock")
 MALFORMED_LOCK_GRACE_SECONDS = 30
 
@@ -55,7 +54,7 @@ def pid_alive(pid: int) -> bool:
 def lock_pid(lock_dir: Path) -> int | None:
     try:
         return int((lock_dir / "pid").read_text(encoding="utf-8").strip())
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 
@@ -174,7 +173,7 @@ def main() -> int:
 
     acquire_lock(LOCK_DIR, command)
     try:
-        proc = subprocess.run(command)
+        proc = subprocess.run(command, check=False)
         return proc.returncode
     finally:
         release_lock(LOCK_DIR)

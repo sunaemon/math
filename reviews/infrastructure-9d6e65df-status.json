@@ -1,0 +1,1522 @@
+[
+  {
+    "id": "F1-1",
+    "title": "1. 引用候補ごとに pandoc サブプロセスを起動し、キャッシュがない",
+    "reviewLine": 92,
+    "status": "fixed",
+    "reason": "文書単位の引用候補キャッシュを追加し、解析成功と不成立の双方を再利用。実際のparser subprocess呼出しを数え、同じ候補4回を異なる候補2回にまとめるテストを追加。",
+    "evidence": ["tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F1-2",
+    "title": "2. `readIndexGlossary` だけ pandoc の解決方法が異なる／デコードエラーが捨てられる",
+    "reviewLine": 98,
+    "status": "fixed",
+    "reason": "用語集と引用でPANDOC_BINの解決を共有。成功終了後のJSON復号失敗は復号理由を含めて報告する。偽parserを使った境界テストを追加。",
+    "evidence": ["tools/book-filter/Main.hs", "tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F1-3",
+    "title": "3. ソースマップの行ベース手製 JSON パーサが、発行側の整形形式に暗黙依存している",
+    "reviewLine": 104,
+    "status": "fixed",
+    "reason": "Aesonでentries/lean/booklink/match/skipsを構造的に解析し、配列添字をそのまま保持。並べ替え・一行JSON・入れ子診断・匿名宣言と、不完全／不正な配列の拒否を回帰テストで検証。既存テストの手組みJSONも実スキーマと正しい区切りへ修正。",
+    "evidence": ["tools/book-filter/Main.hs", "tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F1-4",
+    "title": "4. `breakRawMath` が1文字ずつの蓄積で数式長に対して二乗",
+    "reviewLine": 110,
+    "status": "fixed",
+    "reason": "breakRawMathを逆順の断片リストと最後のconcatへ変更し、逐次Text追記を除去。既存の数式・引用のゴールデン出力を維持。短い引数用の他の解析器はこの指摘の性能修正に含めず保持。",
+    "evidence": ["tools/book-filter/Main.hs"]
+  },
+  {
+    "id": "F1-5",
+    "title": "5. 用語アンカーの slug が衝突しうるのに検出がない",
+    "reviewLine": 116,
+    "status": "fixed",
+    "reason": "用語アンカーのslugを文書内で登録し、異なるcanonical rootが同じslugになる場合は明示的に失敗する。表示aliasと索引subentryは同じrootを共有できる。空白／ハイフンと大文字／小文字の衝突テストを追加。",
+    "evidence": ["tests/fixtures/term-anchor-collision.md", "tests/fixtures/term-anchor-case-collision.md"]
+  },
+  {
+    "id": "F1-6",
+    "title": "6. `Emph` だけ `allowLinks` を `False` に落とす非対称性",
+    "reviewLine": 122,
+    "status": "fixed",
+    "reason": "Emphでも呼出し元のallowLinksを維持し、強調中の数式リンクとreferenced-by索引をゴールデンで固定。",
+    "evidence": ["tests/golden/notation-math-spacing.tex"]
+  },
+  {
+    "id": "F1-7",
+    "title": "7. 依存グラフのレイアウトキャッシュが相対パスで、実行ディレクトリと書籍に依存する",
+    "reviewLine": 128,
+    "status": "fixed",
+    "reason": "キャッシュ出力先を環境変数またはmetadataで選べるようにし、Makeは書籍別のbuildディレクトリ内のパスを指定する。両指定方法の出力先を回帰テストで確認。",
+    "evidence": ["Makefile", "tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F1-8",
+    "title": "8. `processBlock` の分岐にない入れ子ブロック（Table セル等）はブロック処理を通らない",
+    "reviewLine": 134,
+    "status": "fixed",
+    "reason": "Tableのcaption・head/body/foot・各cellを通常のブロック処理へ通す。表のセル内のmathmetaによる定義と後続数式のリンク生成をゴールデンで検証。",
+    "evidence": ["tests/fixtures/table-mathmeta.md", "tests/golden/table-mathmeta.tex"]
+  },
+  {
+    "id": "F1-9",
+    "title": "9. `blockIsStatement` の照合が接頭辞一致で緩い",
+    "reviewLine": 140,
+    "status": "fixed",
+    "reason": "問題のblockIsStatementとその呼出し元は使用されていない旧ラッパーだったため、まとめて削除。現行経路はソースマップの明示的なbooklink.targetを使い、既存の注入・書籍出力を維持。",
+    "evidence": ["tools/book-filter/Main.hs"]
+  },
+  {
+    "id": "F1-10",
+    "title": "10. 日本語索引ローカライズが、最初の失敗で残り全部を打ち切る",
+    "reviewLine": 146,
+    "status": "fixed",
+    "reason": "括弧が壊れたindexを元のまま保持して後続を走査し、後の正常な索引は日本語化する。回復後の出力をゴールデンで検証。",
+    "evidence": ["tests/golden/index-localization-malformed.tex"]
+  },
+  {
+    "id": "F1-11",
+    "title": "11. lint の見出し ID 収集がフェンス内コードも走査する",
+    "reviewLine": 152,
+    "status": "fixed",
+    "reason": "見出しID収集でフェンスの文字と長さを追跡し、フェンス内の見出しを定義として登録しない。短い閉じ候補にも惑わされないCLIテストを追加。",
+    "evidence": ["tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F1-12",
+    "title": "12. `processDoc` の全書走査の回数が多い",
+    "reviewLine": 158,
+    "status": "no-change",
+    "reason": "処理順序を保持する。節参照診断は元の内容を使い、コメント除去後に引用を解析し、索引翻訳は元のblockから表示対を集めるため、測定なしでstatefulな全書走査を融合しない。この判断をprocessDocに明記し、既存出力の一致を確認。",
+    "evidence": ["tools/book-filter/Main.hs"]
+  },
+  {
+    "id": "F2-1",
+    "title": "1. レイアウトキャッシュの署名が、レイアウトを決める定数の大半をカバーしていない",
+    "reviewLine": 185,
+    "status": "fixed",
+    "reason": "手写しの定数一覧を廃止し、コンパイル時にDependencyGraph.hs全体の実装指紋をキャッシュ署名へ埋め込む。定数・アルゴリズムの変更が一律に旧キャッシュを無効化し、実行時のソース読込は不要。実生成キャッシュの指紋が現在のソースと一致することも確認。",
+    "evidence": ["tools/book-filter/DependencyGraph.hs", "tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-2",
+    "title": "2. 辺が上位18件に無言で切り取られ、切り捨てられた章がグラフから消える",
+    "reviewLine": 191,
+    "status": "fixed",
+    "reason": "A5の概観図として上位18辺を描く方針をmaxDrawnEdgesに明記。省略した辺数とノード数を計画と生成TikZコメントに記録し、20辺の入力で境界と省略数を直接テスト。",
+    "evidence": ["tools/book-filter/DependencyGraph.hs", "tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-3",
+    "title": "3. 部の検出が RawBlock 内の `\\part{` 部分文字列に依存している",
+    "reviewLine": 197,
+    "status": "fixed",
+    "reason": "RawBlock内のトップレベル行頭のpartコマンドだけを数え、コメント・マクロ本体・リテラル環境を除外。同じRawBlockの複数part行も個別に数える。偽partと複数partを含む文書で所属と部番号を確認。",
+    "evidence": ["tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-4",
+    "title": "4. 部の枠の行高さが2行分までしか用意されていない",
+    "reviewLine": 203,
+    "status": "fixed",
+    "reason": "部の行高を実際のグループ数から計算し、任意の二列グリッドに対応。8部の文書で枠が欠けず相互に重ならないことを直接テスト。",
+    "evidence": ["tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-5",
+    "title": "5. キャッシュ座標のパースが NaN / Infinity を受理する",
+    "reviewLine": 209,
+    "status": "fixed",
+    "reason": "座標の読込時にNaNとInfinityを拒否し、1値でも不正ならキャッシュ全体を不成立にする。NaN・正負Infinity・オーバーフロー表記をテスト。",
+    "evidence": ["tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-6",
+    "title": "6. 依存グラフの「収集セマンティクス」を検証するテストがない",
+    "reviewLine": 221,
+    "status": "fixed",
+    "reason": "小さいPandoc値で参照方向、重複参照の集計、節から章への帰属、部所属、相互辺、除外章、partless章、辺数制限を直接検証。SectionRefの未閉鎖・空ID・連続・入れ子状入力も表形式で固定。",
+    "evidence": ["tests/DependencyGraphTests.hs"]
+  },
+  {
+    "id": "F2-7",
+    "title": "7. 一時ディレクトリ名が固定で、並行実行が互いを壊す",
+    "reviewLine": 227,
+    "status": "fixed",
+    "reason": "openTempFileで確保した一意な名前の一時ディレクトリを使い、bracketで成功・失敗時とも清掃する。テストバイナリ2本を同時に走らせ両方の成功を確認。読み取りも次のケースが上書きする前に完了させる。",
+    "evidence": ["tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F2-8",
+    "title": "8. 外部バイナリ（pandoc / diff）の不在が「失敗」ではなく例外になる",
+    "reviewLine": 233,
+    "status": "fixed",
+    "reason": "開始時にpandocとdiffの実行可能性を確認し、IO例外もファイル名・原因を含む診断にする。存在しないPANDOC_BINで実行して明示的な失敗を確認。",
+    "evidence": ["tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "F2-9",
+    "title": "9. 失敗ケースの照合文字列が弱く、別の失敗を拾う余地がある",
+    "reviewLine": 239,
+    "status": "fixed",
+    "reason": "埋め込みメタデータの順序違反を期待するケースも、notation-filter名とdefine/forwardの文脈を含む診断接頭辞を照合する。",
+    "evidence": ["tests/run-book-filter-golden.hs"]
+  },
+  {
+    "id": "P1-1",
+    "title": "P1-1（性能・中〜高）span_json が全文の行オフセット表を呼び出しごとに再構築する",
+    "reviewLine": 263,
+    "status": "fixed",
+    "reason": "章とTeXの行オフセット表を1回だけ構築して各スパンへ渡す。同じ全書データを使う比較でTeX対応付けの出力が完全一致し、構築回数は4521回から1回、実測は20.159秒から1.129秒に減少。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-2",
+    "title": "P1-2（性能・中）章テキストの再読込と statement 解析が Lean ファイル単位・マーカー単位で繰り返される",
+    "reviewLine": 269,
+    "status": "fixed",
+    "reason": "ビルド1回のSourceCacheで本文・行位置・statement・skipを共有し、章順も1回だけ読む。複数Leanファイルと複数マーカーの回帰テストで各章1回の読込・解析を検証。次回ビルドは更新済みの保存内容を読む。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-3",
+    "title": "P1-3（正しさ・要確認・中）find_next_decl が partial / protected 等の宣言を見落とし、後続の宣言にマーカーを誤って結び付ける",
+    "reviewLine": 275,
+    "status": "fixed",
+    "reason": "宣言修飾子、複数行・入れ子属性、inductive等を共通スキャナで扱い、後続の別宣言への誤帰属を解消。実データでも16件の宣言開始位置が直った。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-4",
+    "title": "P1-4（正しさ・要確認・中）find_decl_end_line が宣言内部の最初の空行で打ち切られる",
+    "reviewLine": 281,
+    "status": "fixed",
+    "reason": "空行を宣言終端とせず、次の同階層の宣言・コマンド・booklinkまで本文を追跡する。証明中の空行、後続docコメント、namespace末尾、複数行リテラルを検証。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-5",
+    "title": "P1-5（正しさ・低）find_next_decl のスキャナが文字リテラルと Unicode 識別子を扱わない",
+    "reviewLine": 287,
+    "status": "fixed",
+    "reason": "文字リテラルを文字列と区別し、Unicode名・プライム・引用識別子を保持する。全書比較で従来途中で切れていた実際の宣言名も確認。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-6",
+    "title": "P1-6（正しさ・低〜中）parse_skip_spans は不整合な skip 注釈を黙って読み飛ばす",
+    "reviewLine": 293,
+    "status": "fixed",
+    "reason": "共通注釈パーサが未知のdirective、余剰skip-end、未閉じskip-beginを拒否し、sourcemap単体でも黙って欠落させない。",
+    "evidence": [
+      "tools/formalization_annotations.py",
+      "tools/booklink_sourcemap.py",
+      "tests/test_booklink_sourcemap.py"
+    ]
+  },
+  {
+    "id": "P1-7",
+    "title": "P1-7（保守性・中）formalization 注釈の文法が3実装に分散し、範囲と理由の解釈が食い違う",
+    "reviewLine": 299,
+    "status": "fixed",
+    "reason": "注釈文法・理由の正規化・領域対応をformalization_annotationsへ集約し、coverageとbooks_mkも利用する。意味上の本文範囲と注入用のコメント込み範囲は同じ解析結果の明示的な2用途として保持し、安定したskipキーを変えない。",
+    "evidence": [
+      "tools/formalization_annotations.py",
+      "tools/booklink_sourcemap.py",
+      "tools/booklink_coverage.py",
+      "tools/books_mk.py",
+      "Makefile"
+    ]
+  },
+  {
+    "id": "P1-8",
+    "title": "P1-8（正しさ・要確認・低）parse_tex_booklink_spans が2形式のスパンを同じリストに混ぜる",
+    "reviewLine": 305,
+    "status": "fixed",
+    "reason": "旧コメント形式と現行コマンド形式の混在を拒否する。現行filterはコマンド形式のみを生成することを確認。さらに実際には注入されないweak/unresolved候補がスパン番号を消費しないよう一致状態も検証する。",
+    "evidence": ["tools/booklink_sourcemap.py", "tools/book-filter/Main.hs", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-9",
+    "title": "P1-9（正しさ・低）tex_marker_match_for_entry が1スパンを二重に数える場合がある",
+    "reviewLine": 311,
+    "status": "no-change",
+    "reason": "同名の重複は日本語PO領域を共有する複数のbooklinkを同じTeX帯へ対応付けるために意図された多重度。既存のgrouped injectionと[7,7,9]の回帰テストを確認し、単純な重複除去は行わない。",
+    "evidence": ["tools/booklink_sourcemap.py", "tools/book-filter/Main.hs", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-10",
+    "title": "P1-10（保守性・低）strip_latex_macros の置換が前方一致で作用する",
+    "reviewLine": 317,
+    "status": "fixed",
+    "reason": "置換対象のマクロ名の直後が英字でないことを要求し、未知の長いマクロの先頭だけを置換しない。",
+    "evidence": ["tools/booklink_sourcemap.py", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-11",
+    "title": "P1-11（正しさ・中）全マーカーが unresolved の章がレポートから丸ごと消える",
+    "reviewLine": 325,
+    "status": "fixed",
+    "reason": "解決済みスパンがなくても、markerが指す章を空の区間集合として報告に残す。statement候補自体が存在しないケースもmarkerの所有bookから章を復元する。CLIのstrictチェックで章と未カバー単位が表示され終了1になることを検証。",
+    "evidence": ["tools/booklink_coverage.py", "tests/test_booklink_coverage.py"]
+  },
+  {
+    "id": "P1-12",
+    "title": "P1-12（保守性・低）未使用の定数と引数が残っている",
+    "reviewLine": 331,
+    "status": "fixed",
+    "reason": "未使用DEFAULT_EXEMPT_KINDSとclassifyのkind、build_unitのscope_kind受け渡しを削除。免除は明示注釈のみで判断する。",
+    "evidence": ["tools/booklink_coverage.py"]
+  },
+  {
+    "id": "P1-13",
+    "title": "P1-13（正しさ・要確認・低）空行なしで statement 環境を含むブロックが二重に数えられる",
+    "reviewLine": 337,
+    "status": "fixed",
+    "reason": "散文ブロックからstatement区間を差し引いて各残余を単位にする。空行なしの前後の散文を落とさず、statementと二重に数えないことを区間の非重複と総長でも検証。",
+    "evidence": ["tools/booklink_coverage.py", "tests/test_booklink_coverage.py"]
+  },
+  {
+    "id": "P1-14",
+    "title": "P1-14（性能・低）units_for_source 内で章ファイルの再読込が重なる",
+    "reviewLine": 343,
+    "status": "fixed",
+    "reason": "units_for_sourceが同じSourceDocumentの本文・行位置・statement・skipを再利用し、内部の再読込を除去。",
+    "evidence": ["tools/booklink_coverage.py", "tools/booklink_sourcemap.py"]
+  },
+  {
+    "id": "P1-15",
+    "title": "P1-15（保守性・中）manifest の読み方が検証付きの共通関数を経ず、reviews の有無への対応も非対称",
+    "reviewLine": 351,
+    "status": "fixed",
+    "reason": "検証付きread_manifestへ統一し、通常レビューとscopeレビューはともに不存在なら空として扱う。型が不正なレビュー配列は明示エラー。CLIで任意のレビュー記録がない場合と不正manifestの整形済みエラーを検証。",
+    "evidence": ["tools/booklink_audit.py", "tools/book_manifest.py", "tests/test_booklink_audit.py"]
+  },
+  {
+    "id": "P1-16",
+    "title": "P1-16（正しさ・低）read_text の encoding 省略が7箇所ある",
+    "reviewLine": 357,
+    "status": "fixed",
+    "reason": "監査用のすべてのread_textとレポートwrite_textにUTF-8を明示。共有スナップショットの指紋も同じ保存内容から計算する。",
+    "evidence": ["tools/booklink_audit.py"]
+  },
+  {
+    "id": "P1-17",
+    "title": "P1-17（性能・低）監査全体で全章走査が何重にも重なる",
+    "reviewLine": 363,
+    "status": "fixed",
+    "reason": "監査のsourcemap構築・章単位のunits解析・指紋計算へ同じSourceCacheを渡し、重複読込とstatement解析を除去。Leanファイルがない章集合もギャップ検出対象として扱える。",
+    "evidence": [
+      "tools/booklink_audit.py",
+      "tools/booklink_sourcemap.py",
+      "tools/booklink_coverage.py",
+      "tests/test_booklink_audit.py"
+    ]
+  },
+  {
+    "id": "P1-18",
+    "title": "P1-18（正しさ・要確認・低）weak エントリは射影されず英語のまま JA マップに残る",
+    "reviewLine": 371,
+    "status": "fixed",
+    "reason": "weak候補も日本語の候補座標へ射影するが、weakとscoreを保持し一致へ昇格させない。canonicalMatchに元の候補情報を残し、TeX注入では引き続きmatchedだけを用いる。",
+    "evidence": [
+      "tools/project_translation_sourcemap.py",
+      "tools/booklink_sourcemap.py",
+      "tests/test_translation_sourcemap_projection.py"
+    ]
+  },
+  {
+    "id": "P1-19",
+    "title": "P1-19（保守性・低）検査ツールの private 関数を import している",
+    "reviewLine": 377,
+    "status": "fixed",
+    "reason": "数学トークンの正規化を公開API normalize_mathとし、比較・射影・テストを公開名へ更新。正規化自体の意味は変更しない。",
+    "evidence": [
+      "tools/check_translation_structure.py",
+      "tools/project_translation_sourcemap.py",
+      "tests/test_translation_structure.py"
+    ]
+  },
+  {
+    "id": "P1-20",
+    "title": "P1-20（正しさ・要確認・低）PO パーサが fuzzy エントリを区別しない",
+    "reviewLine": 383,
+    "status": "fixed",
+    "reason": "POパーサはfuzzyフラグを認識し、有効な本文のfuzzy項目を射影前に拒否する。廃止済み項目は引き続き無視し、検証済みの保存訳文だけから位置を作る。",
+    "evidence": ["tools/project_translation_sourcemap.py", "tests/test_translation_sourcemap_projection.py"]
+  },
+  {
+    "id": "P1-21",
+    "title": "P1-21（正しさ・低）章パスの解決が実行時の cwd に依存する",
+    "reviewLine": 389,
+    "status": "fixed",
+    "reason": "manifest記載の章パスを各book/src/manifestの属するリポジトリ基準で解決し、source map内の相対パスもcanonical projectの親を基準にする。別の作業ディレクトリからの読込と相対候補の射影を回帰検証。",
+    "evidence": ["tools/project_translation_sourcemap.py", "tests/test_translation_sourcemap_projection.py"]
+  },
+  {
+    "id": "P2-1",
+    "title": "P2-1 任意引数つき \\cite を検出できない",
+    "reviewLine": 414,
+    "status": "fixed",
+    "reason": "LaTeX 引用の任意引数を許可し、日英での引用欠落も検出するテストを追加。",
+    "evidence": ["tests/test_translation_structure.py"]
+  },
+  {
+    "id": "P2-2",
+    "title": "P2-2 Pandoc 引用キーが文末の句読点を吸い込み、日英で非対称になる",
+    "reviewLine": 419,
+    "status": "fixed",
+    "reason": "Pandoc 引用キー末尾の句点・コロンを除き、内部のピリオドは保持。日英句読点差の回帰テストを追加。",
+    "evidence": ["tests/test_translation_structure.py"]
+  },
+  {
+    "id": "P2-3",
+    "title": "P2-3 インラインコードのマスクが CommonMark のバッククォート列規則に従わない",
+    "reviewLine": 424,
+    "status": "fixed",
+    "reason": "インラインコードの閉じ候補は独立した同じ長さのバッククォート列に限定。長い列の部分一致を避けるテストを追加。",
+    "evidence": ["tests/test_translation_structure.py"]
+  },
+  {
+    "id": "P2-4",
+    "title": "P2-4 閉じられていない YAML front matter を本文として扱う",
+    "reviewLine": 429,
+    "status": "fixed",
+    "reason": "未閉じ YAML front matter を StructureParseError にして比較結果の誤認を防ぐ。",
+    "evidence": ["tests/test_translation_structure.py"]
+  },
+  {
+    "id": "P2-5",
+    "title": "P2-5 構造チェックの StructureParseError が捕捉されず traceback になる",
+    "reviewLine": 436,
+    "status": "fixed",
+    "reason": "workflow CLI が StructureParseError を捕捉し、traceback なしの診断を返すことを検証。",
+    "evidence": ["tests/test_translation_workflow.py"]
+  },
+  {
+    "id": "P2-6",
+    "title": "P2-6 検査対象の章集合が translation-status.json のみで決まる",
+    "reviewLine": 441,
+    "status": "fixed",
+    "reason": "po4a 設定の source/output 対と status の章集合を比較し、双方の登録漏れ・重複を検出。実カタログの検証も通過。",
+    "evidence": ["tests/test_translation_workflow.py"]
+  },
+  {
+    "id": "P2-7",
+    "title": "P2-7 --write-generated の書き込みが非原子的",
+    "reviewLine": 446,
+    "status": "fixed",
+    "reason": "生成Markdownを同じディレクトリの一時ファイルから置換。公開失敗時の既存ファイル維持と一時ファイル清掃を検証。",
+    "evidence": ["tests/test_translation_workflow.py"]
+  },
+  {
+    "id": "P2-8",
+    "title": "P2-8 msgstr 中の `%` 以降を行末までコメントとして隠してしまう",
+    "reviewLine": 453,
+    "status": "fixed",
+    "reason": "パーセントによるコメント除外を明示的な raw TeX フェンス内に限定。Markdown中の百分率と直後の用語を検査する。Pandocのnative出力でも通常の%が本文であることを確認。",
+    "evidence": ["tests/test_translation_terms.py"]
+  },
+  {
+    "id": "P2-9",
+    "title": "P2-9 他モジュールの private 関数の長さ保存契約に依存している",
+    "reviewLine": 458,
+    "status": "fixed",
+    "reason": "マスク関数の長さ保存契約をdocstringに明記し、位置対応前の長さ検査と strict zip を追加。契約違反のテストを追加。",
+    "evidence": ["tests/test_translation_terms.py"]
+  },
+  {
+    "id": "P2-10",
+    "title": "P2-10 終了コードの規約がツール群で不統一",
+    "reviewLine": 463,
+    "status": "fixed",
+    "reason": "終了コードを各ツールのdocstringに明記。従来のMake/CI呼出しを保ち、構造検査の差異と実行失敗の区別も記載した。",
+    "evidence": [
+      "tools/check_translation_structure.py",
+      "tools/check_translation_terms.py",
+      "tools/check_translation_workflow.py",
+      "tools/validate_book_build.py"
+    ]
+  },
+  {
+    "id": "P2-11",
+    "title": "P2-11 例外処理が皆無で、パスも cwd 相対のハードコード",
+    "reviewLine": 470,
+    "status": "fixed",
+    "reason": "リポジトリrootをスクリプト位置から決定し、--repo-rootを追加。実行失敗は簡潔な診断と終了コード2にする。章が未対応でも defaultdict によって KeyError にはならないことを未対応章の報告テストで確認。",
+    "evidence": ["tools/audit_translation_coverage.py", "tests/test_tool_failure_paths.py"]
+  },
+  {
+    "id": "P2-12",
+    "title": "P2-12 「レポート生成」か「ゲート」か位置づけが曖昧",
+    "reviewLine": 475,
+    "status": "fixed",
+    "reason": "既定はレポート生成、--strict のときのみ既知の未対応・対応不整合を失敗扱いにする。両モードの実レポートを回帰テストで確認。",
+    "evidence": ["tests/test_tool_failure_paths.py"]
+  },
+  {
+    "id": "P2-13",
+    "title": "P2-13 本の発見ロジックと stem 正規表現が books_mk.py と二重管理",
+    "reviewLine": 482,
+    "status": "fixed",
+    "reason": "書籍stemとマスター原稿名の検証を book_manifest.py にまとめ、books_mk とvalidatorで共有。双方の受理・拒否を同じ入力でテスト。なお books_mk は発見を行わず、Makefileの */src/*.json 一覧を受け取るため、Pythonの重複発見処理という前提はない。",
+    "evidence": ["tools/book_manifest.py", "tests/test_book_identity.py"]
+  },
+  {
+    "id": "P2-14",
+    "title": "P2-14 章の対応付けドリフトが warning のみで終了コード 0",
+    "reviewLine": 489,
+    "status": "fixed",
+    "reason": "章ラベル・章数の不一致で終了コード1を返し、既存ユニットを変更する前に停止。正常生成と不一致時の既存出力維持を合成TeXで検証し、preview PDFは生成していない。",
+    "evidence": ["tools/split_preview_tex.py", "tests/test_preview_mapping.py"]
+  },
+  {
+    "id": "P2-15",
+    "title": "P2-15 エラー経路が SystemExit と return 1 で混在",
+    "reviewLine": 494,
+    "status": "fixed",
+    "reason": "split_bodyはValueErrorを送出し、CLIで捕捉して簡潔な診断と終了コード1を返す。ライブラリ呼出しとCLI双方を検証。",
+    "evidence": ["tests/test_preview_mapping.py"]
+  },
+  {
+    "id": "P2-16",
+    "title": "P2-16 fetch-license の失敗が終了コードに反映されない",
+    "reviewLine": 501,
+    "status": "fixed",
+    "reason": "取得失敗を終了コードに反映し、--all は失敗後も全件を試す。UTF-8 decode失敗を捕捉し、既存ライセンスを保持する。ネットワークを呼ばない回帰テストを追加。",
+    "evidence": ["tools/vendor_notices.py", "tests/test_tool_failure_paths.py"]
+  },
+  {
+    "id": "P2-17",
+    "title": "P2-17 手作業が必要なブロックが残っても終了コード 0",
+    "reviewLine": 508,
+    "status": "fixed",
+    "reason": "MANUALの残件数を必ず表示し、1件でもあれば終了コード1にする。手動作業が残るCLI経路を回帰テストで確認。",
+    "evidence": ["tools/split_skip_blocks.py", "tests/test_tool_failure_paths.py"]
+  },
+  {
+    "id": "P2-18",
+    "title": "P2-18 caption ブロックの「消滅」ケースが docstring の意図に反して素通りする",
+    "reviewLine": 515,
+    "status": "fixed",
+    "reason": "X1-7と同一。caption読込が残ったまま設定ブロックだけ消える場合を検出し、回帰検証を追加。",
+    "evidence": ["tools/prepare_pandoc_templates.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "P2-19",
+    "title": "P2-19 一回限りの移行スクリプトの残留と、他ツールとの細部の不統一",
+    "reviewLine": 522,
+    "status": "fixed",
+    "reason": "既存のテスト付き移行・復旧ユーティリティとして保持し、通常ビルドの一部ではないことを明記。UTF-8を明示し、範囲外の診断行は書き込み前に再生成を促す使用法エラーにする。",
+    "evidence": ["tools/migrate_lean_modules.py", "tests/test_migrate_lean_modules.py"]
+  },
+  {
+    "id": "P2-20",
+    "title": "P2-20 引数検証がない",
+    "reviewLine": 529,
+    "status": "fixed",
+    "reason": "argparseで必須ファイルを検証し、読み取り失敗も簡潔に報告する。引数なしの使用法表示と終了コード2を回帰テストで確認。",
+    "evidence": ["tools/po_diff.py", "tests/test_tool_failure_paths.py"]
+  },
+  {
+    "id": "V1-1",
+    "title": "V1-1. PDF リンク注釈の URL が safeHref を通らず href に入る",
+    "reviewLine": 566,
+    "status": "fixed",
+    "reason": "両PDFレンダラーで外部リンク注釈を safeHref に通し、拒否した URL はリンク化しない。",
+    "evidence": ["tools/formalization-viewer/src/parallel-pdf.ts"]
+  },
+  {
+    "id": "V1-2",
+    "title": "V1-2. parallel-pdf は差し替えられた loadingTask を破棄しない（pdf.ts とのドリフト）",
+    "reviewLine": 574,
+    "status": "fixed",
+    "reason": "対向PDFの旧タスクを破棄し、非同期の各境界で世代を検査する。旧ページ状態も直ちに除去する。",
+    "evidence": ["tools/formalization-viewer/src/parallel-pdf.ts"]
+  },
+  {
+    "id": "V1-3",
+    "title": "V1-3. app.ts の localStorage 直接アクセスが無防備",
+    "reviewLine": 580,
+    "status": "fixed",
+    "reason": "設定とセッションの保存を安全なハンドル取得と get/set 経由に統一。localStorage 自体の getter が例外になるケースを検証。",
+    "evidence": ["tools/formalization-viewer/src/session-store.test.ts"]
+  },
+  {
+    "id": "V1-4",
+    "title": "V1-4. els.status / mdMeta / leanMeta に対応する要素が index.html にない",
+    "reviewLine": 586,
+    "status": "fixed",
+    "reason": "存在しない status/md-meta/lean-meta への配線を除去。起動失敗は実在する workspace に表示する。",
+    "evidence": ["tools/formalization-viewer/src/app.ts"]
+  },
+  {
+    "id": "V1-5",
+    "title": "V1-5. loadLayout が pdf-peer の表示状態を毎回リセットする（要確認）",
+    "reviewLine": 592,
+    "status": "fixed",
+    "reason": "保存済みツリーの対向PDF位置と非表示状態を保持し、新規レイアウト時のみ既定の分割を追加する。",
+    "evidence": ["tools/formalization-viewer/src/app.ts"]
+  },
+  {
+    "id": "V1-6",
+    "title": "V1-6. infoview の位置ラベルで列番号だけ 0-based",
+    "reviewLine": 598,
+    "status": "fixed",
+    "reason": "位置ラベルの列を行と同じ 1-based 表示に統一。",
+    "evidence": ["tools/formalization-viewer/src/infoview.ts"]
+  },
+  {
+    "id": "V1-7",
+    "title": "V1-7. renderPdfPage の失敗ページがスクロールのたびに再試行される（軽微）",
+    "reviewLine": 604,
+    "status": "fixed",
+    "reason": "ページ単位の失敗を数え、同じ文書での自動再試行を3回までに制限。",
+    "evidence": ["tools/formalization-viewer/src/pdf.ts"]
+  },
+  {
+    "id": "V1-8",
+    "title": "V1-8. event-stream のハンドラ例外が後続ハンドラを止める（軽微）",
+    "reviewLine": 609,
+    "status": "fixed",
+    "reason": "購読者ごとに例外を隔離し、後続の購読者への配信を継続する回帰テストを追加。",
+    "evidence": ["tools/formalization-viewer/src/event-stream.test.ts"]
+  },
+  {
+    "id": "V1-9",
+    "title": "V1-9. マーカーパレットが全件を毎回 KaTeX 描画し直す",
+    "reviewLine": 617,
+    "status": "fixed",
+    "reason": "マーカーの描画済み数式 HTML を既存の世代別 markerInfo キャッシュに保持する。",
+    "evidence": ["tools/formalization-viewer/src/app.ts"]
+  },
+  {
+    "id": "V1-10",
+    "title": "V1-10. pdf.ts と parallel-pdf.ts の重複が大きく、既にドリフトが始まっている",
+    "reviewLine": 624,
+    "status": "fixed",
+    "reason": "クロップ推定・文字行抽出・リンク注釈生成を pdf-document.ts にまとめ、両PDFペインから呼ぶ。実ブラウザーでPDF描画とナビゲーションを確認。",
+    "evidence": ["tools/formalization-viewer/src/pdf-document.ts"]
+  },
+  {
+    "id": "V1-11",
+    "title": "V1-11. 中核の状態機械に単体テストがない",
+    "reviewLine": 632,
+    "status": "fixed",
+    "reason": "スクロール抑制とLSP復旧をタイマー注入可能な単位に抽出し、300/1200ms、上限付きバックオフ、タイマー待ちとawait中の単一実行、成功後のリセットを回帰テストで検証。navigateTo の実DOM連携は既存E2Eで確認。 読み位置のE2Eは先行操作の遅延URL更新と区別し、選択したマーカーIDの反映を待ってから復元を確認する。",
+    "evidence": [
+      "tools/formalization-viewer/src/scroll-suppression.test.ts",
+      "tools/formalization-viewer/src/recovery.test.ts",
+      "tools/formalization-viewer/e2e/viewer.e2e.ts"
+    ]
+  },
+  {
+    "id": "V1-12",
+    "title": "V1-12. app.ts が依然として巨大（2,715行）",
+    "reviewLine": 637,
+    "status": "fixed",
+    "reason": "レイアウトDOM構築・スプリッターと比率操作を layout-dom.ts に分離し、保存とPDF更新をコールバックで渡す。PDF共通処理と状態管理の抽出も併せてアプリ本体の責務を減らした。",
+    "evidence": ["tools/formalization-viewer/src/layout-dom.ts"]
+  },
+  {
+    "id": "V1-13",
+    "title": "V1-13. removeLeaf が ratios の不変条件を型で守っていない（軽微・要確認）",
+    "reviewLine": 642,
+    "status": "fixed",
+    "reason": "removeLeaf と flattenSameDir は欠落した比率を1で補う。回帰テストを追加。",
+    "evidence": ["tools/formalization-viewer/src/layout-tree.test.ts"]
+  },
+  {
+    "id": "V1-14",
+    "title": "V1-14. スプリッタがマウス専用でセパレータとしての意味付けがない",
+    "reviewLine": 650,
+    "status": "fixed",
+    "reason": "separator の意味・向き・現在値を設定し、矢印キーで比率を変更。実ブラウザーで確認。",
+    "evidence": ["tools/formalization-viewer/e2e/viewer.e2e.ts"]
+  },
+  {
+    "id": "V1-15",
+    "title": "V1-15. About ダイアログにフォーカストラップがない",
+    "reviewLine": 655,
+    "status": "fixed",
+    "reason": "About の Tab を可視の操作要素間で循環させ、閉じた際に元のフォーカスを復元。設定も Escape で閉じる。",
+    "evidence": ["tools/formalization-viewer/src/app.ts"]
+  },
+  {
+    "id": "V1-16",
+    "title": "V1-16. リストボックスのハイライトが支援技術に伝わらない",
+    "reviewLine": 660,
+    "status": "fixed",
+    "reason": "両候補リストに一意な option ID と検索欄の aria-activedescendant を設定し、移動時に更新。実ブラウザーで確認。",
+    "evidence": ["tools/formalization-viewer/e2e/viewer.e2e.ts"]
+  },
+  {
+    "id": "V1-17",
+    "title": "V1-17. peer ペインのラベルが英語固定",
+    "reviewLine": 667,
+    "status": "fixed",
+    "reason": "対向PDFのメニューと preview の aria-label を manifest の label から設定する。",
+    "evidence": ["tools/formalization-viewer/src/app.ts"]
+  },
+  {
+    "id": "V2-1",
+    "title": "V2-1. projects.ts:125-157 — manifest の `dir` フィールドが未検証",
+    "reviewLine": 686,
+    "status": "fixed",
+    "reason": "dirとlspDirを同じトップレベル名検証に通し、.・..や非文字列も拒否。dirはmanifestの物理ディレクトリと一致させる。マウントやservedにも逸脱する相対パスを許さず、静的配布で設定から外側へ書き出す経路を防ぐ。",
+    "evidence": ["tools/formalization-viewer/server/projects.ts", "tools/formalization-viewer/server/projects.test.ts"]
+  },
+  {
+    "id": "V2-2",
+    "title": "V2-2. serve.ts:239, 269 — serveStatic の realpath 検査と読み取りの間の TOCTOU（要確認・軽微）",
+    "reviewLine": 691,
+    "status": "fixed",
+    "reason": "包含検査で得たrealPathをcreateReadStreamに渡し、元のsymlinkパスを開き直さない。ローカル開発サーバという信頼境界は維持する。",
+    "evidence": ["tools/formalization-viewer/server/serve.ts"]
+  },
+  {
+    "id": "V2-3",
+    "title": "V2-3. serve.ts:384-388 — readBody が宣言長超過時にリクエストを破棄しない",
+    "reviewLine": 696,
+    "status": "fixed",
+    "reason": "過大本文を中断し 413 後に接続を閉じる。後続の正常要求も実 HTTP で確認。",
+    "evidence": ["tools/formalization-viewer/server/serve.test.ts"]
+  },
+  {
+    "id": "V2-4",
+    "title": "V2-4. serve.ts:498-503 — HEAD / が GET と異なる結果になる（軽微）",
+    "reviewLine": 701,
+    "status": "fixed",
+    "reason": "GET と同じ経路で HEAD を処理し、動的応答と SSE でも本文・購読を作らない。",
+    "evidence": ["tools/formalization-viewer/server/serve.test.ts"]
+  },
+  {
+    "id": "V2-5",
+    "title": "V2-5. serve.ts:455 / lsp-cache.ts（generate）— file:// URI の組み立てにエンコードがない（要確認・軽微）",
+    "reviewLine": 706,
+    "status": "fixed",
+    "reason": "ライブLSP rootUri、キャッシュ生成のroot/file URIをnode:urlのpathToFileURLで生成する。lsp-cacheのCLI判定も同じエンコード規則へ更新。",
+    "evidence": ["tools/formalization-viewer/server/serve.ts", "tools/formalization-viewer/server/lsp-cache.ts"]
+  },
+  {
+    "id": "V2-6",
+    "title": "V2-6. lean-bridge.ts:58-60, 117 — spawn 失敗時にブリッジが固まる可能性（要確認）",
+    "reviewLine": 713,
+    "status": "fixed",
+    "reason": "spawn 完了を待ち、起動失敗を伝播する。失敗後の再初期化を検証。",
+    "evidence": ["tools/formalization-viewer/server/lean-bridge.test.ts"]
+  },
+  {
+    "id": "V2-7",
+    "title": "V2-7. lean-bridge.ts:124-156 — initialize の restart が send 間で直列化されていない（要確認）",
+    "reviewLine": 718,
+    "status": "fixed",
+    "reason": "送信・再起動・終了を同じ待ち行列で直列化し、実プロセスの終了を待つ。",
+    "evidence": ["tools/formalization-viewer/server/lean-bridge.test.ts"]
+  },
+  {
+    "id": "V2-8",
+    "title": "V2-8. lean-bridge.ts:270-275 — 実行中ブリッジへの別プロジェクト root の送信が黙って旧 root に届く（要確認）",
+    "reviewLine": 723,
+    "status": "fixed",
+    "reason": "稼働中と初回送信待ちのセッションで root の取り違えを拒否する。",
+    "evidence": ["tools/formalization-viewer/server/lean-bridge.test.ts"]
+  },
+  {
+    "id": "V2-9",
+    "title": "V2-9. lean-bridge.ts:86-118 / lean-server.ts:67-93 — LSP フレーミング解釈の重複と、負の Content-Length で前進しない解釈（要確認）",
+    "reviewLine": 728,
+    "status": "fixed",
+    "reason": "共有フレーム解析で不正な長さを拒否し、壊れたサーバーを終了する。",
+    "evidence": ["tools/formalization-viewer/server/lsp-frames.test.ts"]
+  },
+  {
+    "id": "V2-10",
+    "title": "V2-10. file-watcher.ts:88-97 — watchexec の異常終了を監視していない",
+    "reviewLine": 733,
+    "status": "fixed",
+    "reason": "購読中の watcher 異常終了を上限付きバックオフで再起動し、終了時は再試行と子プロセスを停止する。",
+    "evidence": ["tools/formalization-viewer/server/file-watcher.test.ts"]
+  },
+  {
+    "id": "V2-11",
+    "title": "V2-11. book-builder.ts:44, 299-306 — デバウンスの説明（per-project）と実装（全体で単一タイマ）の不一致",
+    "reviewLine": 738,
+    "status": "fixed",
+    "reason": "実際の共有バッチの debounce を表すコメントへ訂正。",
+    "evidence": ["tools/formalization-viewer/server/book-builder.ts"]
+  },
+  {
+    "id": "V2-12",
+    "title": "V2-12. static-dist.ts:210-211, 234 — `--dist` の再帰削除にガードがない",
+    "reviewLine": 743,
+    "status": "fixed",
+    "reason": "出力先を実パスで検査し、ソース・管理領域・外部・未知の既存ディレクトリへの上書きを拒否する。 dist と cache CLI の値欠落・未知オプション・不正な期限も拒否する。",
+    "evidence": ["tools/formalization-viewer/server/static-dist.test.ts"]
+  },
+  {
+    "id": "V2-13",
+    "title": "V2-13. lsp-cache.ts:317 — キャッシュ JSON の書き込みが非アトミック（要確認・軽微）",
+    "reviewLine": 748,
+    "status": "fixed",
+    "reason": "JSON を同一ディレクトリの一時ファイルから rename し、失敗時は既存出力を維持する。",
+    "evidence": ["tools/formalization-viewer/server/file-output.test.ts"]
+  },
+  {
+    "id": "V2-14",
+    "title": "V2-14. lsp-cache.ts:101-128 — cacheKey がファイルごとに推移閉包全体を再ハッシュする（性能・要確認）",
+    "reviewLine": 753,
+    "status": "fixed",
+    "reason": "生成単位のキャッシュで共有 import の読込とハッシュを一度にし、従来のキー値を回帰テストで維持。",
+    "evidence": ["tools/formalization-viewer/server/lsp-cache.test.ts"]
+  },
+  {
+    "id": "V2-15",
+    "title": "V2-15. projects.ts:125 / static-dist.ts:77 — validateManifest・Manifest・walkFiles の重複実装",
+    "reviewLine": 760,
+    "status": "fixed",
+    "reason": "Manifest型・readProject/validateManifest・循環検知付きwalkFilesをprojects.tsへ集約し、static-distとlsp-cacheも共有する。Lean探索では従来どおり隠しディレクトリを除外できる。循環symlink・破損リンク・隠しツリーを検証。",
+    "evidence": [
+      "tools/formalization-viewer/server/projects.ts",
+      "tools/formalization-viewer/server/static-dist.ts",
+      "tools/formalization-viewer/server/lsp-cache.ts",
+      "tools/formalization-viewer/server/projects.test.ts"
+    ]
+  },
+  {
+    "id": "V2-16",
+    "title": "V2-16. repo-version.ts:40-58 / serve.ts の sendManifest — リクエストごとの git 同期実行",
+    "reviewLine": 765,
+    "status": "fixed",
+    "reason": "root ごとの短期 TTL キャッシュで Git 起動を抑え、期限後の変更を反映する。",
+    "evidence": ["tools/formalization-viewer/server/repo-version.test.ts"]
+  },
+  {
+    "id": "V2-17",
+    "title": "V2-17. テスト不足 — セキュリティ境界そのものに単体テストがない",
+    "reviewLine": 770,
+    "status": "fixed",
+    "reason": "isAllowedPath/applyMountに表形式の境界テストを追加。encoded traversal、二重slash、flat制限、拡張子の大文字、viewer assetとproject sourceの分岐を検証し、manifest名・型・相対パスの拒否も確認する。",
+    "evidence": ["tools/formalization-viewer/server/projects.test.ts"]
+  },
+  {
+    "id": "V2-18",
+    "title": "V2-18. static-dist.ts:95-113 — dist は複数プロジェクトのうち最初の1件だけを対象にする（要確認）",
+    "reviewLine": 775,
+    "status": "fixed",
+    "reason": "静的出力は一書籍であることを明記し、実生成テストで確認する。",
+    "evidence": ["tools/formalization-viewer/server/static-dist.test.ts"]
+  },
+  {
+    "id": "V2-19",
+    "title": "V2-19. static-dist.ts:30, 236-246 — dist に e2e や fixtures 等のビルド専用物もコピーされる（軽微）",
+    "reviewLine": 780,
+    "status": "fixed",
+    "reason": "e2e・fixtures・src・server・設定ファイルなどを静的配布から除外し、実生成テストで確認。",
+    "evidence": ["tools/formalization-viewer/server/static-dist.test.ts"]
+  },
+  {
+    "id": "V2-20",
+    "title": "V2-20. repo-version.ts:131-145 — katexMacros の括弧数えがエスケープを考慮しない（要確認・軽微）",
+    "reviewLine": 785,
+    "status": "fixed",
+    "reason": "マクロ本体の escaped brace を構造上の括弧として数えない。",
+    "evidence": ["tools/formalization-viewer/server/repo-version.test.ts"]
+  },
+  {
+    "id": "V2-21",
+    "title": "V2-21. e2e/viewer-server.ts:16-45 — stop() がサーバ終了を待たず、起動失敗時の診断も出ない（軽微）",
+    "reviewLine": 790,
+    "status": "fixed",
+    "reason": "E2E サーバー停止を非同期にし、終了待ちと強制終了を行う。起動失敗は stderr を保持して readiness 待ちを中断し清掃する。",
+    "evidence": ["tools/formalization-viewer/server/serve.test.ts"]
+  },
+  {
+    "id": "V2-22",
+    "title": "V2-22. server/free-port.ts と e2e/util.ts — 空きポート取得の重複実装（軽微）",
+    "reviewLine": 795,
+    "status": "fixed",
+    "reason": "E2E の空きポート取得を server/free-port.ts の usablePort に統一。失敗時にポート0を返さない。",
+    "evidence": ["tools/formalization-viewer/e2e/util.ts", "tools/formalization-viewer/server/free-port.ts"]
+  },
+  {
+    "id": "B1-1",
+    "title": "B1-1. dry-run が Perl モジュール未導入環境で exit 1 する（cpanm の有無で挙動が変わる）",
+    "reviewLine": 829,
+    "status": "fixed",
+    "reason": "Perlモジュール導入後の実在検証を実行時だけに限定。既存cpanmと不足モジュールを模擬したsetup全体のdry-runで非実行と成功を検証。",
+    "evidence": ["setup.sh", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "B1-2",
+    "title": "B1-2. rm -rf の対象が環境変数由来のパスで、範囲ガードがない",
+    "reviewLine": 842,
+    "status": "fixed",
+    "reason": "自動削除を共通の保護ツールに通し、物理パスでリポジトリ配下を確認。管理領域と追跡中ソースを含むパスも拒否する。外部へのsymlinkと特殊文字を持つソースディレクトリも回帰検証。",
+    "evidence": ["setup.sh", "tools/remove_setup_cache.sh", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "B1-3",
+    "title": "B1-3. install_mise_linux の curl は dry-run でも実際にダウンロードする",
+    "reviewLine": 856,
+    "status": "fixed",
+    "reason": "mise Linux bootstrapのdry-runは一時ファイル生成やcurlより前に表示してreturnする。",
+    "evidence": ["setup.sh"]
+  },
+  {
+    "id": "B1-4",
+    "title": "B1-4. install-tl アーカイブ自体に完全性検証がない",
+    "reviewLine": 867,
+    "status": "fixed",
+    "reason": "既定の2026/10/25スナップショットから取得したinstall-tlアーカイブのSHA256を固定し、展開と実行の前に検証する。独自ミラーはTEXLIVE_INSTALL_SHA256指定に対応し、未指定時の信頼境界を明記。",
+    "evidence": ["setup.sh", "https://www.texlive.info/tlnet-archive/2026/10/25/tlnet/install-tl-unx.tar.gz"]
+  },
+  {
+    "id": "B1-5",
+    "title": "B1-5. cpanm スクリプトを検証なしにダウンロードして実行する",
+    "reviewLine": 879,
+    "status": "fixed",
+    "reason": "レビューの代替案に従い、fallback cpanmin.usが浮動HTTPS bootstrapである例外とシステムcpanmの優先をコメントに明記。",
+    "evidence": ["setup.sh"]
+  },
+  {
+    "id": "B1-6",
+    "title": "B1-6. TLMGR_REPOSITORY=ctan のとき URL 変換と生値の受け渡しが混在する",
+    "reviewLine": 889,
+    "status": "fixed",
+    "reason": "install-tlとtlmgrへのリポジトリ引数を共通texlive_repository_urlの出力に統一。",
+    "evidence": ["setup.sh"]
+  },
+  {
+    "id": "B1-7",
+    "title": "B1-7. install_translation_tools のコメントと実体のずれ",
+    "reviewLine": 900,
+    "status": "fixed",
+    "reason": "gettextはmise側、当該関数はPerl依存のみを導入することにコメントを修正。",
+    "evidence": ["setup.sh"]
+  },
+  {
+    "id": "B1-8",
+    "title": "B1-8. macOS で build basics（cc/make）の事前確認がない",
+    "reviewLine": 911,
+    "status": "fixed",
+    "reason": "macOS導入前とdoctorにCコンパイラ・makeの存在検査を追加。欠落時にはCLT導入手順を表示。",
+    "evidence": ["setup.sh"]
+  },
+  {
+    "id": "B1-9",
+    "title": "B1-9. ジョブに timeout-minutes がなく既定の360分",
+    "reviewLine": 923,
+    "status": "fixed",
+    "reason": "checkジョブに120分の明示上限を追加。",
+    "evidence": [".github/workflows/check.yml"]
+  },
+  {
+    "id": "B1-10",
+    "title": "B1-10. セットアップキャッシュのキーが OS イメージ世代を区別しない",
+    "reviewLine": 932,
+    "status": "fixed",
+    "reason": "CIのOSをubuntu-24.04に固定してsetupキャッシュキーに世代を含め、導入後のdoctorも追加。",
+    "evidence": [".github/workflows/check.yml"]
+  },
+  {
+    "id": "B1-11",
+    "title": "B1-11. mise 本体の検証が同一リリースの SHASUMS256.txt 依存",
+    "reviewLine": 948,
+    "status": "fixed",
+    "reason": "mise公式2026.10.19リリースのSHASUMS256から取得した期待SHA256をスクリプトに固定。実行時に同一配布元のチェックサムを信頼し直す経路を除去。",
+    "evidence": ["tools/setup_codex.sh", "https://github.com/jdx/mise/releases/download/v2026.10.19/SHASUMS256.txt"]
+  },
+  {
+    "id": "B1-12",
+    "title": "B1-12. install_codex_debian.py が使う dpkg-deb が前提一覧にない",
+    "reviewLine": 958,
+    "status": "fixed",
+    "reason": "Debian bootstrapの必須コマンド一覧にdpkg-debを追加。",
+    "evidence": ["tools/setup_codex.sh"]
+  },
+  {
+    "id": "B1-13",
+    "title": "B1-13..devcontainer のイメージが浮動タグ",
+    "reviewLine": 969,
+    "status": "fixed",
+    "reason": "公式base-ubuntu manifestで確認したバージョン付き3.0.10-nobleタグへ固定。",
+    "evidence": [
+      ".devcontainer/devcontainer.json",
+      "https://raw.githubusercontent.com/devcontainers/images/main/src/base-ubuntu/manifest.json"
+    ]
+  },
+  {
+    "id": "B1-14",
+    "title": "B1-14. mise 本体のバージョンの出所が3系統に分かれている",
+    "reviewLine": 980,
+    "status": "fixed",
+    "reason": "Codexはmise 2026.10.19固定、ローカルとCIは既存miseを受容してdoctorで管理ツールを検証するという方針をREADMEに明記。",
+    "evidence": ["README.md", "tools/setup_codex.sh"]
+  },
+  {
+    "id": "B1-15",
+    "title": "B1-15. ruff.toml の per-file-ignores が指すファイルの現行存在が未確認",
+    "reviewLine": 993,
+    "status": "fixed",
+    "reason": "tools/worktree_diff.pyは現行ツリーに存在しないことを確認し、陳腐化したper-file-ignoreを削除。",
+    "evidence": ["ruff.toml"]
+  },
+  {
+    "id": "B1-16",
+    "title": "B1-16. worktree_caches.sh の複製チェックと実行の間に競合の余地",
+    "reviewLine": 1001,
+    "status": "fixed",
+    "reason": "チェックから複製・fallback削除までを作業ツリー別のOSファイルロックで直列化。exec後のロック保持と異常終了時の解放、実際の二重起動で複製が一度だけ行われることを検証。",
+    "evidence": ["tools/worktree_caches.sh", "tools/with_file_lock.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "T1-A-1",
+    "title": "A-1. テストが一切ない tools が複数ある",
+    "reviewLine": 1046,
+    "status": "fixed",
+    "reason": "books_mkの生成Make変数、po_diffの出力、実skip分割、Pandocテンプレート準備CLI、AFK prepare-onlyのpin検査とadapter/config配置を検証する。AFKは外部checkout取得・Leanビルドを行わず、既存checkoutの契約をfixtureと外部Git応答で検証。",
+    "evidence": ["tests/test_book_identity.py", "tests/test_remaining_tool_contracts.py"]
+  },
+  {
+    "id": "T1-A-2",
+    "title": "A-2. 主要ツールの CLI `main` が未検証",
+    "reviewLine": 1051,
+    "status": "fixed",
+    "reason": "sourcemap生成→coverageのstrict JSON→翻訳射影の実mainを小さいファイル群で往復し、出力と終了コードを確認。terminologyとworkflowも実mainを通し、実gettext・構造・用語検査を使う。外部po4aだけは明示的なrenderer契約fakeで、実po4aは通常のlint-translationで別途確認する。auditは既存の実CLI成功・不正manifestテストを保持。",
+    "evidence": ["tests/test_remaining_tool_contracts.py", "tests/test_booklink_audit.py"]
+  },
+  {
+    "id": "T1-A-3",
+    "title": "A-3. `check_translation_workflow` の実物検証関数が常にモックされている",
+    "reviewLine": 1056,
+    "status": "fixed",
+    "reason": "実GNU gettextを用いてPOメッセージ集合の並べ替え同値、追加／欠落、完全翻訳、fuzzy、未訳を検査。比較・カタログ検査関数はモックしない。CLI正常系でも両関数を実行する。",
+    "evidence": ["tests/test_remaining_tool_contracts.py"]
+  },
+  {
+    "id": "T1-A-4",
+    "title": "A-4. `validate_book_build.run_make` の実物が未検証",
+    "reviewLine": 1061,
+    "status": "fixed",
+    "reason": "一時Makefileを実run_makeで起動し、成功・失敗の終了コード、stdout/stderrの同一ログへの保存、対象引数、所要時間を検証。",
+    "evidence": ["tests/test_build_pipeline_cli.py"]
+  },
+  {
+    "id": "T1-A-5",
+    "title": "A-5. `enable_booklink_highlight.py` の実物が空ファイルで置換されている",
+    "reviewLine": 1066,
+    "status": "fixed",
+    "reason": "highlight変換の実CLIで挿入位置・冪等性・入力不備時の不変更を検証。Make復旧テストも空スタブをやめ、実スクリプトを通してdebug用TeXの有効化を確認する。",
+    "evidence": ["tests/test_build_pipeline_cli.py", "tests/test_book_build_recovery.py"]
+  },
+  {
+    "id": "T1-A-6",
+    "title": "A-6. `discover_books` のテストは公開抜粋の形だけ",
+    "reviewLine": 1071,
+    "status": "fixed",
+    "reason": "全書と抜粋に相当する2書籍の発見辞書全体を検証し、同じstemを持つ第3書籍の拒否も確認。",
+    "evidence": ["tests/test_build_pipeline_cli.py"]
+  },
+  {
+    "id": "T1-B-1",
+    "title": "B-1. 用語テストが本番用語集と Pandoc 実行環境に依存している",
+    "reviewLine": 1078,
+    "status": "fixed",
+    "reason": "文脈検査を17規則の固定JSON fixtureへ移し、Pandocや本番用語政策から切り離す。本番用語集は存在・非空のsmokeに限定し、YAML/Pandoc統合ケースだけ依存がない場合に明示的にskipする。",
+    "evidence": ["tests/fixtures/contextual-glossary.json", "tests/test_translation_terms.py"]
+  },
+  {
+    "id": "T1-B-2",
+    "title": "B-2. raw citations テストは未ビルド環境で無言で全スキップされる",
+    "reviewLine": 1083,
+    "status": "fixed",
+    "reason": "test-pythonの前提依存にbook-filterのビルドを追加し、Make/CI経路で未ビルドのまま引用テストだけskipして通過しないようにする。低依存の直接unittest起動では従来の明示的skipを保持。",
+    "evidence": ["Makefile", "tests/test_raw_citations.py"]
+  },
+  {
+    "id": "T1-B-3",
+    "title": "B-3. raw citations テストが本番 references.bib の文字列を固定している",
+    "reviewLine": 1088,
+    "status": "fixed",
+    "reason": "引用パイプライン用の最小bib fixtureへ変更。誌名・シリーズ・編集者・頁・報告番号の検査は固定テストデータを対象とし、本番references.bibの校閲で壊れないようにする。両localeの同一性と本文／raw引用番号の対応を維持。",
+    "evidence": ["tests/fixtures/citation-pipeline.bib", "tests/test_raw_citations.py"]
+  },
+  {
+    "id": "T1-B-4",
+    "title": "B-4. recovery テストが本番 Makefile を文字列検索で切り出している",
+    "reviewLine": 1093,
+    "status": "fixed",
+    "reason": "Makeテンプレートの抽出を名前と境界を持つ正規表現にし、欠落時はテンプレート名を含むテスト失敗にする。make不在時の明示的skipも追加。",
+    "evidence": ["tests/test_book_build_recovery.py"]
+  },
+  {
+    "id": "T1-B-5",
+    "title": "B-5. validate テストの陳腐化判定がナノ秒 mtime の粒度に依存している",
+    "reviewLine": 1098,
+    "status": "fixed",
+    "reason": "mtimeを有効な2020年の基準時刻と2分後に固定し、粗いタイムスタンプ粒度でも前後関係が潰れないようにする。",
+    "evidence": ["tests/test_validate_book_build.py"]
+  },
+  {
+    "id": "T1-B-6",
+    "title": "B-6. structure テストが診断文字列の接頭辞と非公開関数に結合している",
+    "reviewLine": 1103,
+    "status": "no-change",
+    "reason": "診断カテゴリはcompare_textsが返す公開メッセージの契約であり、別の検査が偶然失敗しただけでは合格させないため接頭辞確認を保持。数学の正規化は既に公開normalize_mathへ移してあり、private関数への依存は残っていない。",
+    "evidence": ["tests/test_translation_structure.py", "tools/check_translation_structure.py"]
+  },
+  {
+    "id": "T1-B-7",
+    "title": "B-7. projection テストが非公開関数と作業ディレクトリ依存の絶対パスに結合している",
+    "reviewLine": 1108,
+    "status": "fixed",
+    "reason": "非公開のanchor/文分割関数を直接検査せず、po_segmentsとChapterProjection.project_spanから数式差・コメント境界・略語内の句点による最終射影を検証。合成絶対パスは一時rootから作り、実ファイルを使うrootもresolveへ統一する。",
+    "evidence": ["tests/test_translation_sourcemap_projection.py"]
+  },
+  {
+    "id": "T1-B-8",
+    "title": "B-8. coverage テストが被テストモジュールの内部 import 別名をモックしている",
+    "reviewLine": 1113,
+    "status": "fixed",
+    "reason": "モック境界をcov.bkという内部別名からbooklink_sourcemapモジュール自体へ移し、import表記の変更への結合を除く。",
+    "evidence": ["tests/test_booklink_coverage.py"]
+  },
+  {
+    "id": "T1-B-9",
+    "title": "B-9. sourcemap テストのシンボリックリンク前提",
+    "reviewLine": 1118,
+    "status": "no-change",
+    "reason": "現行CIはubuntu-24.04で、setup.shはmacOS/Linux以外を明示的に拒否する。symlinkは書籍共有の必須機能なので、対応環境で作成できない場合をskipして隠さず検査失敗として保持する。Windows対応は本プロジェクトの前提にない。",
+    "evidence": [".github/workflows/check.yml", "setup.sh", "tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "T1-B-10",
+    "title": "B-10. audit テストの絶対パス固定",
+    "reviewLine": 1123,
+    "status": "fixed",
+    "reason": "固定の/repoを一時ディレクトリへ変更し、selector検査では証拠ファイルを作らないことを明記。",
+    "evidence": ["tests/test_booklink_audit.py"]
+  },
+  {
+    "id": "T1-C-1",
+    "title": "C-1. `git_blob_hash` の「現行 blob」テストが実装自身で期待値を作っている",
+    "reviewLine": 1130,
+    "status": "fixed",
+    "reason": "非空ファイルのsourceBlob期待値をgit hash-objectで独立に取得した固定値へ変更。実装がヘッダを落とすなどの誤りでも自己一致で合格しないようにする。",
+    "evidence": ["tests/test_translation_workflow.py"]
+  },
+  {
+    "id": "T1-C-2",
+    "title": "C-2. validate テストの index digest フィクスチャが実装のハッシュ方式を複写している",
+    "reviewLine": 1135,
+    "status": "fixed",
+    "reason": "索引SHA-256のプロトコルfixtureを独立した固定値へ変更。既存の、idxを書き換えるとstaleになり変更しなければ通る振る舞いテストを保持。",
+    "evidence": ["tests/test_validate_book_build.py"]
+  },
+  {
+    "id": "T1-C-3",
+    "title": "C-3. recovery テストの FAKE_TOOL が索引ツールの契約をミニチュア再実装している",
+    "reviewLine": 1140,
+    "status": "fixed",
+    "reason": "フェイクはTeX再実装ではなくMake/refresh_debug_pdfのファイル更新・再試行契約を検証するものと明記し、実物の契約箇所をコメントで参照。実TeXの収束・診断は別途debug検証で確認する。",
+    "evidence": ["tests/test_book_build_recovery.py"]
+  },
+  {
+    "id": "T1-C-4",
+    "title": "C-4. raw citations テストの AST 再構成が Pandoc の意味論をテスト側で再実装している",
+    "reviewLine": 1145,
+    "status": "no-change",
+    "reason": "Cite周辺のraw TeXをバイト単位で保持する製品契約を検証するため、ピン留めされた公開Pandoc ASTのraw葉とCiteだけを連結する検査を保持。引用解析やレンダリングの再実装ではなく、最終citeproc検査とは異なる不変条件であることを明記。",
+    "evidence": ["tests/test_raw_citations.py"]
+  },
+  {
+    "id": "T1-D-1",
+    "title": "D-1. booklink マーカー記法のフィクスチャが3ファイルに重複している",
+    "reviewLine": 1152,
+    "status": "fixed",
+    "reason": "通常のLeanマーカーを作る共通helperを追加し、sourcemap/coverageと新CLI fixtureで共有。生文字列で構文自体を試す例は保持する。auditのentry辞書はLeanマーカーではなく異なるJSON入力契約なので、同じ文字列builderへ無理に統合しない。",
+    "evidence": [
+      "tests/booklink_fixtures.py",
+      "tests/test_booklink_sourcemap.py",
+      "tests/test_booklink_coverage.py",
+      "tests/test_remaining_tool_contracts.py"
+    ]
+  },
+  {
+    "id": "T1-D-2",
+    "title": "D-2. `sys.path` への tools 追加の流儀がファイルごとに異なる",
+    "reviewLine": 1157,
+    "status": "fixed",
+    "reason": "os.path式が残っていた7ファイルをPath(__file__).resolve().parents[1]へ統一し、toolsの追加も同じ表記にする。全Pythonテストで確認。",
+    "evidence": [
+      "tests/test_booklink_sourcemap.py",
+      "tests/test_translation_workflow.py",
+      "tests/test_vendor_notices.py"
+    ]
+  },
+  {
+    "id": "T1-D-3",
+    "title": "D-3. workflow テストが内部のパス回数を期待値にしている",
+    "reviewLine": 1162,
+    "status": "fixed",
+    "reason": "比較処理の厳密な呼出し回数をやめ、呼出しの有無と最終ファイル状態で検証。ワークフローが明示的に保証する単一renderの検査は保持。",
+    "evidence": ["tests/test_translation_workflow.py"]
+  },
+  {
+    "id": "T1-D-4",
+    "title": "D-4. sourcemap テストが `Marker` を位置引数で組み立てている",
+    "reviewLine": 1167,
+    "status": "fixed",
+    "reason": "匿名instance等のMarkerフィクスチャを全フィールド名付きにして、Noneや位置引数の意味を明示。",
+    "evidence": ["tests/test_booklink_sourcemap.py"]
+  },
+  {
+    "id": "T1-D-5",
+    "title": "D-5. check_notation_index.py のマクロ抽出が正規表現の形状前提で壊れ方が悪い",
+    "reviewLine": 1172,
+    "status": "fixed",
+    "reason": "BookNotationIndexの正規表現抽出を廃止し、正本macros.tex全体を入力してコンパイル。消えるassertを明示的な例外に置換し、生成索引の3文脈が同一キーに統合されることを検証。",
+    "evidence": ["tests/check_notation_index.py"]
+  },
+  {
+    "id": "D1-1",
+    "title": "1. AGENTS.md:52",
+    "reviewLine": 1193,
+    "status": "fixed",
+    "reason": "日本語全章のPO下書き管理と現在の状態ファイルを説明し、英語フォールバックという古い現状説明を除去。pilot変数は公開PDF集約からの除外用の歴史的な名前として説明。",
+    "evidence": ["AGENTS.md", "tools/formalization-viewer/README.md", "polish-space-ja/l10n/README.md", "Makefile"]
+  },
+  {
+    "id": "D1-2",
+    "title": "2. tools/formalization-viewer/README.md:85",
+    "reviewLine": 1198,
+    "status": "fixed",
+    "reason": "PDFもマーカーとskipを介して同期する現行仕様に統一。",
+    "evidence": ["tools/formalization-viewer/README.md", "tools/formalization-viewer/src/pdf.ts"]
+  },
+  {
+    "id": "D1-3",
+    "title": "3. tools/formalization-viewer/README.md:168",
+    "reviewLine": 1203,
+    "status": "fixed",
+    "reason": "再ビルドの入力をMarkdownとLeanに修正。共有デバウンスという実装の説明も追随。",
+    "evidence": ["tools/formalization-viewer/README.md", "tools/formalization-viewer/server/book-builder.ts"]
+  },
+  {
+    "id": "D1-4",
+    "title": "4. .codex/skills/book-build/SKILL.md:3, 27-30, 38",
+    "reviewLine": 1208,
+    "status": "fixed",
+    "reason": "TeX検証を唯一の既定にし、暗黙のリリースPDF起動を除去。明示依頼のPDFはMakefileの対象で検証する。",
+    "evidence": [
+      ".codex/skills/book-build/SKILL.md",
+      ".codex/skills/book-build/scripts/build_book_document.py",
+      "tests/test_review_infrastructure_helpers.py"
+    ]
+  },
+  {
+    "id": "D1-5",
+    "title": "5. README.md:88",
+    "reviewLine": 1213,
+    "status": "fixed",
+    "reason": "開始時の指示をTeX検証とコミット後のdebug検証に統一。",
+    "evidence": ["README.md", "AGENTS.md"]
+  },
+  {
+    "id": "D1-6",
+    "title": "6. README.md:142",
+    "reviewLine": 1218,
+    "status": "fixed",
+    "reason": "debug PDFをコミット後検証の成果物として説明。",
+    "evidence": ["README.md"]
+  },
+  {
+    "id": "D1-7",
+    "title": "7. AGENTS.md:98",
+    "reviewLine": 1223,
+    "status": "fixed",
+    "reason": "英語はmakeindex、日本語はupmendexと本別のindexerを明記。",
+    "evidence": ["AGENTS.md", "Makefile"]
+  },
+  {
+    "id": "D1-8",
+    "title": "8. AGENTS.md:155-175（Term Index Workflow）",
+    "reviewLine": 1228,
+    "status": "fixed",
+    "reason": "termforwardとtermforwardasの用途を用語索引ワークフローに追加。",
+    "evidence": ["AGENTS.md"]
+  },
+  {
+    "id": "D1-9",
+    "title": "9. AGENTS.md:46",
+    "reviewLine": 1233,
+    "status": "fixed",
+    "reason": "Codex各スキルとClaudeのmechanical-checksの用途・所在、共通チェックリストと抽出器を案内。",
+    "evidence": ["AGENTS.md"]
+  },
+  {
+    "id": "D1-10",
+    "title": "10. CLAUDE.md と AGENTS.md がバイト同一（各 32,852 bytes）",
+    "reviewLine": 1240,
+    "status": "no-change",
+    "reason": "CLAUDE.mdはAGENTS.mdへのシンボリックリンクで、通常ファイルの複製ではない。",
+    "evidence": ["CLAUDE.md"]
+  },
+  {
+    "id": "D1-11",
+    "title": "11. book-section-review の二重定義が全面ドリフト",
+    "reviewLine": 1245,
+    "status": "fixed",
+    "reason": "数学判断・skip hygiene・出力形式を共通チェックリストに集約。各アダプタはモデルと入力収集の差のみを持ち、Codex側にもcoverage証拠取得を追加。",
+    "evidence": [
+      "tools/book-section-review-checklist.md",
+      ".codex/skills/book-section-review/SKILL.md",
+      ".claude/skills/book-section-review/SKILL.md"
+    ]
+  },
+  {
+    "id": "D1-12",
+    "title": "12..claude/skills/book-section-mechanical-checks/SKILL.md:25",
+    "reviewLine": 1250,
+    "status": "fixed",
+    "reason": "抽出器をtoolsへ移し両アダプタを更新。旧Codexパスは互換エントリとして維持。",
+    "evidence": [
+      "tools/extract_book_section.py",
+      ".codex/skills/book-section-review/scripts/extract_book_section.py",
+      ".claude/skills/book-section-mechanical-checks/SKILL.md"
+    ]
+  },
+  {
+    "id": "D1-13",
+    "title": "13..codex/skills/book-section-review/SKILL.md:63",
+    "reviewLine": 1255,
+    "status": "fixed",
+    "reason": "Homebrew絶対パスと誤ったLakeの実行場所を、ルートからのscoped make validate-leanに置換。",
+    "evidence": [".codex/skills/book-section-review/SKILL.md"]
+  },
+  {
+    "id": "D1-14",
+    "title": "14..claude/skills/book-section-mechanical-checks/SKILL.md:42, 63",
+    "reviewLine": 1260,
+    "status": "fixed",
+    "reason": "特定ホストのPython 3.9を一般化せず、ピン留めインタプリタを選ぶ説明に更新。",
+    "evidence": [".claude/skills/book-section-mechanical-checks/SKILL.md"]
+  },
+  {
+    "id": "D1-15",
+    "title": "15. モデル名 `gpt-6-luna` への依存が4文書に分散",
+    "reviewLine": 1265,
+    "status": "fixed",
+    "reason": "proof-inventoryにも指定モデルが利用不能な場合の未完了報告を追加。具体的モデル名は利用可能であり、スキル単独での呼び出しにも必要な明示ルーティングとして維持する。",
+    "evidence": [".codex/skills/book-proof-inventory/SKILL.md", ".codex/skills/book-maintenance/SKILL.md", "AGENTS.md"]
+  },
+  {
+    "id": "D1-16",
+    "title": "16..codex/skills/book-build/scripts/build_book_document.py:183-201（wait_for_existing）",
+    "reviewLine": 1272,
+    "status": "fixed",
+    "reason": "第二の背景PDFワーカーと無期限の待機ループを削除。既定の検証は共有runnerのみを使用する。",
+    "evidence": [".codex/skills/book-build/scripts/build_book_document.py"]
+  },
+  {
+    "id": "D1-17",
+    "title": "17..codex/skills/book-build/scripts/build_book_document.py:175-181, 215-219（remove_lock / release_lock）",
+    "reviewLine": 1277,
+    "status": "fixed",
+    "reason": "所有者検査のない独自PDFロック実装を削除。PDFの明示ビルドは既存のMakefileと共有ロックに任せる。",
+    "evidence": [".codex/skills/book-build/scripts/build_book_document.py", "tools/latex_lock.py"]
+  },
+  {
+    "id": "D1-18",
+    "title": "18..codex/skills/book-build/scripts/build_book_document.py:75-99（extract_diagnostics）",
+    "reviewLine": 1282,
+    "status": "fixed",
+    "reason": "広すぎる独自診断抽出器を削除し、共通validate-texの診断とreport.jsonに統一。",
+    "evidence": [".codex/skills/book-build/scripts/build_book_document.py", "tools/validate_book_build.py"]
+  },
+  {
+    "id": "D1-19",
+    "title": "19..codex/skills/book-build/scripts/build_book_document.py:11（DEFAULT_SOURCE）",
+    "reviewLine": 1287,
+    "status": "fixed",
+    "reason": "make list-booksから選択し、全書がない公開チェックアウトでは利用可能な抜粋を検証。章をmasterと誤認する入力は拒否。",
+    "evidence": [
+      ".codex/skills/book-build/scripts/build_book_document.py",
+      "tests/test_review_infrastructure_helpers.py"
+    ]
+  },
+  {
+    "id": "D1-20",
+    "title": "20..codex/skills/book-section-review/scripts/extract_book_section.py:14, 21-38（parse_headers のフェンス処理）",
+    "reviewLine": 1292,
+    "status": "fixed",
+    "reason": "フェンスの文字と長さを保持し、十分な長さの単独行だけで閉じる。複数行コメントとインデントコードの偽見出しも除外。",
+    "evidence": ["tools/extract_book_section.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "D1-21",
+    "title": "21..codex/skills/book-section-review/scripts/extract_book_section.py:10（HEADER_RE）",
+    "reviewLine": 1297,
+    "status": "fixed",
+    "reason": "属性末尾として認める形をPandoc属性の識別子・class・key=valueに限定。数式末尾の波括弧を見出し名から取り除かない。",
+    "evidence": ["tools/extract_book_section.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "D1-22",
+    "title": "22. AGENTS.md:64 と:68（コミット後検証の二重規定）",
+    "reviewLine": 1304,
+    "status": "fixed",
+    "reason": "コミット後の正規手順をvalidate-debugに統一し、直接debugターゲットはrunner内部の鮮度検証として説明。",
+    "evidence": ["AGENTS.md"]
+  },
+  {
+    "id": "D1-23",
+    "title": "23. AGENTS.md:17, 19, 56, 60（同ポリシーの反復）",
+    "reviewLine": 1309,
+    "status": "no-change",
+    "reason": "不要な重複は減らしたが、継続時にも守るPDF選択方針の短い再掲は保持する。今回の実害だったスキル既定との矛盾はD1-4で解消し、明示的な運用方針は弱めない。",
+    "evidence": ["AGENTS.md", ".codex/skills/book-build/SKILL.md"]
+  },
+  {
+    "id": "D1-24",
+    "title": "24. tools/formalization-viewer/README.md:117, 119, 157, 174",
+    "reviewLine": 1314,
+    "status": "fixed",
+    "reason": "実装案内を生成JS名からsrc/*.tsの正本パスへ更新。",
+    "evidence": ["tools/formalization-viewer/README.md"]
+  },
+  {
+    "id": "D1-25",
+    "title": "25. tools/formalization-viewer/README.md:170",
+    "reviewLine": 1319,
+    "status": "fixed",
+    "reason": "全書ページ数と章レンダリング所要時間の固定見積もりを除去。",
+    "evidence": ["tools/formalization-viewer/README.md"]
+  },
+  {
+    "id": "X1-1",
+    "title": "X1-1（性能・中）polish-space/tex/macros.tex:5-7",
+    "reviewLine": 1344,
+    "status": "fixed",
+    "reason": "固定座標の依存グラフで使われるbackgroundsだけを読み込み、未使用のgraphs・graphdrawing・fit・forceを除去。原稿と生成側の利用箇所を検索し、全3書のTeX生成と実マクロのコンパイルを検証。",
+    "evidence": ["polish-space/tex/macros.tex", "tools/book-filter/DependencyGraph.hs", "tests/check_debug_anchors.py"]
+  },
+  {
+    "id": "X1-2",
+    "title": "X1-2（正しさ・中）polish-space/tex/macros.tex:135-136",
+    "reviewLine": 1358,
+    "status": "fixed",
+    "reason": "Booklinkとskipの開始アンカーを同一の水平モード・item処理に統一。実マクロをコンパイルして段落先頭・リスト先頭を確認し、release設定ではskipアンカーが出ないことも検証。",
+    "evidence": ["polish-space/tex/macros.tex", "tests/check_debug_anchors.py", "Makefile"]
+  },
+  {
+    "id": "X1-3",
+    "title": "X1-3（正しさ・低）polish-space/tex/macros.tex:29-33",
+    "reviewLine": 1371,
+    "status": "fixed",
+    "reason": "caption設定をAtBeginDocumentに移し、macros読み込み後にcaptionがロードされても設定する。日本語クラスがcaptionを使わないケースは引き続き許容。",
+    "evidence": ["polish-space/tex/macros.tex", "tests/check_debug_anchors.py", "tests/check_notation_index.py"]
+  },
+  {
+    "id": "X1-4",
+    "title": "X1-4（保守性・低）polish-space/tex/macros.tex:103-127、132-134",
+    "reviewLine": 1387,
+    "status": "fixed",
+    "reason": "必須names引数とkindが描画しないメタデータであることを明記し、撤去済みのTeX色付けへの古い説明を修正。",
+    "evidence": ["polish-space/tex/macros.tex"]
+  },
+  {
+    "id": "X1-5",
+    "title": "X1-5（要確認・低）polish-space/tex/macros.tex:159-176",
+    "reviewLine": 1399,
+    "status": "no-change",
+    "reason": "statement*は公理や論理原理も掲示する汎用環境で、uprightを維持する。実際のChurchのテーゼ・Markov原理等の使用箇所と対応する意図をコメントに明記。",
+    "evidence": ["polish-space/tex/macros.tex", "polish-space/src/polish-space-book/inside-effective-topos.md"]
+  },
+  {
+    "id": "X1-6",
+    "title": "X1-6（保守性・中）tools/pandoc/templates/font-settings.latex 全体、tools/prepare_pandoc_templates.py:43-46",
+    "reviewLine": 1416,
+    "status": "fixed",
+    "reason": "選択したPandoc同梱font-settingsを取得し、ローカル版から既知のmicrotype条件だけを戻した結果との全文一致を検証してから出力する。上流追加やローカル構造崩れを拒否する回帰テストを追加。",
+    "evidence": ["tools/prepare_pandoc_templates.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "X1-7",
+    "title": "X1-7（正しさ・低）tools/prepare_pandoc_templates.py:31-45",
+    "reviewLine": 1429,
+    "status": "fixed",
+    "reason": "captionパッケージだけ残る消滅ケースも拒否。入力パスをスクリプト基準にしUTF-8を明示。",
+    "evidence": ["tools/prepare_pandoc_templates.py", "tests/test_review_infrastructure_helpers.py"]
+  },
+  {
+    "id": "X1-8",
+    "title": "X1-8（要確認・低）polish-space/tex/macros.tex:178-183、197-200",
+    "reviewLine": 1444,
+    "status": "fixed",
+    "reason": "bSigma・bDelta・lSigma・lDeltaにもUnicodeの明示PDF bookmarkメタデータを揃え、推論への依存を減らした。数学的記号の定義は変更していない。",
+    "evidence": ["polish-space/tex/macros.tex"]
+  },
+  {
+    "id": "X1-9",
+    "title": "X1-9（保守性・微）polish-space/tex/macros.tex:556-557",
+    "reviewLine": 1459,
+    "status": "fixed",
+    "reason": "原稿・メタデータ・他マクロからの利用がないCylinderBallRadiusを検索で確認し、未使用定義と索引コメントを削除。",
+    "evidence": ["polish-space/tex/macros.tex"]
+  },
+  {
+    "id": "X1-10",
+    "title": "X1-10（保守性・低）polish-space/tex/ams-numeric.csl:11、138",
+    "reviewLine": 1472,
+    "status": "fixed",
+    "reason": "CSLのidを共有資産の公開リポジトリのファイルURLに変更。誌名短縮の選択自体は維持し、今回の対象外である文献データは変更しない。",
+    "evidence": ["polish-space/tex/ams-numeric.csl"]
+  },
+  {
+    "id": "X1-11",
+    "title": "X1-11（性能・低）tools/pandoc/templates/font-settings.latex:100-109",
+    "reviewLine": 1486,
+    "status": "no-change",
+    "reason": "計測時の候補という提案であり、現行の正しさの欠陥ではない。英語のmicrotypeと日本語の無効化を維持し、速度目的で最終組版を変更しない。",
+    "evidence": ["tools/pandoc/templates/font-settings.latex", "tools/prepare_pandoc_templates.py"]
+  },
+  {
+    "id": "M-2",
+    "title": "**M-2**: PDF ターゲットが `Makefile` 自体に依存するため、Makefile を触るたびに全書が再ビルドされる。依存に版数スタンプ等を挟む手はあるが、現状でも実害は「待ち時間」にとどまる。",
+    "reviewLine": 58,
+    "status": "no-change",
+    "reason": "Makefileの依存はビルドルールやフラグ変更を既存成果物へ確実に反映するために保持する。規則の影響を別stampで代用する提案は待ち時間の最適化候補で、現行の正しさの欠陥ではない。今回の検証でもこの依存により必要な再生成が実行された。",
+    "evidence": ["Makefile"]
+  },
+  {
+    "id": "M-3",
+    "title": "**M-3**: `books_mk.py` は make 起動ごとに全章の全文を読んで formalization-skip 注釈を走査する（2書で約5.5MB）。実測上の問題にはなりにくいが、マニフェストに持たせれば消える走査ではある。",
+    "reviewLine": 59,
+    "status": "no-change",
+    "reason": "現行ではbooks_mk.pyの結果をbuild/books.mkへ保存し、manifest・Leanファイル・生成ツールまたはファイル集合が変わった場合に再生成する。Make起動ごとに全章を再走査するという前提は当てはまらず、make list-books再実行でも生成処理が起動しないことを確認。",
+    "evidence": ["Makefile", "tools/books_mk.py"]
+  },
+  {
+    "id": "M-4",
+    "title": "**M-4**: `latex_lock.py` には保持中の heartbeat がなく、1時間を超える正当な保持でも max-age で stale 回収されうる。コメントで認識済みの割り切りで、単一パスが1時間を超えることは通常ないため実害は低い。",
+    "reviewLine": 60,
+    "status": "no-change",
+    "reason": "1時間を超える単一保持の可能性は既存コメントで認識された運用上の選択で、LATEX_LOCK_MAX_AGE_SECONDSによる調整も可能。今回の全3書debug検証は約2分で完了した。通常の保持時間に対するPID再利用の回復策として現行値を維持する。",
+    "evidence": ["tools/latex_lock.py", "tests/test_latex_lock.py"]
+  },
+  {
+    "id": "M-5",
+    "title": "**M-5（要確認）**: ルート README の Codex 節に「without installing Pandoc 3.9.0.2」と旧い版数らしき記述がある（mise.toml の現行ピンは 3.12.1）。Codex プロファイルが使うシステム Pandoc の版を指すなら誤りではないが、読み手には判別できない。",
+    "reviewLine": 61,
+    "status": "fixed",
+    "reason": "システムPandoc利用というプロファイルの意図を保ち、古い固定版数からmise-pinned Pandocという比較対象へ説明を修正。",
+    "evidence": ["README.md"]
+  }
+]

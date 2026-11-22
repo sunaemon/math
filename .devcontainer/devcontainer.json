@@ -1,6 +1,6 @@
 {
   "name": "math",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "image": "mcr.microsoft.com/devcontainers/base:3.0.10-noble",
   "features": {
     "ghcr.io/devcontainers/features/git:1": {}
   },

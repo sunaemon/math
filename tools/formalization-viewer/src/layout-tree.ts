@@ -8,7 +8,7 @@
 // its own. The stateful glue (persisting the tree, rendering it to DOM, drag
 // and drop) stays in app.ts and imports these.
 
-export const PANE_NAMES = ["pdf", "md", "lean", "tex", "infoview"];
+export const PANE_NAMES = ["pdf", "pdf-peer", "md", "lean", "tex", "infoview"];
 
 export interface LayoutNode {
   pane?: string;
@@ -20,7 +20,7 @@ export interface LayoutNode {
 export function defaultTree(): LayoutNode | null {
   return makeSplit(
     "row",
-    PANE_NAMES.filter((name) => name !== "tex"),
+    PANE_NAMES.filter((name) => name !== "tex" && name !== "pdf-peer"),
   );
 }
 
@@ -85,7 +85,7 @@ export function removeLeaf(node: LayoutNode | null, pane: string): LayoutNode | 
     const kept = removeLeaf(child, pane);
     if (kept) {
       kids.push(kept);
-      ratios.push((node.ratios ?? [])[i]);
+      ratios.push((node.ratios ?? [])[i] ?? 1);
     }
   });
   if (kids.length === 0) return null;
@@ -114,11 +114,11 @@ export function flattenSameDir(node: LayoutNode | null): LayoutNode | null {
     if (f && f.dir === node.dir) {
       (f.children ?? []).forEach((k, j) => {
         kids.push(k);
-        ratios.push((f.ratios ?? [])[j]);
+        ratios.push((f.ratios ?? [])[j] ?? 1);
       });
     } else if (f) {
       kids.push(f);
-      ratios.push((node.ratios ?? [])[i]);
+      ratios.push((node.ratios ?? [])[i] ?? 1);
     }
   });
   return { dir: node.dir, children: kids, ratios };

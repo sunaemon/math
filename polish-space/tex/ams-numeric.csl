@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adapted from CSL's american-mathematical-society-numeric.csl (2025-12-16).
+     Formatting checked against AMS amsplain.bst and the Author Handbook,
+     chapter 2, section 7. Bibliographic language is independent of book language.
+     Local changes: alphabetical order; natural author names; italic titles;
+     volume (year), issue, pages; complete collection metadata and online links.
+     Upstream attribution and CC BY-SA 3.0 license are retained below. -->
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0"
+       default-locale="en-US" page-range-format="expanded" demote-non-dropping-particle="never">
+  <info>
+    <title>Polish Space — AMS numeric</title>
+    <title-short>AMS</title-short>
+    <id>https://github.com/sunaemon/math/blob/main/polish-space/tex/ams-numeric.csl</id>
+    <link href="http://www.zotero.org/styles/american-mathematical-society-numeric" rel="template"/>
+    <link href="http://www.zotero.org/styles/elsevier-with-titles" rel="template"/>
+    <link href="https://www.ams.org/arc/styleguide" rel="documentation"/>
+    <link href="https://mirrors.ctan.org/biblio/bibtex/contrib/misc/amsplain.bst" rel="documentation"/>
+    <author>
+      <name>American Mathematical Society</name>
+      <uri>https://www.ams.org</uri>
+      <email>tech-support@ams.org</email>
+    </author>
+    <contributor>
+      <name>Lucian Chauvin</name>
+      <uri>https://lucianchauvin.com</uri>
+      <email>me@lucianchauvin.com</email>
+    </contributor>
+    <category citation-format="numeric"/>
+    <category field="math"/>
+    <updated>2026-10-18T00:00:00+09:00</updated>
+    <rights license="http://creativecommons.org/licenses/by-sa/3.0/">This work is licensed under a Creative Commons Attribution-ShareAlike 3.0 License</rights>
+  </info>
+  <!-- Pandoc passes the document's ja-JP locale to citeproc even when the
+       style has default-locale="en-US". Override bibliographic terms explicitly. -->
+  <locale>
+    <style-options punctuation-in-quote="true"/>
+    <terms>
+      <term name="and">and</term>
+      <term name="editor" form="short"><single>ed.</single><multiple>eds.</multiple></term>
+      <term name="edition" form="short">ed.</term>
+      <term name="volume" form="short"><single>vol.</single><multiple>vols.</multiple></term>
+      <term name="issue" form="short"><single>no.</single><multiple>nos.</multiple></term>
+      <term name="page" form="short"><single>p.</single><multiple>pp.</multiple></term>
+      <term name="chapter" form="short"><single>ch.</single><multiple>chs.</multiple></term>
+      <term name="section" form="short"><single>sec.</single><multiple>secs.</multiple></term>
+      <term name="open-quote">“</term>
+      <term name="close-quote">”</term>
+      <term name="open-inner-quote">‘</term>
+      <term name="close-inner-quote">’</term>
+    </terms>
+  </locale>
+  <macro name="author">
+    <names variable="author">
+      <name initialize="false" delimiter=", " and="text" delimiter-precedes-last="contextual"/>
+      <substitute>
+        <names variable="editor">
+          <name initialize="false" delimiter=", " and="text"/>
+          <label form="short" prefix=" (" suffix=")"/>
+        </names>
+      </substitute>
+    </names>
+  </macro>
+  <macro name="editor">
+    <names variable="editor">
+      <name initialize="false" delimiter=", " and="text"/>
+      <label form="short" prefix=", "/>
+    </names>
+  </macro>
+  <macro name="year">
+    <date variable="issued"><date-part name="year"/></date>
+  </macro>
+  <macro name="publisher">
+    <group delimiter=", ">
+      <text variable="publisher"/>
+      <text variable="publisher-place"/>
+    </group>
+  </macro>
+  <macro name="edition">
+    <choose>
+      <if is-numeric="edition">
+        <group delimiter=" ">
+          <number variable="edition" form="ordinal"/>
+          <text term="edition" form="short"/>
+        </group>
+      </if>
+      <else>
+        <group delimiter=" ">
+          <text variable="edition"/>
+          <text term="edition" form="short"/>
+        </group>
+      </else>
+    </choose>
+  </macro>
+  <macro name="series">
+    <group delimiter=", ">
+      <text variable="collection-title" text-case="title"/>
+      <group delimiter=" ">
+        <label variable="volume" form="short"/>
+        <text variable="volume"/>
+      </group>
+    </group>
+  </macro>
+  <macro name="access">
+    <choose>
+      <if variable="DOI"><text variable="DOI" prefix="https://doi.org/"/></if>
+      <else><text variable="URL"/></else>
+    </choose>
+  </macro>
+  <citation collapse="citation-number">
+    <sort><key variable="citation-number"/></sort>
+    <layout prefix="[" suffix="]" delimiter=", ">
+      <group delimiter=", ">
+        <text variable="citation-number"/>
+        <group delimiter=" ">
+          <label variable="locator" form="short"/>
+          <text variable="locator"/>
+        </group>
+      </group>
+    </layout>
+  </citation>
+  <bibliography entry-spacing="0" second-field-align="flush"
+                subsequent-author-substitute="———" subsequent-author-substitute-rule="complete-all">
+    <sort>
+      <key macro="author"/>
+      <key variable="issued"/>
+      <key variable="title"/>
+    </sort>
+    <layout suffix=".">
+      <text variable="citation-number" prefix="[" suffix="]"/>
+      <group delimiter=", ">
+        <text macro="author"/>
+        <text variable="title" font-style="italic"/>
+        <choose>
+          <if type="article-journal">
+            <group delimiter=" ">
+              <text variable="container-title" form="short"/>
+              <text variable="volume" font-weight="bold"/>
+              <text macro="year" prefix="(" suffix=")"/>
+            </group>
+            <group delimiter=" ">
+              <label variable="issue" form="short"/>
+              <text variable="issue"/>
+            </group>
+            <text variable="page"/>
+          </if>
+          <else-if type="chapter paper-conference" match="any">
+            <group delimiter=" ">
+              <text variable="container-title" text-case="title"/>
+              <text macro="editor" prefix="(" suffix=")"/>
+            </group>
+            <text macro="series"/>
+            <text macro="publisher"/>
+            <text macro="edition"/>
+            <text macro="year"/>
+            <group delimiter=" ">
+              <label variable="page" form="short"/>
+              <text variable="page"/>
+            </group>
+          </else-if>
+          <else-if type="report">
+            <group delimiter=" ">
+              <text variable="genre"/>
+              <text variable="number"/>
+            </group>
+            <text macro="publisher"/>
+            <text macro="year"/>
+          </else-if>
+          <else>
+            <text macro="edition"/>
+            <text macro="series"/>
+            <text variable="genre"/>
+            <text macro="publisher"/>
+            <text macro="year"/>
+          </else>
+        </choose>
+        <text variable="note"/>
+        <text macro="access"/>
+      </group>
+    </layout>
+  </bibliography>
+</style>

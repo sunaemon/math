@@ -21,17 +21,16 @@ the coverage, and the report covers every book source those markers reference.
 
 A unit can also be marked *exempt* — intentionally out of formalization scope
 rather than a missing proof. Exempt units never appear in the gap list. A unit
-is exempt when its environment is a default-exempt kind (recall/remark/example/
-fact: these recall or illustrate rather than prove) or when an author annotation
-in the book source opts it out:
+is exempt only when an explicit author annotation in the book source opts it out.
+Environment names such as example or remark do not determine mathematical scope:
 
     <!-- formalization: skip (cited to Kechris 1995) -->     # next unit
     <!-- formalization: skip-begin (chapter overview) -->    # ... region ...
     <!-- formalization: skip-end -->
-    <!-- formalization: require -->                          # force a default-exempt kind in scope
+    <!-- formalization: require -->                          # override a skip region
 
-These ride in HTML comments, which pandoc drops, so they never render. An actual
-booklink anchor always wins: a formalized unit stays "covered" even if annotated.
+These ride in HTML comments, which pandoc drops, so they never render. Partial
+skip regions exclude only their own content, never the rest of a mixed unit.
 
 A `skip` must not contain any booklinked span, whether it is a bare single-block
 `skip` or a `skip-begin`/`skip-end` region: a skip declares prose deliberately
@@ -54,11 +53,12 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import booklink_sourcemap as bk
+from formalization_annotations import FormalizationAnnotation, parse_formalization_scope
 
 
 @dataclass
@@ -127,6 +127,15 @@ def covered_spans_by_source(root: Path, lean_files: list[Path]) -> dict[str, lis
     spans: dict[str, list[tuple[int, int]]] = {}
     for entry in source_map["entries"]:
         match = entry.get("match", {})
+        source = match.get("source")
+        if not isinstance(source, str):
+            lean_source = entry.get("lean", {}).get("source")
+            book_source = entry.get("booklink", {}).get("source")
+            if isinstance(lean_source, str) and isinstance(book_source, str):
+                source = str(root / bk.book_src_root(lean_source) / book_source)
+        if isinstance(source, str):
+            # Failed selectors must remain visible as zero-coverage chapters.
+            spans.setdefault(source, [])
         # A `statement` target attaches its best candidate's offsets even when the
         # title only matched weakly or did not resolve at all (match_statement in
         # booklink_sourcemap), unlike the prose path which nulls offsets on a miss.
@@ -135,7 +144,6 @@ def covered_spans_by_source(root: Path, lean_files: list[Path]) -> dict[str, lis
         # real gap. Only genuinely resolved matches (matched/weak) count.
         if match.get("status") not in ("matched", "weak"):
             continue
-        source = match.get("source")
         start = match.get("startOffset")
         end = match.get("endOffset")
         if source is None or start is None or end is None:
@@ -145,36 +153,40 @@ def covered_spans_by_source(root: Path, lean_files: list[Path]) -> dict[str, lis
 
 
 def check_decl_target_multiplicity(lean_files: list[Path]) -> None:
-    """A Lean declaration may carry at most one `statement` and at most one
-    `proof` booklink marker. The viewer highlights a `statement` marker over the
-    declaration's signature and a `proof` marker over its body; two markers of the
-    same target would highlight the same range, so the split is only well defined
-    when each target appears once. `prose` markers are exempt — one declaration may
-    legitimately anchor several prose passages. Raise (exit 2) on a violation."""
+    """Reject duplicate links, while allowing a declaration to serve several passages.
+
+    The viewer determines the signature/body span independently for each entry.
+    Several proof paragraphs, or statements in different chapters, can therefore
+    share a declaration without making that split ambiguous. Only repeated
+    selectors for the same source and target are redundant. Preserve the existing
+    allowance for prose links. Raise (exit 2) on duplicate statement/proof links.
+    """
     for lean_file in lean_files:
-        per_decl: dict[tuple[str | None, int], dict[str, list[int]]] = {}
+        seen: dict[tuple, int] = {}
         for marker in bk.parse_lean_markers(lean_file):
             target = marker.data.get("target")
             if marker.decl_line is None or target not in {"statement", "proof"}:
                 continue
-            slot = per_decl.setdefault((marker.decl_name, marker.decl_line), {})
-            slot.setdefault(target, []).append(marker.marker_line)
-        for (decl_name, decl_line), targets in per_decl.items():
-            for target, marker_lines in targets.items():
-                if len(marker_lines) > 1:
-                    locs = ", ".join(f"{lean_file}:{line}" for line in marker_lines)
-                    raise ValueError(
-                        f"{lean_file}: declaration '{decl_name}' (line {decl_line}) has "
-                        f"{len(marker_lines)} `target: {target}` booklink markers ({locs}); "
-                        "a declaration may carry at most one `statement` and one `proof` "
-                        "marker so the statement/proof highlight split is unambiguous"
-                    )
+            fields = (
+                ("source", "kind", "title")
+                if target == "statement" and "title" in marker.data
+                else ("source", "kind", "excerpt")
+            )
+            selector = tuple(" ".join(str(marker.data.get(field, "")).split()) for field in fields)
+            key = (marker.decl_name, marker.decl_line, target, selector)
+            if key in seen:
+                raise ValueError(
+                    f"{lean_file}: declaration '{marker.decl_name}' (line {marker.decl_line}) has "
+                    f"duplicate `target: {target}` links at lines {seen[key]} and {marker.marker_line}; "
+                    "keep one link for each source passage"
+                )
+            seen[key] = marker.marker_line
 
 
 _STRUCTURAL_LINE = re.compile(
-    r"^\s*(#|\\begin\{(mathmeta|center|tikzpicture|figure|table|proof|enumerate|itemize)\}"
-    r"|\\end\{(mathmeta|center|tikzpicture|figure|table|proof|enumerate|itemize)\}"
-    r"|\\define\{|\\forward\{|\\index\{|\\label\{|\||!\[|:--|\\node|child\b)"
+    r"^\s*(#|\\begin\{(mathmeta|center|tikzpicture|figure|table|proof|enumerate|itemize|samepage)\}"
+    r"|\\end\{(mathmeta|center|tikzpicture|figure|table|proof|enumerate|itemize|samepage)\}"
+    r"|\\part\*?\{|\\paragraph\*?\{|\\define\{|\\forward\{|\\index\{|\\label\{|\||!\[|:--|\\node|child\b)"
 )
 
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -189,82 +201,40 @@ def is_structural(text: str) -> bool:
     `formalization-scope` annotations parsed below — they steer coverage, they
     are not prose to cover)."""
     without_comments = _HTML_COMMENT.sub("", text)
+    without_comments = re.sub(r"\\begin\{mathmeta\}.*?\\end\{mathmeta\}", "", without_comments, flags=re.DOTALL)
+    without_comments = re.sub(
+        r"\\(?:begingroup|endgroup|small|cleardoublepage|phantomsection|printindex)\b"
+        r"|\\addcontentsline\{[^{}]*\}\{[^{}]*\}\{[^{}]*\}",
+        "",
+        without_comments,
+    )
     lines = [ln for ln in without_comments.splitlines() if ln.strip()]
     if not lines:
         return True
     return all(_STRUCTURAL_LINE.match(ln) for ln in lines)
 
 
-# Statement kinds that recall or illustrate rather than prove: by convention they
-# are out of formalization scope unless an explicit `require` annotation opts one
-# back in. This is what lets `fact*`/`recall*`-style background stop polluting the
-# real-gap report. See AGENTS.md "Lean Formalization Workflow" scope guidance.
-DEFAULT_EXEMPT_KINDS = {"recall", "remark", "example", "fact"}
-
-_DIRECTIVES = {"skip", "skip-begin", "skip-end", "require"}
-
-# Author-placed scope annotations, e.g.
-#   <!-- formalization: skip (cited to Kechris 1995) -->
-#   <!-- formalization: skip-begin (chapter overview) --> ... <!-- formalization: skip-end -->
-#   <!-- formalization: require -->        (force a default-exempt kind in scope)
-# Carried as HTML comments because pandoc's LaTeX writer drops them, so they never
-# render and need no book-filter change (preface.md already uses HTML comments).
-_SCOPE_ANNOTATION = re.compile(
-    r"<!--\s*formalization:\s*([A-Za-z-]+)\b[ \t]*(.*?)\s*-->",
-    re.DOTALL,
-)
-
-
-@dataclass
-class _PointAnnotation:
-    start_offset: int  # offset of the comment's `<`
-    end_offset: int  # offset just past the comment
-    directive: str  # "skip" or "require"
-    reason: str | None
-
-
-def _clean_reason(raw: str) -> str | None:
-    reason = raw.strip().strip("()").strip(" -—–:").strip()
-    return reason or None
-
-
 class ScopeResolver:
-    """Resolves each book unit to in-scope or exempt, from default-exempt kinds
-    plus author `formalization:` annotations (single-unit skip/require and
+    """Resolves each book unit to in-scope or exempt, from explicit author `formalization:` annotations (single-unit skip/require and
     skip-begin/skip-end regions)."""
 
     def __init__(self, text: str, source: str):
         self.text = text
-        self.regions: list[tuple[int, int, str | None]] = []
-        self.points: list[_PointAnnotation] = []
-        stack: list[tuple[int, str | None]] = []
-        for m in _SCOPE_ANNOTATION.finditer(text):
-            directive = m.group(1).lower()
-            reason = _clean_reason(m.group(2))
-            if directive not in _DIRECTIVES:
-                raise ValueError(
-                    f"{source}: unknown formalization directive '{directive}' "
-                    f"(expected one of {', '.join(sorted(_DIRECTIVES))})"
-                )
-            if directive == "skip-begin":
-                stack.append((m.end(), reason))
-            elif directive == "skip-end":
-                if not stack:
-                    raise ValueError(f"{source}: 'formalization: skip-end' without a matching skip-begin")
-                start, start_reason = stack.pop()
-                self.regions.append((start, m.start(), start_reason or reason))
-            else:  # skip | require attach to the following unit
-                self.points.append(_PointAnnotation(m.start(), m.end(), directive, reason))
-        if stack:
-            raise ValueError(f"{source}: unclosed 'formalization: skip-begin' region")
+        scope = parse_formalization_scope(text, source)
+        self.regions = [
+            (region.opening.end_offset, region.closing.start_offset, region.reason) for region in scope.regions
+        ]
+        self.points = [
+            annotation for annotation in scope.annotations if annotation.directive not in {"skip-begin", "skip-end"}
+        ]
 
-    def _governing_point(self, unit_start: int, unit_end: int) -> _PointAnnotation | None:
+    def _governing_point(self, unit_start: int, unit_end: int) -> FormalizationAnnotation | None:
         """The annotation that governs a unit: either it immediately precedes the
         unit (only whitespace between the comment and the unit), or it sits at the
         very start of the unit (a leading comment in the same block, only
         whitespace before it). The latter is the natural authoring form
         `<!-- formalization: skip -->` on the line directly above prose."""
-        best: _PointAnnotation | None = None
+        best: FormalizationAnnotation | None = None
         for ann in self.points:
             precedes = ann.end_offset <= unit_start and not self.text[ann.end_offset : unit_start].strip()
             leads = (
@@ -272,26 +242,36 @@ class ScopeResolver:
                 and ann.end_offset <= unit_end
                 and not self.text[unit_start : ann.start_offset].strip()
             )
-            if precedes or leads:
-                if best is None or ann.end_offset > best.end_offset:
-                    best = ann
+            if (precedes or leads) and (best is None or ann.end_offset > best.end_offset):
+                best = ann
         return best
 
-    def classify(self, unit_start: int, unit_end: int, kind: str) -> tuple[bool, str | None]:
+    def classify(self, unit_start: int, unit_end: int) -> tuple[bool, str | None]:
         """Return (exempt, reason). An explicit `require` always wins."""
         point = self._governing_point(unit_start, unit_end)
         if point is not None and point.directive == "require":
             return False, None
         if point is not None and point.directive == "skip":
             return True, point.reason or "explicit skip"
-        for start, end, reason in self.regions:
-            if start < unit_end and unit_start < end:
-                return True, reason or "explicit skip region"
-        if kind in DEFAULT_EXEMPT_KINDS:
-            return True, f"default-exempt kind: {kind}"
+        skipped = self.skipped_spans(unit_start, unit_end)
+        if skipped and not any(
+            is_substantive_gap(self.text[a:b]) for a, b in complement(unit_start, unit_end, skipped)
+        ):
+            reasons = [
+                reason or "explicit skip region" for a, b, reason in self.regions if a < unit_end and unit_start < b
+            ]
+            return True, "; ".join(dict.fromkeys(reasons))
         return False, None
 
-    def governing_skip_point(self, unit_start: int, unit_end: int) -> _PointAnnotation | None:
+    def skipped_spans(self, start: int, end: int) -> list[tuple[int, int]]:
+        point = self._governing_point(start, end)
+        if point and point.directive == "require":
+            return []
+        if point and point.directive == "skip":
+            return [(start, end)]
+        return merge_intervals([(max(start, a), min(end, b)) for a, b, _ in self.regions if a < end and start < b])
+
+    def governing_skip_point(self, unit_start: int, unit_end: int) -> FormalizationAnnotation | None:
         """The bare `skip` point governing this unit, if any. A `require` override
         yields None, since that unit is forced in scope. A bare `skip` is shorthand
         for a one-block skip region, so the no-anchor rule in
@@ -337,7 +317,9 @@ def snippet_of(text: str, limit: int = 90) -> str:
 # delimiter or a bare list marker does not.
 _GAP_MARKUP = re.compile(
     r"\\(?:begin|end)\{[A-Za-z*]+\}(?:\[[^\]]*\])?"  # \begin{proof}[Proof], \end{enumerate}
+    r"|\\(?:termref|TermRef|index)\{[^{}]*\}"  # index-only metadata
     r"|\\item\b"  # list-item command
+    r"|^[ \t]*#{1,6}[ \t]+[^\n]*(?:\n|$)"  # standalone Markdown heading
     r"|^[ \t]*(?:[*+-]|\d+[.)])[ \t]+",  # Markdown bullet / ordered-list markers
     re.MULTILINE,
 )
@@ -350,6 +332,8 @@ def is_substantive_gap(seg: str) -> bool:
     counts as content as soon as it has one alphanumeric character, so a dropped
     word like "The" is a gap while a bare "*"/"2." marker, a leftover
     `\\end{proof}`, or punctuation between two anchors is not."""
+    seg = _HTML_COMMENT.sub("", seg)
+    seg = re.sub(r"\\begin\{mathmeta\}.*?\\end\{mathmeta\}", "", seg, flags=re.DOTALL)
     return bool(re.search(r"[^\W_]", _GAP_MARKUP.sub("", seg)))
 
 
@@ -362,19 +346,15 @@ def build_unit(
     offsets: list[int],
     covered: list[tuple[int, int]],
     resolver: "ScopeResolver",
-    scope_kind: str,
 ) -> Unit:
     body = text[start:end]
     total = end - start
     covered_chars = overlap_length(start, end, covered)
-    real_gaps = [(a, b) for a, b in complement(start, end, covered) if is_substantive_gap(text[a:b])]
-    exempt, exempt_reason = resolver.classify(start, end, scope_kind)
+    effective = merge_intervals([*covered, *resolver.skipped_spans(start, end)])
+    real_gaps = [(a, b) for a, b in complement(start, end, effective) if is_substantive_gap(text[a:b])]
+    exempt, exempt_reason = resolver.classify(start, end)
     if covered_chars > 0 and not real_gaps:
-        # Fully anchored (only whitespace/markup lies outside the anchors): keep it
-        # covered even if also marked exempt — a booklink anchor is stronger
-        # evidence than a scope annotation. This now bites only for default-exempt
-        # kinds (recall/remark/example/fact); an anchor inside a `skip` block or
-        # region is pre-checked and raises.
+        # All in-scope content is anchored; explicit skip regions are checked separately.
         status = "covered"
         exempt_reason = None
     elif exempt:
@@ -404,7 +384,12 @@ def build_unit(
         total_chars=total,
         covered_chars=covered_chars,
         status=status,
-        structural=is_structural(body) if kind == "prose" else False,
+        structural=(
+            is_structural(body)
+            or bool((point := resolver._governing_point(start, end)) and point.directive == "structural")
+        )
+        if kind == "prose"
+        else False,
         snippet=snippet_of(body),
         exempt_reason=exempt_reason if status == "exempt" else None,
         gaps=gaps,
@@ -466,7 +451,9 @@ def check_skip_blocks_unlinked(
                 )
 
 
-def check_shading_skips_unlinked(path: Path, covered: list[tuple[int, int]], offsets: list[int]) -> None:
+def check_shading_skips_unlinked(
+    path: Path, covered: list[tuple[int, int]], offsets: list[int], *, document: bk.SourceDocument | None = None
+) -> None:
     """Enforce that no *shading* skip-span covers a booklink anchor.
 
     The checks above model a skip's extent with blank-line paragraph blocks. The
@@ -481,7 +468,8 @@ def check_shading_skips_unlinked(path: Path, covered: list[tuple[int, int]], off
     lockstep: whatever the PDF would gray must not be formalized. The fix for a
     ballooned span is to move the skip *inside* the environment (so it governs only
     the intended block); otherwise narrow the skip or drop the booklink."""
-    for span in bk.parse_skip_spans(path):
+    skip_spans = document.skips if document is not None else bk.parse_skip_spans(path, offsets=offsets)
+    for span in skip_spans:
         a, b = span["startOffset"], span["endOffset"]
         for c0, c1 in covered:
             lo, hi = max(a, c0), min(b, c1)
@@ -496,12 +484,16 @@ def check_shading_skips_unlinked(path: Path, covered: list[tuple[int, int]], off
                 )
 
 
-def units_for_source(path: Path, covered: list[tuple[int, int]]) -> list[Unit]:
-    text = path.read_text(encoding="utf-8")
-    offsets = bk.line_offsets(text)
+def units_for_source(
+    path: Path, covered: list[tuple[int, int]], *, document: bk.SourceDocument | None = None
+) -> list[Unit]:
+    if document is None:
+        document = bk.SourceDocument(path, path.read_text(encoding="utf-8"))
+    text = document.text
+    offsets = document.offsets
     resolver = ScopeResolver(text, str(path))
     check_skip_regions_unlinked(resolver, covered, offsets, str(path))
-    statements = bk.parse_book_statements(path)
+    statements = document.statements
     stmt_ranges = [(s.start_offset, s.end_offset) for s in statements]
 
     units: list[Unit] = []
@@ -517,17 +509,19 @@ def units_for_source(path: Path, covered: list[tuple[int, int]]) -> list[Unit]:
                 offsets,
                 covered,
                 resolver,
-                stmt.kind,
             )
         )
-    for start, end, _ in paragraph_blocks(text):
-        if any(a <= start < b for a, b in stmt_ranges):
-            continue  # belongs to a statement environment, already represented
-        units.append(build_unit("prose", None, start, end, text, offsets, covered, resolver, "prose"))
+    statement_intervals = merge_intervals(stmt_ranges)
+    for start, end, _body in paragraph_blocks(text):
+        # A block may contain prose before/after a statement without blank lines.
+        # Subtract the statement, rather than double-counting it or losing the tail.
+        for part_start, part_end in complement(start, end, statement_intervals):
+            if text[part_start:part_end].strip():
+                units.append(build_unit("prose", None, part_start, part_end, text, offsets, covered, resolver))
 
     units.sort(key=lambda u: u.start_offset)
     check_skip_blocks_unlinked(resolver, units, covered, offsets, str(path))
-    check_shading_skips_unlinked(path, covered, offsets)
+    check_shading_skips_unlinked(path, covered, offsets, document=document)
     return units
 
 
@@ -574,7 +568,7 @@ def main(argv: list[str]) -> int:
         if not args.all:
             units = [u for u in units if not u.structural]
 
-        def stat(kind: str, status: str) -> int:
+        def stat(kind: str, status: str, units=units) -> int:
             return sum(1 for u in units if u.kind == kind and u.status == status)
 
         # "flagged" is the real-gap list: uncovered/partial, never exempt.

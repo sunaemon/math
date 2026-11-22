@@ -8,7 +8,6 @@ Run with `python -m unittest` (stdlib only, no pytest).
 """
 
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -16,10 +15,10 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(REPO_ROOT, "tools"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-import vendor_notices as vn  # noqa: E402
+import vendor_notices as vn
 
 
 class NoticesUpToDateTest(unittest.TestCase):

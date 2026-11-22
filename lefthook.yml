@@ -36,6 +36,7 @@ lint:
   commands:
     book-filter: { run: make lint-book }
     tsc: { run: make lint-tsc }
+    definitions: { run: make lint-definitions }
     prettier: { run: make lint-prettier }
     ruff: { run: make lint-ruff }
     fourmolu: { run: make lint-fourmolu }
@@ -44,6 +45,7 @@ lint:
     shell: { run: make lint-shell }
     taplo: { run: make lint-taplo }
     actionlint: { run: make lint-actionlint }
+    translation: { run: make lint-translation }
 
 # Write mode: formatters plus auto-fixable lint rules. hlint and actionlint have
 # no fix mode, so they reuse the check-only subtargets.
@@ -70,14 +72,3 @@ format:
     fourmolu: { run: make fix-fourmolu }
     shfmt: { run: make format-shfmt }
     taplo: { run: make fix-taplo }
-
-# Block direct pushes to main (local guard; bypass with `git push --no-verify`).
-# lefthook forwards git's pre-push stdin to the script, which inspects the
-# destination refs. Real enforcement would be server-side branch protection.
-pre-push:
-  commands:
-    no-direct-main:
-      # use_stdin forwards git's pre-push ref lines to the script; without it
-      # lefthook swallows stdin and the guard would read nothing (fail open).
-      use_stdin: true
-      run: bash tools/git-hooks/pre-push-guard.sh

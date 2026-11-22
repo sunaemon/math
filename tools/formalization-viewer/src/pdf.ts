@@ -1,3 +1,32 @@
+import { documentWorkerApi } from "./pdf-worker.js";
+import { t } from "./i18n.js";
+import { trustedScriptURL } from "./safe-script-url.js";
+import { setHTML } from "./safe-html.js";
+import { pdfIncludesSource } from "./pdf-preview.js";
+import { pdfDestination } from "./pdf-destinations.js";
+import { resolveDefinition, type DefinitionRegistry } from "./definition-registry.js";
+import { paneViewportTop, paneViewportHeight, scrollPane } from "./pane-scroll.js";
+import { pdfLoadStatus, pdfByteProgress } from "./loading-progress.js";
+import { destinationChapter, preferredDestination, termTarget } from "./pdf-chapter.js";
+import { computeDocumentCrop, documentPageLines, appendPageLinks, preparePdf, paintPdfPage } from "./pdf-document.js";
+import {
+  captureScrollAnchor,
+  destinationToPoint,
+  makePageLineCache,
+  nearestEntryIndex,
+  nearestSkipLocation,
+  renderEntryBandOverlays,
+  renderSkipBandOverlays,
+  renderVisiblePages,
+  restoreScrollAnchor,
+  scrollToEntryTarget,
+  scrollToSkipRange,
+} from "./pdf-pane.js";
+import { dismissTermPopup } from "./term-preview.js";
+import { flashPdfDestination } from "./pdf-destination-highlight.js";
+import { renderedPdfPath } from "./appearance.js";
+import { lightPdfPath } from "./pdf-theme.js";
+import { type PdfScrollAnchor } from "./permalink.js";
 // The PDF pane: loads the book PDF with pdf.js, lazily rasterizes visible
 // pages (cropped to the text column and zoomed to the pane), resolves each
 // booklink's page/offset target, and scrolls to entries. Depends one-way on
@@ -7,24 +36,8 @@
 
 import { state, els, project } from "./state.js";
 import { escapeHtml, repoUrl, reportError } from "./util.js";
-import { visiblePaneNames } from "./sync.js";
-import { markerStyle } from "./source-render.js";
-import {
-  type LineBox,
-  type TextRun,
-  type FlowSegment,
-  groupTextLines,
-  SNAP_TOL,
-  snapBandTop,
-  snapBandBottom,
-  skipBandSegments,
-  lineIndexAt,
-  lineIndexBelow,
-  mainLineBelow,
-  endLineResolve,
-  endLineBottom,
-  flowBandSegments,
-} from "./skip-bands.js";
+import { suppressPaneSync, visiblePaneNames, type SkipSyncLocation } from "./sync.js";
+import { type PageLineCache, resolveEntryFlowSegments, resolveSkipFlowSegments } from "./skip-bands.js";
 
 const PDFJS_MODULE_URL = new URL("../vendor/pdfjs/pdf.mjs", import.meta.url).toString();
 const PDFJS_WORKER_URL = new URL("../vendor/pdfjs/pdf.worker.mjs", import.meta.url).toString();
@@ -52,12 +65,19 @@ export function setOnPdfLoadFailed(fn: (path: string, error: unknown) => string 
   onPdfLoadFailed = fn;
 }
 
+let pdfGeometryFrame = 0;
 export function refreshPdfLayoutGeometry(): void {
   if (!state.pdf.document) return;
-  window.requestAnimationFrame(() => {
-    renderVisiblePdfPages();
-    resolvePdfTargets(state.pdf.renderToken);
-  });
+  if (!pdfGeometryFrame)
+    pdfGeometryFrame = window.requestAnimationFrame(() => {
+      pdfGeometryFrame = 0;
+      if (!state.pdf.document) return;
+      // Page destinations and band fractions are independent of CSS width.
+      renderVisiblePdfPages();
+      renderSkipBands();
+      renderEntryBands();
+      onPdfTargetsResolved();
+    });
   schedulePdfRepaint();
 }
 
@@ -111,7 +131,17 @@ export function pdfRank(path: string): number {
 }
 
 export function pdfLabel(path: string): string {
-  return path.split("/").pop() || path;
+  const file = path.split(/[?#]/, 1)[0].split("/").pop() || path;
+  const debug = project.pdf?.split("/").pop();
+  const stem = debug?.replace(/-debug\.pdf$/, "");
+  if (stem && file.startsWith(`${stem}-preview-`) && file.endsWith(".pdf")) {
+    const chapter = file.slice(`${stem}-preview-`.length, -4);
+    return project.previewSections?.[chapter] || project.chapterTitles?.[chapter] || chapter.replace(/-/g, " ");
+  }
+  if (file === debug) return t("Full book · Annotated");
+  if (stem && file === `${stem}.pdf`) return t("Full book · Release");
+  if (stem && file === `${stem}-diff.pdf`) return t("Full book · Changes");
+  return file;
 }
 
 export function pdfChoices(
@@ -122,11 +152,16 @@ export function pdfChoices(
   const override = params.get("pdf") || "";
   // The server (live and static dist) injects "pdfs": every PDF that actually
   // exists under the mount, so the dropdown never offers a 404. Per-chapter
-  // preview artifacts are dropped here; the app adds one dynamic "Chapter
-  // preview" entry that follows the viewed chapter. Fall back to the debug PDF
-  // for an older manifest without the list. Labels stay raw file names, matching
-  // the Markdown/Lean source-pane selectors.
-  const served = (Array.isArray(project.pdfs) ? project.pdfs : []).filter((rel) => !rel.includes("-preview"));
+  // preview artifacts are dropped here; the app adds chapter and back-matter
+  // choices that the live server builds on demand. Fall back to the debug PDF
+  // for an older manifest without the list. Labels name chapters or distinguish
+  // the whole-book renders; option values remain the original PDF paths.
+  const served = (Array.isArray(project.pdfs) ? project.pdfs : []).filter(
+    (rel) => !rel.includes("-preview") && !rel.includes("-layout-") && !rel.endsWith("-dark.pdf"),
+  );
+  // The live server can build the default on demand even when only a release
+  // PDF exists. Keep it selectable so cold startup still requests the debug PDF.
+  if (!project.static && project.pdf && !served.includes(project.pdf)) served.push(project.pdf);
   if (served.length) {
     const choices = served
       .map((rel) => ({ key: rel, label: pdfLabel(rel), path: repoUrl(rel) }))
@@ -148,27 +183,49 @@ export function pdfChoices(
   return { choices, initialPath: primaryPath };
 }
 
+// PDF requests carry a cache generation (`viewer-cache`) so repeated loads
+// of the same document — switching editions, toggling the theme, changing
+// the layout — reuse the HTTP cache (the live server revalidates cheaply)
+// instead of re-downloading the whole book every time. The generation
+// advances only when the app learns the PDF bytes changed (a rebuild, via
+// notePdfContentChanged), so an in-place reload still fetches fresh bytes.
+// A `?refresh=` page parameter overrides the generation: a manual hard bust
+// that applies to every PDF at once.
+let pdfCacheGeneration = 0;
+
+export function notePdfContentChanged(): void {
+  pdfCacheGeneration += 1;
+}
+
 export function cacheBustedUrl(path: string): string {
   const url = new URL(path, window.location.href);
-  const refresh = new URLSearchParams(window.location.search).get("refresh") || String(Date.now());
+  const refresh = new URLSearchParams(window.location.search).get("refresh") || String(pdfCacheGeneration);
   url.searchParams.set("viewer-cache", refresh);
   return url.pathname + url.search + url.hash;
 }
 
+let pdfJsLoad: Promise<any> | undefined;
 export async function loadPdfJs(): Promise<any> {
   if (state.pdfjs) return state.pdfjs;
-  const pdfjs = await import(PDFJS_MODULE_URL);
-  pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
-  state.pdfjs = pdfjs;
-  return pdfjs;
+  return (pdfJsLoad ??= (async () => {
+    const pdfjs = await import(PDFJS_MODULE_URL);
+    pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+    const api = documentWorkerApi(pdfjs, () => new Worker(trustedScriptURL(PDFJS_WORKER_URL), { type: "module" }));
+    state.pdfjs = api;
+    return api;
+  })().catch((error) => {
+    pdfJsLoad = undefined;
+    throw error;
+  }));
 }
 
-export function clearPdfViewer(message: string = "Loading PDF..."): void {
+export function clearPdfViewer(message: string = t("Loading PDF...")): void {
   if (state.pdf.loadingTask) {
     state.pdf.loadingTask.destroy();
     state.pdf.loadingTask = null;
   }
   state.pdf.document = null;
+  state.pdf.loadedPath = null;
   state.pdf.currentPage = null;
   state.pdf.pageCount = null;
   state.pdf.pageStates = new Map();
@@ -177,18 +234,7 @@ export function clearPdfViewer(message: string = "Loading PDF..."): void {
   state.pdf.entryBands = [];
   state.pdf.targetPromise = null;
   state.pdf.crop = null;
-  els.pdfViewer.innerHTML = `<div class="pdf-message">${escapeHtml(message)}</div>`;
-}
-
-export function updatePdfStatus(): void {
-  if (!els.status) return;
-  const entry = state.entries[state.activeIndex];
-  const mdLine = entry?.match?.startLine || "?";
-  const texLine = entry?.texMatch?.startLine || "?";
-  const declName = entry?.lean?.declName || "entry";
-  const pdfPart =
-    state.pdf.currentPage && state.pdf.pageCount ? ` · PDF ${state.pdf.currentPage}/${state.pdf.pageCount}` : "";
-  els.status.textContent = `${declName} · MD ${mdLine} · TeX ${texLine}${pdfPart}`;
+  setHTML(els.pdfViewer, `<div class="pdf-message">${escapeHtml(message)}</div>`);
 }
 
 // The book PDF is A5 with wide print margins; in this side-by-side view the
@@ -200,110 +246,198 @@ export function updatePdfStatus(): void {
 // box over-zooms sparse pages (e.g. a short final index column would balloon).
 // We estimate the band by sampling body pages and taking the union of their text
 // extents, which lands on the geometry the preamble sets.
-export async function computeDocCrop(
-  doc: any,
-  pageWidth: number,
-  token: number,
-): Promise<{ x0: number; x1: number } | null> {
-  const total = doc.numPages;
-  const step = Math.max(1, Math.floor(total / Math.min(total, 24)));
-  let minX = Infinity;
-  let maxX = -Infinity;
-  for (let pageNumber = 1; pageNumber <= total; pageNumber += step) {
-    if (token !== state.pdf.renderToken) return null;
-    try {
-      const page = await doc.getPage(pageNumber);
-      const content = await page.getTextContent();
-      let count = 0;
-      let pMin = Infinity;
-      let pMax = -Infinity;
-      for (const item of content.items as any[]) {
-        if (!item.str || !item.str.trim()) continue;
-        count += 1;
-        const x = item.transform[4];
-        const width = typeof item.width === "number" ? item.width : 0;
-        if (x < pMin) pMin = x;
-        if (x + width > pMax) pMax = x + width;
-      }
-      // Only full body pages define the text block; skip near-empty pages so a
-      // sparse index/title page can't shrink the band.
-      if (count >= 30 && pMax > pMin) {
-        if (pMin < minX) minX = pMin;
-        if (pMax > maxX) maxX = pMax;
-      }
-    } catch {
-      // Ignore a page that fails to yield text; others still inform the band.
-    }
-  }
-  if (minX === Infinity || maxX <= minX) return null;
-  const pad = 6;
-  const x0 = Math.max(0, minX - pad);
-  const x1 = Math.min(pageWidth, maxX + pad);
-  const width = x1 - x0;
-  // Crop only if it meaningfully narrows the page but isn't suspiciously tight.
-  return width < pageWidth - 8 && width > pageWidth * 0.4 ? { x0, x1 } : null;
+export function computeDocCrop(doc: any, pageWidth: number, token: number) {
+  return computeDocumentCrop(doc, pageWidth, () => token === state.pdf.renderToken);
 }
 
 export async function renderPdfPage(pageNumber: number, token: number): Promise<void> {
   const pageState = state.pdf.pageStates.get(pageNumber);
-  if (!pageState || pageState.rendered || pageState.rendering || token !== state.pdf.renderToken) return;
+  if (
+    !pageState ||
+    (pageState.failures ?? 0) >= 3 ||
+    pageState.rendered ||
+    pageState.rendering ||
+    token !== state.pdf.renderToken
+  )
+    return;
   pageState.rendering = true;
   try {
     const page = await state.pdf.document.getPage(pageNumber);
     if (token !== state.pdf.renderToken) return;
-    const crop = state.pdf.crop;
-
-    const canvas = pageState.canvas;
-    const dpr = window.devicePixelRatio || 1;
-    const baseViewport = page.getViewport({ scale: 1 });
-    // Zoom so the cropped text column fills the pane width; only the side margins
-    // are removed, so the page keeps its full height.
-    const cropX0 = crop ? crop.x0 : 0;
-    const cropWidth = crop ? crop.x1 - crop.x0 : baseViewport.width;
-    const cssWidth = Math.max(240, pageState.el.clientWidth);
-    const scale = (cssWidth / cropWidth) * dpr;
-    // offsetX shifts the page so the crop's left edge lands at the canvas origin;
-    // the narrower canvas then clips away both side margins.
-    const viewport = page.getViewport({ scale, offsetX: -cropX0 * scale });
-    const fullHeight = baseViewport.height * scale;
-    canvas.hidden = false;
-    canvas.width = Math.floor(cropWidth * scale);
-    canvas.height = Math.floor(fullHeight);
-    canvas.style.width = "100%";
-    canvas.style.height = "auto";
-    pageState.el.style.aspectRatio = `${cropWidth * scale} / ${Math.floor(fullHeight)}`;
-
-    const context = canvas.getContext("2d");
-    if (!context) {
-      throw new Error("Failed to obtain 2D context from canvas");
-    }
-    await page.render({ canvasContext: context, viewport }).promise;
+    pageState.el.style.aspectRatio = await paintPdfPage(
+      page,
+      pageState.canvas,
+      state.pdf.crop,
+      pageState.el.clientWidth,
+    );
     if (token !== state.pdf.renderToken) return;
     pageState.rendered = true;
+    void resolvePageLinks(pageNumber, token);
   } catch (error) {
+    pageState.failures = (pageState.failures ?? 0) + 1;
     console.error("[booklink] renderPdfPage failed", { pageNumber, error });
   } finally {
     pageState.rendering = false;
   }
 }
 
+// Pages whose link annotations have been turned into overlays, for the current
+// document (cleared on every setPdf).
+const linkResolvedPages = new Set<number>();
+
+// Re-expose each PDF annotation at its original text/graphic position. Link
+// overlays scale with their page and survive text-layer repaints. Internal
+// destinations navigate within the viewer; external URLs open a tab.
+async function resolvePageLinks(pageNumber: number, token: number): Promise<void> {
+  if (linkResolvedPages.has(pageNumber)) return;
+  linkResolvedPages.add(pageNumber);
+  const pageState = state.pdf.pageStates.get(pageNumber);
+  if (!pageState || !state.pdf.document) return;
+  const page = await state.pdf.document.getPage(pageNumber);
+  if (token !== state.pdf.renderToken) return;
+  const annotations = await page.getAnnotations();
+  if (token !== state.pdf.renderToken) return;
+  const doc = state.pdf.document;
+  const path = state.pdf.loadedPath;
+  appendPageLinks(pageState.el, annotations, page.getViewport({ scale: 1 }), state.pdf.crop, scrollPdfToDestination, {
+    document: (definition) =>
+      referencePdfDocument(doc, !!path?.includes("-preview-"), repoUrl(project.pdf!), definition),
+    current: () => token === state.pdf.renderToken,
+  });
+}
+
+// Follow an internal link annotation: resolve a named destination if needed,
+// then bring its anchor to the reading line, exactly like a marker jump. A
+// term link's printed destination is its index entry; the reader almost
+// always wants the definition, so prefer the term-def-<slug> companion anchor
+// the book filter drops at the definition site, falling back to the index.
+let pendingDestination: { dest: string; preferDefinition: boolean } | null = null;
+const referenceDocuments = new Map<string, { task: any; promise: Promise<any> }>();
+
+export async function referencePdfDocument(
+  doc: any,
+  preview: boolean,
+  fullPath: string,
+  definition?: unknown,
+): Promise<any> {
+  if (
+    !preview ||
+    Array.isArray(definition) ||
+    (typeof definition === "string" && (await pdfDestination(doc, definition)))
+  )
+    return doc;
+  return completePdfDocument(fullPath);
+}
+
+export function invalidateReferenceDocuments(): void {
+  dismissTermPopup();
+  for (const { task } of referenceDocuments.values()) void task.destroy().catch(() => {});
+  referenceDocuments.clear();
+}
+
+export async function completePdfDocument(path: string, lightFallback = false): Promise<any> {
+  if (!lightFallback && state.pdf.loadedPath === path && state.pdf.document) return state.pdf.document;
+  const requested = lightFallback ? path : renderedPdfPath(path);
+  const existing = referenceDocuments.get(requested);
+  if (existing) return existing.promise;
+  const pdfjs = await loadPdfJs();
+  const concurrent = referenceDocuments.get(requested);
+  if (concurrent) return concurrent.promise;
+  const task = pdfjs.getDocument({ url: cacheBustedUrl(requested) });
+  const promise = task.promise.catch((error: unknown) => {
+    if (referenceDocuments.get(requested)?.task === task) referenceDocuments.delete(requested);
+    // A dark chapter can be built before the full dark book exists. Chapter
+    // ownership and off-chapter definitions remain available in the light book.
+    if (requested !== path && (error as { status?: number })?.status === 404) return completePdfDocument(path, true);
+    throw error;
+  });
+  referenceDocuments.set(requested, { task, promise });
+  while (referenceDocuments.size > 2) {
+    const oldest = referenceDocuments.keys().next().value!;
+    void referenceDocuments
+      .get(oldest)!
+      .task.destroy()
+      .catch(() => {});
+    referenceDocuments.delete(oldest);
+  }
+  return promise;
+}
+
+export async function chapterPdfForDestination(
+  dest: string,
+  fullPath = repoUrl(project.pdf!),
+  preferDefinition = true,
+  definitions: DefinitionRegistry | undefined = project.definitionRegistry,
+): Promise<string | null> {
+  if (!preferDefinition && termTarget(dest))
+    return repoUrl(project.pdf!.replace(/-debug\.pdf$/, "-preview-_index.pdf"));
+  const definition = resolveDefinition(definitions, dest);
+  if (definition) return repoUrl(project.pdf!.replace(/-debug\.pdf$/, `-preview-${definition.chapter}.pdf`));
+  const doc = await completePdfDocument(fullPath);
+  const chapter = await destinationChapter(
+    doc,
+    dest,
+    project.chapterTitles ?? {},
+    project.previewSections ?? {},
+    preferDefinition,
+  );
+  return chapter ? repoUrl(project.pdf!.replace(/-debug\.pdf$/, `-preview-${chapter}.pdf`)) : null;
+}
+
+let destinationJump = 0;
+async function scrollPdfToDestination(dest: any, preferDefinition = true): Promise<void> {
+  dismissTermPopup();
+  const jump = ++destinationJump;
+  const token = state.pdf.renderToken;
+  const doc = state.pdf.document;
+  const current = () => jump === destinationJump && token === state.pdf.renderToken;
+  let resolved: any = null;
+  let name = typeof dest === "string" ? preferredDestination(dest, preferDefinition) : undefined;
+  if (typeof dest === "string") {
+    const preferred = preferredDestination(dest, preferDefinition);
+    resolved = await pdfDestination(doc, preferred);
+    if (state.pdf.loadedPath?.includes("-preview-") && project.pdf) {
+      const path = await chapterPdfForDestination(dest, repoUrl(project.pdf), preferDefinition);
+      if (!current()) return;
+      if (path && path !== state.pdf.path) {
+        pendingDestination = { dest, preferDefinition };
+        await setPdf(path, { scrollToActive: false });
+        return;
+      }
+    }
+    if (!resolved) {
+      resolved = await pdfDestination(doc, dest);
+      name = dest;
+    }
+  } else {
+    resolved = dest;
+  }
+  if (!current()) return;
+  const point = await destinationToPagePoint(resolved, token);
+  if (!point || !current()) return;
+  const pageState = state.pdf.pageStates.get(point.pageNumber);
+  if (!pageState) return;
+  suppressPaneSync("pdf");
+  const top =
+    pageState.el.offsetTop + point.frac * pageState.el.offsetHeight - paneViewportHeight(els.pdfViewer) * 0.35;
+  scrollPane(els.pdfViewer, { top: Math.max(0, top), left: els.pdfViewer.scrollLeft, behavior: "auto" });
+  renderVisiblePdfPages();
+  updatePdfPageFromScroll();
+  const page = await doc.getPage(point.pageNumber);
+  if (current())
+    await flashPdfDestination(page, resolved, name, pageState.el, state.pdf.crop, current, () => pageState.rendered);
+}
+
 export function renderVisiblePdfPages(): void {
   if (!state.pdf.document) return;
   const token = state.pdf.renderToken;
-  const top = els.pdfViewer.scrollTop - els.pdfViewer.clientHeight * 2;
-  const bottom = els.pdfViewer.scrollTop + els.pdfViewer.clientHeight * 3;
-  for (const pageState of state.pdf.pageStates.values()) {
-    const pageTop = pageState.el.offsetTop;
-    const pageBottom = pageTop + pageState.el.offsetHeight;
-    if (pageBottom >= top && pageTop <= bottom) {
-      renderPdfPage(pageState.pageNumber, token);
-    }
-  }
+  renderVisiblePages(els.pdfViewer, state.pdf.pageStates, (pageNumber) => {
+    void renderPdfPage(pageNumber, token);
+  });
 }
 
 export function updatePdfPageFromScroll(): void {
-  const viewerRect = els.pdfViewer.getBoundingClientRect();
-  const target = viewerRect.top + viewerRect.height * 0.35;
+  const target = paneViewportTop(els.pdfViewer) + paneViewportHeight(els.pdfViewer) * 0.35;
   let bestPage: number | null = null;
   let bestDistance = Infinity;
   for (const pageState of state.pdf.pageStates.values()) {
@@ -316,129 +450,64 @@ export function updatePdfPageFromScroll(): void {
   }
   if (bestPage && bestPage !== state.pdf.currentPage) {
     state.pdf.currentPage = bestPage;
-    updatePdfStatus();
   }
-}
-
-// Resolve a pdf.js named destination to a page number and a y in CSS pixels from
-// the page's top, matching renderPdfPage's crop-scaled zoom so the y lands where
-// the content actually renders. Null if the destination/page is unresolvable.
-async function destinationToPageY(destination: any, token: number): Promise<{ pageNumber: number; y: number } | null> {
-  if (!destination) return null;
-  const [pageRef, _mode, _left, top] = destination as any[];
-  const pageIndex = await state.pdf.document.getPageIndex(pageRef);
-  if (token !== state.pdf.renderToken) return null;
-  const pageNumber = pageIndex + 1;
-  const pageState = state.pdf.pageStates.get(pageNumber);
-  const page = await state.pdf.document.getPage(pageNumber);
-  if (!pageState || token !== state.pdf.renderToken) return null;
-  const crop = state.pdf.crop;
-  const baseViewport = page.getViewport({ scale: 1 });
-  const cropWidth = crop ? crop.x1 - crop.x0 : baseViewport.width;
-  const cssWidth = Math.max(240, pageState.el.clientWidth);
-  const viewport = page.getViewport({ scale: cssWidth / cropWidth });
-  const y = typeof top === "number" ? viewport.convertToViewportPoint(0, top)[1] : 0;
-  return { pageNumber, y };
 }
 
 export async function resolvePdfTargets(token: number, scrollToActive = true): Promise<void> {
   if (!state.pdf.document) return;
-  const targets = new Map<number, { pageNumber: number; y: number }>();
+  const targets = new Map<number, { pageNumber: number; fraction: number }>();
   await Promise.all(
     state.entries.map(async (entry, index) => {
+      if (!pdfIncludesSource(state.pdf.loadedPath || "", entry.match?.source ?? entry.booklink?.source)) return;
       // The PDF numbers booklinks globally (\BooklinkStart[entry=N] / the
       // booklink-entry-N named destination), which is not the per-book array
       // index. The sourcemap's texMatch.entry carries that PDF number, so map by
       // it rather than by position.
       const entryNumber = (entry as any)?.texMatch?.entry;
       if (typeof entryNumber !== "number") return;
-      const destination = await state.pdf.document.getDestination(`booklink-entry-${entryNumber}`);
+      const destination = await pdfDestination(state.pdf.document, `booklink-entry-${entryNumber}`);
       if (token !== state.pdf.renderToken) return;
-      const placement = await destinationToPageY(destination, token);
-      if (placement) targets.set(index, placement);
+      const placement = await destinationToPagePoint(destination, token);
+      if (placement) targets.set(index, { pageNumber: placement.pageNumber, fraction: placement.frac });
     }),
   );
   if (token !== state.pdf.renderToken) return;
   state.pdf.targets = targets;
   // Skip and entry bands both snap their edges onto text lines, so share one
   // per-page text-content cache across both passes (many bands share a page).
-  const pageLines = makePageLineCache(token);
+  const pageLines = makePageLineCache((pageNumber) =>
+    documentPageLines(state.pdf.document, pageNumber, state.pdf.crop, () => token === state.pdf.renderToken),
+  );
   await Promise.all([resolveSkipBands(token, pageLines), resolveEntryBands(token, pageLines)]);
   if (token !== state.pdf.renderToken) return;
   // On a scroll-preserving reload the caller has already restored the reader's
   // position, so don't yank it back to the active entry.
-  if (scrollToActive) scrollPdfToEntry(state.activeIndex);
+  if (scrollToActive) {
+    if (state.location.kind === "skip") scrollPdfToSkip(state.location);
+    else scrollPdfToEntry(state.activeIndex);
+  }
   onPdfTargetsResolved();
 }
 
-// Convert a pdf.js named destination to its page and a vertical *fraction* of
-// the page (0 = top, 1 = bottom). Fractions are scale-independent, so a band
-// resolved from them renders correctly at any pane width — unlike a CSS-pixel y,
-// which goes stale the moment the page is re-sized after resolution.
-async function destinationToPageFraction(
-  destination: any,
-  token: number,
-): Promise<{ pageNumber: number; frac: number } | null> {
-  if (!destination) return null;
-  const [pageRef, _mode, _left, top] = destination as any[];
-  const pageIndex = await state.pdf.document.getPageIndex(pageRef);
-  if (token !== state.pdf.renderToken) return null;
-  const page = await state.pdf.document.getPage(pageIndex + 1);
-  if (token !== state.pdf.renderToken) return null;
-  const vp = page.getViewport({ scale: 1 });
-  const frac = typeof top === "number" ? vp.convertToViewportPoint(0, top)[1] / vp.height : 0;
-  return { pageNumber: pageIndex + 1, frac };
-}
-
-// Like destinationToPageFraction, but also carries the anchor's horizontal x as
-// a fraction of the cropped text column (0 = crop left edge, 1 = crop right
-// edge), matching how the overlay divs are positioned (the canvas fills the crop
-// width). The destination's `left` is a PDF-point x in the same space as the crop
-// bounds, so it converts directly. Used to flow a booklink highlight that starts
-// or ends mid-line.
+// Convert a pdf.js named destination to its page, a vertical *fraction* of the
+// page (0 = top, 1 = bottom), and the anchor's horizontal x as a fraction of
+// the cropped text column (0 = crop left edge, 1 = crop right edge), matching
+// how the overlay divs are positioned (the canvas fills the crop width).
+// Fractions are scale-independent, so a band resolved from them renders
+// correctly at any pane width — unlike a CSS-pixel y, which goes stale the
+// moment the page is re-sized after resolution. The destination's `left` is a
+// PDF-point x in the same space as the crop bounds, so it converts directly;
+// it bounds highlights that start or end mid-line.
 async function destinationToPagePoint(
   destination: any,
   token: number,
 ): Promise<{ pageNumber: number; frac: number; xFrac: number } | null> {
-  if (!destination) return null;
-  const [pageRef, _mode, left, top] = destination as any[];
-  const pageIndex = await state.pdf.document.getPageIndex(pageRef);
-  if (token !== state.pdf.renderToken) return null;
-  const page = await state.pdf.document.getPage(pageIndex + 1);
-  if (token !== state.pdf.renderToken) return null;
-  const vp = page.getViewport({ scale: 1 });
-  const frac = typeof top === "number" ? vp.convertToViewportPoint(0, top)[1] / vp.height : 0;
-  const crop = state.pdf.crop;
-  const cropX0 = crop ? crop.x0 : 0;
-  const cropWidth = crop ? crop.x1 - crop.x0 : vp.width;
-  const rawX = typeof left === "number" ? (left - cropX0) / cropWidth : 0;
-  const xFrac = Math.min(1, Math.max(0, rawX));
-  return { pageNumber: pageIndex + 1, frac, xFrac };
-}
-
-// The text lines of a page as boxes expressed as *fractions* of the page height,
-// fetched from pdf.js and grouped by groupTextLines. Cached (as a promise) per
-// page so the many skips that share a page fetch its text content once.
-async function computePageLines(pageNumber: number, token: number): Promise<LineBox[]> {
-  const page = await state.pdf.document.getPage(pageNumber);
-  if (token !== state.pdf.renderToken) return [];
-  const vp = page.getViewport({ scale: 1 });
-  const content = await page.getTextContent();
-  if (token !== state.pdf.renderToken) return [];
-  const runs: TextRun[] = (content.items as any[])
-    .filter((item) => item.str && item.str.trim())
-    .map((item) => ({
-      baseline: item.transform[5],
-      height: typeof item.height === "number" ? item.height : 0,
-      x: item.transform[4],
-    }));
-  const crop = state.pdf.crop;
-  const cropX0 = crop ? crop.x0 : 0;
-  const cropWidth = crop ? crop.x1 - crop.x0 : vp.width;
-  return groupTextLines(
-    runs,
-    (y) => vp.convertToViewportPoint(0, y)[1] / vp.height,
-    (x) => (x - cropX0) / cropWidth,
+  return destinationToPoint(
+    state.pdf.document,
+    destination,
+    state.pdf.crop,
+    (pageWidth) => pageWidth,
+    () => token === state.pdf.renderToken,
   );
 }
 
@@ -450,41 +519,25 @@ async function computePageLines(pageNumber: number, token: number): Promise<Line
 // the start one a line high), so each segment edge is snapped onto the enclosing
 // line box. Missing destinations (e.g. a non-debug PDF that carries no anchors)
 // just yield no band. Then draw them.
-// A per-page text-line cache: many skip/entry bands share a page, so its text
-// content is fetched and line-grouped once. Bound to a render token so a stale
-// resolution can't poison a fresh one.
-type PageLineCache = (pageNumber: number) => Promise<LineBox[]>;
-function makePageLineCache(token: number): PageLineCache {
-  const lineCache = new Map<number, Promise<LineBox[]>>();
-  return (pageNumber: number): Promise<LineBox[]> => {
-    let p = lineCache.get(pageNumber);
-    if (!p) {
-      p = computePageLines(pageNumber, token);
-      lineCache.set(pageNumber, p);
-    }
-    return p;
-  };
-}
-
 async function resolveSkipBands(token: number, pageLines: PageLineCache): Promise<void> {
   const bands: typeof state.pdf.skipBands = [];
   await Promise.all(
     (state.skips || []).map(async (skip: any) => {
+      if (!pdfIncludesSource(state.pdf.loadedPath || "", skip.source)) return;
       const key = skip?.key;
       if (typeof key !== "string") return;
       const [startDest, endDest] = await Promise.all([
-        state.pdf.document.getDestination(`skip-${key}-start`),
-        state.pdf.document.getDestination(`skip-${key}-end`),
+        pdfDestination(state.pdf.document, `skip-${key}-start`),
+        pdfDestination(state.pdf.document, `skip-${key}-end`),
       ]);
       if (token !== state.pdf.renderToken) return;
-      const start = await destinationToPageFraction(startDest, token);
-      const end = await destinationToPageFraction(endDest, token);
+      // Points, not bare fractions: a skip that starts or ends inside a
+      // paragraph is bounded mid-line by its anchor's x.
+      const start = await destinationToPagePoint(startDest, token);
+      const end = await destinationToPagePoint(endDest, token);
       if (!start || !end || token !== state.pdf.renderToken) return;
-      const [startLines, endLines] = await Promise.all([pageLines(start.pageNumber), pageLines(end.pageNumber)]);
+      const segments = await resolveSkipFlowSegments(start, end, pageLines);
       if (token !== state.pdf.renderToken) return;
-      const snappedStart = { pageNumber: start.pageNumber, frac: snapBandTop(start.frac, startLines) };
-      const snappedEnd = { pageNumber: end.pageNumber, frac: snapBandBottom(end.frac, endLines) };
-      const segments = skipBandSegments(snappedStart, snappedEnd);
       if (segments.length) bands.push({ key, reason: typeof skip.reason === "string" ? skip.reason : "", segments });
     }),
   );
@@ -493,36 +546,8 @@ async function resolveSkipBands(token: number, pageLines: PageLineCache): Promis
   renderSkipBands();
 }
 
-// (Re)draw the skip-band overlays as absolutely-positioned children of their
-// page elements. Segment top/bottom are page-height fractions, converted to px
-// against each page's *current* clientHeight here, so the bands stay aligned
-// after a resize even without re-resolving. Pointer-events are off so the bands
-// never block PDF scrolling; the reason is mirrored in the Markdown pane's
-// tooltip.
 export function renderSkipBands(): void {
-  for (const stale of Array.from(els.pdfViewer.querySelectorAll(".pdf-skip-band"))) stale.remove();
-  const hovered = state.hoveredSkip;
-  for (const band of state.pdf.skipBands) {
-    for (const segment of band.segments) {
-      const pageState = state.pdf.pageStates.get(segment.pageNumber);
-      if (!pageState) continue;
-      const pageHeight = pageState.el.clientHeight;
-      const topPx = segment.top * pageHeight;
-      const bottomPx = (segment.bottom ?? 1) * pageHeight;
-      const height = bottomPx - topPx;
-      if (height <= 0) continue;
-      const el = document.createElement("div");
-      el.className = "pdf-skip-band";
-      // The skip's stable key, shared with the Markdown pane's .skip-mark spans,
-      // so hovering one band lights every fragment of that skip across panes.
-      if (band.key) el.dataset.skipKey = band.key;
-      if (band.key && band.key === hovered) el.classList.add("is-hover");
-      el.style.top = `${topPx}px`;
-      el.style.height = `${height}px`;
-      if (band.reason) el.title = band.reason;
-      pageState.el.append(el);
-    }
-  }
+  renderSkipBandOverlays(els.pdfViewer, state.pdf.pageStates, state.pdf.skipBands);
 }
 
 // Resolve each booklink entry's PDF extent to per-page vertical segments, the
@@ -535,86 +560,19 @@ async function resolveEntryBands(token: number, pageLines: PageLineCache): Promi
   const bands: typeof state.pdf.entryBands = [];
   await Promise.all(
     state.entries.map(async (entry, index) => {
+      if (!pdfIncludesSource(state.pdf.loadedPath || "", entry.match?.source ?? entry.booklink?.source)) return;
       const entryNumber = (entry as any)?.texMatch?.entry;
       if (typeof entryNumber !== "number") return;
       const [startDest, endDest] = await Promise.all([
-        state.pdf.document.getDestination(`booklink-entry-${entryNumber}`),
-        state.pdf.document.getDestination(`booklink-entry-${entryNumber}-end`),
+        pdfDestination(state.pdf.document, `booklink-entry-${entryNumber}`),
+        pdfDestination(state.pdf.document, `booklink-entry-${entryNumber}-end`),
       ]);
       if (token !== state.pdf.renderToken) return;
       const start = await destinationToPagePoint(startDest, token);
       const end = await destinationToPagePoint(endDest, token);
       if (!start || !end || token !== state.pdf.renderToken) return;
-      const [startLines, endLines] = await Promise.all([pageLines(start.pageNumber), pageLines(end.pageNumber)]);
+      const segments = await resolveEntryFlowSegments(start, end, pageLines);
       if (token !== state.pdf.renderToken) return;
-      // A \BooklinkStart injected right before its span's first glyph (a prose
-      // proof, a mid-line start) has \leavevmode attach the booklink-entry-N
-      // destination to that glyph's baseline: lineIndexAt lands on it exactly and
-      // the first line begins at the anchor's own x. But a \BooklinkStart that sits
-      // before a `\begin{env}` — every kind=statement span, and a proof span whose
-      // excerpt opens with \begin{proof} — is separated from it by a blank line, so
-      // \leavevmode strands a zero-glyph paragraph in the inter-paragraph gap and the
-      // destination lands ~a baselineskip *above* the span's first rendered line (the
-      // same vertical-mode raise the skip starts compensate for). lineIndexAt would
-      // then resolve onto the *previous* block's last line (a skip band, the
-      // preceding proof, or this span's own statement), overlapping it. Detect that
-      // geometrically: a raised anchor sits in a gap, so the line lineIndexAt picked
-      // has a baseline well *above* (smaller fraction than) the anchor. Then snap DOWN
-      // to the first line below and begin the highlight at that line's left edge. The
-      // end marker is always injected right after the last glyph, so it stays exact.
-      let si = lineIndexAt(start.frac, startLines);
-      const raisedStart = si >= 0 && startLines[si].baseline < start.frac - SNAP_TOL;
-      // Snap down to the first line below the raised anchor, then past any
-      // superscript sub-run of the real first line (a statement heading carrying a
-      // superscript groups one just above its main line) so the band starts on the
-      // heading itself, not the superscript — see mainLineBelow.
-      if (raisedStart) si = mainLineBelow(lineIndexBelow(start.frac, startLines), startLines);
-      const endRes = endLineResolve(end.frac, end.xFrac, endLines);
-      const ei = endRes.index;
-      let segments: FlowSegment[];
-      if (si < 0 || ei < 0) {
-        // No text line to snap onto (e.g. a figure-only page); fall back to a
-        // full-width band between the raw snapped y positions.
-        segments = skipBandSegments(
-          { pageNumber: start.pageNumber, frac: snapBandTop(start.frac, startLines) },
-          { pageNumber: end.pageNumber, frac: snapBandBottom(end.frac, endLines) },
-        ).map((s) => ({ ...s, left: 0, right: 1 }));
-      } else {
-        const sLine = startLines[si];
-        const eLine = endLines[ei];
-        // The indented first line ([startX, 1]) runs down to where the full-width
-        // middle begins: normally the next line's top, which fills the inter-line
-        // gap seamlessly. But a sub-line whose box overlaps the start line (a
-        // subscript like the ₁ in Δ⁰₁ sits a couple pt below the baseline) would put
-        // that boundary *above* the start line's bottom, so the full-width middle
-        // bleeds up and covers the left of the start line (text before the mid-line
-        // start). Clamp the boundary to at least the start line's bottom.
-        const nextStart = si + 1 < startLines.length ? Math.max(startLines[si + 1].top, sLine.bottom) : null;
-        // Symmetrically, the last line's box can dip into the line below it (a
-        // display equation whose descenders overlap the next paragraph with no blank
-        // line between). Cap the band's bottom at that next line's top so it never
-        // shades a line outside the span — but skip the end line's own subscript
-        // sub-runs, which group into shorter LineBoxes just below it and would
-        // otherwise chop the wash in half (see endLineBottom).
-        const endBottom = endLineBottom(endLines, ei);
-        segments = flowBandSegments(
-          {
-            startPage: start.pageNumber,
-            startTop: sLine.top,
-            startBottom: sLine.bottom,
-            nextTop: nextStart,
-            endPage: end.pageNumber,
-            endTop: eLine.top,
-            endBottom,
-            // A raised start was snapped down to the env's first line, whose anchor x
-            // is the stray paragraph's indent, not the content; cover from its left
-            // edge. An exact (inline) start keeps the anchor's own x.
-            startX: raisedStart ? sLine.left : start.xFrac,
-            endX: endRes.right,
-          },
-          start.pageNumber === end.pageNumber && si === ei,
-        );
-      }
       if (segments.length)
         bands.push({
           index,
@@ -638,176 +596,291 @@ function entryBandTitle(entry: any): string {
   return target ? `${name} · ${target}` : name;
 }
 
-// (Re)draw the per-entry booklink overlays as absolutely-positioned children of
-// their page elements, colored by the entry's hue (the same --mark-rgb the
-// source-pane marks use). Unlike the skip bands these take the pointer, so app.ts
-// can wire click (navigate) and hover (cross-pane highlight) on them; data-entry
-// carries the state.entries index so setHoveredEntry/applyActiveState reach them.
 export function renderEntryBands(): void {
-  for (const stale of Array.from(els.pdfViewer.querySelectorAll(".pdf-mark"))) stale.remove();
-  const active = state.activeIndex;
-  const hovered = state.hoveredEntry != null ? Number(state.hoveredEntry) : null;
-  for (const band of state.pdf.entryBands) {
-    for (const segment of band.segments) {
-      const pageState = state.pdf.pageStates.get(segment.pageNumber);
-      if (!pageState) continue;
-      const pageHeight = pageState.el.clientHeight;
-      const topPx = segment.top * pageHeight;
-      const bottomPx = (segment.bottom ?? 1) * pageHeight;
-      const height = bottomPx - topPx;
-      if (height <= 0) continue;
-      const el = document.createElement("div");
-      el.className = "pdf-mark";
-      if (band.index === active) el.classList.add("active");
-      if (band.index === hovered) el.classList.add("is-hover");
-      el.dataset.entry = String(band.index);
-      const leftPct = (segment.left * 100).toFixed(3);
-      const rightPct = ((1 - segment.right) * 100).toFixed(3);
-      el.setAttribute(
-        "style",
-        `left:${leftPct}%;right:${rightPct}%;top:${topPx}px;height:${height}px;${markerStyle(band.target)}`,
-      );
-      if (band.title) el.title = band.title;
-      pageState.el.append(el);
-    }
-  }
+  renderEntryBandOverlays(els.pdfViewer, state.pdf.pageStates, state.pdf.entryBands);
 }
 
-// Record the reader's current position as the topmost visible page plus a
-// fractional offset into it, rather than a raw scrollTop. A rebuilt PDF may have
-// a slightly different page count or crop, so a page-anchored fraction restores
-// the same content even when absolute pixel offsets shift.
-export function capturePdfScrollAnchor(): { pageNumber: number; fraction: number } | null {
+export function capturePdfScrollAnchor(): PdfScrollAnchor | null {
   if (!state.pdf.document || !state.pdf.pageStates.size) return null;
-  const viewerTop = els.pdfViewer.scrollTop;
-  for (const pageState of state.pdf.pageStates.values()) {
-    const top = pageState.el.offsetTop;
-    const height = pageState.el.offsetHeight;
-    if (height > 0 && viewerTop < top + height) {
-      return { pageNumber: pageState.pageNumber, fraction: (viewerTop - top) / height };
-    }
-  }
-  return null;
+  return captureScrollAnchor(els.pdfViewer, state.pdf.pageStates, state.pdf.targets);
 }
 
-export function restorePdfScrollAnchor(anchor: { pageNumber: number; fraction: number }): void {
-  const pageCount = state.pdf.pageCount ?? anchor.pageNumber;
-  const pageNumber = Math.min(Math.max(1, anchor.pageNumber), pageCount);
-  const pageState = state.pdf.pageStates.get(pageNumber);
-  if (!pageState) return;
-  const top = pageState.el.offsetTop + anchor.fraction * pageState.el.offsetHeight;
-  els.pdfViewer.scrollTo({ top: Math.max(0, top), left: els.pdfViewer.scrollLeft, behavior: "auto" });
-  renderVisiblePdfPages();
-  updatePdfPageFromScroll();
+export function restorePdfScrollAnchor(anchor: PdfScrollAnchor): void {
+  restoreScrollAnchor(
+    anchor,
+    els.pdfViewer,
+    state.pdf.pageStates,
+    state.pdf.targets,
+    state.pdf.pageCount ?? anchor.pageNumber,
+    "pdf",
+    renderVisiblePdfPages,
+    updatePdfPageFromScroll,
+  );
 }
 
 export function scrollPdfToEntry(index: number): void {
   if (!visiblePaneNames().includes("pdf")) return;
   const target = state.pdf.targets.get(index);
   if (!target) return;
-  const pageState = state.pdf.pageStates.get(target.pageNumber);
-  if (!pageState) return;
-  const nextTop = Math.max(0, pageState.el.offsetTop + target.y - els.pdfViewer.clientHeight * 0.35);
-  els.pdfViewer.scrollTo({ top: nextTop, left: els.pdfViewer.scrollLeft, behavior: "auto" });
-  renderVisiblePdfPages();
-  updatePdfPageFromScroll();
+  if (scrollToEntryTarget(els.pdfViewer, state.pdf.pageStates, target, renderVisiblePdfPages))
+    updatePdfPageFromScroll();
 }
 
 export function nearestEntryFromPdfScroll(): number | null {
   if (!state.pdf.targets.size) return null;
-  const targetTop = els.pdfViewer.scrollTop + els.pdfViewer.clientHeight * 0.35;
-  let best: number | null = null;
-  let bestDistance = Infinity;
-  for (const [index, target] of state.pdf.targets.entries()) {
-    const pageState = state.pdf.pageStates.get(target.pageNumber);
-    if (!pageState) continue;
-    const absoluteTop = pageState.el.offsetTop + target.y;
-    const distance = Math.abs(absoluteTop - targetTop);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = index;
-    }
-  }
-  return Number.isInteger(best) ? best : null;
+  return nearestEntryIndex(els.pdfViewer, state.pdf.pageStates, state.pdf.targets);
 }
 
-export async function setPdf(path: string, options: { preserveScroll?: boolean } = {}): Promise<void> {
-  // Capture the reader's position before clearPdfViewer wipes the page states,
-  // so a rebuild of the same PDF can restore it instead of jumping to the top.
-  const anchor = options.preserveScroll ? capturePdfScrollAnchor() : null;
-  state.pdf.path = path;
-  onPdfSelected(path);
-  els.pdfLink.href = path;
-  if (els.pdfSelect.value !== path) els.pdfSelect.value = path;
-  clearPdfViewer("Loading PDF...");
-  const token = ++state.pdf.renderToken;
+function primarySkipRange(key: string): { start: number; end: number } | null {
+  const band = state.pdf.skipBands.find((candidate) => candidate.key === key);
+  if (!band?.segments.length) return null;
+  let start = Infinity;
+  let end = -Infinity;
+  for (const segment of band.segments) {
+    const page = state.pdf.pageStates.get(segment.pageNumber);
+    if (!page) continue;
+    start = Math.min(start, page.el.offsetTop + segment.top * page.el.offsetHeight);
+    end = Math.max(end, page.el.offsetTop + (segment.bottom ?? 1) * page.el.offsetHeight);
+  }
+  return Number.isFinite(start) && end >= start ? { start, end } : null;
+}
 
+export function nearestSkipFromPdfScroll(): SkipSyncLocation | null {
+  return nearestSkipLocation(
+    els.pdfViewer,
+    state.pdf.pageStates,
+    state.pdf.targets,
+    state.pdf.skipBands.map((band) => band.key),
+    primarySkipRange,
+  );
+}
+
+export function scrollPdfToSkip(location: SkipSyncLocation): void {
+  if (!visiblePaneNames().includes("pdf")) return;
+  const range = primarySkipRange(location.key);
+  if (!range) return;
+  scrollToSkipRange(els.pdfViewer, range, location.progress, renderVisiblePdfPages);
+  updatePdfPageFromScroll();
+}
+
+let retainedScroll: { path: string; anchor: PdfScrollAnchor } | null = null;
+let loadedLayoutPath: string | null = null;
+let pdfRequest = 0;
+let pendingPdfTask: any = null;
+
+let pdfLoadPromise: Promise<void> | null = null;
+
+export function currentPdfLoad(): Promise<void> | null {
+  return pdfLoadPromise;
+}
+
+export function setPdf(
+  path: string,
+  options: { preserveScroll?: boolean; scrollToActive?: boolean } = {},
+): Promise<void> {
+  const loading = loadSelectedPdf(path, options);
+  pdfLoadPromise = loading;
+  void loading
+    .finally(() => {
+      if (pdfLoadPromise === loading) pdfLoadPromise = null;
+    })
+    .catch(() => {});
+  return loading;
+}
+
+async function loadSelectedPdf(
+  path: string,
+  options: { preserveScroll?: boolean; scrollToActive?: boolean } = {},
+): Promise<void> {
+  dismissTermPopup();
+  const request = ++pdfRequest;
+  const current = () => request === pdfRequest;
+  if (pendingPdfTask) void pendingPdfTask.destroy().catch(() => {});
+  pendingPdfTask = null;
+  const layoutPath = lightPdfPath(renderedPdfPath(path));
+  const sameLayout = state.pdf.loadedPath === path && loadedLayoutPath === layoutPath;
+  const initialAnchor = options.preserveScroll && sameLayout ? capturePdfScrollAnchor() : null;
+  if (path !== state.pdf.path && options.scrollToActive !== false) pendingDestination = null;
+  state.pdf.path = path;
+  state.pdf.pending = true;
+  syncPdfControls(path);
+  onPdfSelected(path);
+  els.pdfLink.href = renderedPdfPath(path);
+  // Selection remains global, but hidden panes do not download or prepare PDFs.
+  state.pdf.deferred = !visiblePaneNames().includes("pdf");
+  if (state.pdf.deferred) return;
+  if (!state.pdf.document) clearPdfViewer(t("Loading PDF…"));
+  const report = (text: string) => {
+    if (current())
+      pdfLoadStatus(
+        els.pdfViewer,
+        state.pdf.document && state.pdf.pending ? `${text} · ${t("Current PDF remains available")}` : text,
+      );
+  };
+  report(t("Loading PDF renderer…"));
+  let task: any = null;
   try {
     const pdfjs = await loadPdfJs();
-    if (token !== state.pdf.renderToken) return;
-    const loadingTask = pdfjs.getDocument({ url: cacheBustedUrl(path) });
-    state.pdf.loadingTask = loadingTask;
-    const pdfDocument = await loadingTask.promise;
-    if (token !== state.pdf.renderToken) {
-      // A newer setPdf already superseded this one; tear down our task so the
-      // stale pdf.js worker document is not leaked.
-      loadingTask.destroy();
-      return;
+    if (!current()) return;
+    const url = renderedPdfPath(path);
+    task = pdfjs.getDocument({ url: cacheBustedUrl(url) });
+    pendingPdfTask = task;
+    task.onProgress = (progress: { loaded: number; total?: number }) => report(pdfByteProgress(progress));
+    const doc = await task.promise;
+    if (!current()) return;
+    let initialPage = initialAnchor?.pageNumber;
+    if (!initialPage && options.scrollToActive !== false) {
+      const location = state.location;
+      const entry = location.kind === "entry" ? state.entries[location.index] : null;
+      const skip = location.kind === "skip" ? state.skips?.find((skip: any) => skip.key === location.key) : null;
+      const source = entry?.match?.source ?? entry?.booklink?.source ?? skip?.source;
+      const name = skip
+        ? `skip-${skip.key}-start`
+        : typeof entry?.texMatch?.entry === "number"
+          ? `booklink-entry-${entry.texMatch.entry}`
+          : null;
+      if (name && pdfIncludesSource(path, source)) {
+        const destination = await pdfDestination(doc, name);
+        if (Array.isArray(destination) && destination[0] != null) {
+          const index = typeof destination[0] === "number" ? destination[0] : await doc.getPageIndex(destination[0]);
+          if (Number.isInteger(index) && index >= 0 && index < doc.numPages) initialPage = index + 1;
+        }
+      }
     }
-    state.pdf.document = pdfDocument;
-    state.pdf.pageCount = pdfDocument.numPages;
-    state.pdf.currentPage = 1;
-    state.pdf.pageStates = new Map();
-    els.pdfViewer.innerHTML = "";
-
-    const firstPage = await pdfDocument.getPage(1);
-    const firstViewport = firstPage.getViewport({ scale: 1 });
-    // One document-wide crop (the text block), shared by every page, so the side
-    // margins go but no page is over-zoomed.
-    state.pdf.crop = await computeDocCrop(pdfDocument, firstViewport.width, token);
-    if (token !== state.pdf.renderToken) {
-      loadingTask.destroy();
-      return;
+    if (!current()) return;
+    const prepared = await preparePdf(
+      doc,
+      path,
+      els.pdfViewer.clientWidth,
+      /-dark\.pdf(?:[?#]|$)/.test(url),
+      current,
+      report,
+      initialPage,
+    );
+    if (!prepared || !current()) return;
+    // Capture at commit time: the reader may have kept scrolling the old PDF.
+    const anchor =
+      (options.preserveScroll && sameLayout ? capturePdfScrollAnchor() : null) ??
+      (retainedScroll?.path === layoutPath ? retainedScroll.anchor : null);
+    retainedScroll = anchor ? { path: layoutPath, anchor } : null;
+    if (anchor) {
+      const at = Math.max(prepared.start, Math.min(doc.numPages, anchor.pageNumber));
+      const page = prepared.pages.get(at);
+      if (page && !page.rendered) {
+        page.el.style.aspectRatio = await paintPdfPage(
+          await doc.getPage(at),
+          page.canvas,
+          prepared.crop,
+          els.pdfViewer.clientWidth,
+        );
+        page.rendered = true;
+      }
     }
-    const cropWidth = state.pdf.crop ? state.pdf.crop.x1 - state.pdf.crop.x0 : firstViewport.width;
-    const ratio = `${cropWidth} / ${firstViewport.height}`;
-    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
-      const pageEl = document.createElement("div");
-      pageEl.className = "pdf-page";
-      pageEl.dataset.page = String(pageNumber);
-      pageEl.style.aspectRatio = ratio;
-      const canvas = document.createElement("canvas");
-      canvas.hidden = true;
-      pageEl.append(canvas);
-      els.pdfViewer.append(pageEl);
-      state.pdf.pageStates.set(pageNumber, { pageNumber, el: pageEl, canvas, rendered: false, rendering: false });
-    }
-
-    // Restore the captured position now that the new page elements exist (their
-    // aspect-ratio gives a definite height before rasterizing). If we restored,
-    // tell resolvePdfTargets not to override it by scrolling to the active entry.
+    if (!current()) return;
+    const oldTask = state.pdf.loadingTask;
+    const token = ++state.pdf.renderToken;
+    state.pdf.loadingTask = task;
+    pendingPdfTask = null;
+    state.pdf.document = doc;
+    state.pdf.loadedPath = path;
+    loadedLayoutPath = layoutPath;
+    state.pdf.pending = false;
+    state.pdf.pageCount = doc.numPages;
+    state.pdf.currentPage = prepared.start;
+    state.pdf.pageStates = prepared.pages;
+    state.pdf.crop = prepared.crop;
+    state.pdf.targets = new Map();
+    state.pdf.entryBands = [];
+    state.pdf.skipBands = [];
+    linkResolvedPages.clear();
+    els.pdfViewer.replaceChildren(prepared.fragment);
+    if (oldTask && oldTask !== task) void oldTask.destroy().catch(() => {});
     if (anchor) restorePdfScrollAnchor(anchor);
-    window.requestAnimationFrame(() => renderVisiblePdfPages());
-    state.pdf.targetPromise = resolvePdfTargets(token, !anchor).catch((error) => {
-      console.error("[booklink] Failed to resolve PDF targets:", error);
-    });
-    updatePdfStatus();
+    else if (initialPage) {
+      const page = prepared.pages.get(initialPage);
+      if (page) {
+        suppressPaneSync("pdf");
+        scrollPane(els.pdfViewer, { top: page.el.offsetTop, left: els.pdfViewer.scrollLeft, behavior: "auto" });
+      }
+    }
+    renderVisiblePdfPages();
+    for (const page of prepared.pages.values()) if (page.rendered) void resolvePageLinks(page.pageNumber, token);
+    report(t("Resolving PDF links and markers…"));
+    state.pdf.targetPromise = resolvePdfTargets(
+      token,
+      (options.scrollToActive ?? true) && !anchor && !pendingDestination,
+    )
+      .then(() => {
+        if (anchor && token === state.pdf.renderToken) {
+          restorePdfScrollAnchor(anchor);
+          retainedScroll = null;
+        }
+      })
+      .catch((error) => console.error("[booklink] Failed to resolve PDF targets:", error))
+      .finally(() => {
+        if (current()) pdfLoadStatus(els.pdfViewer, null);
+      });
+    if (pendingDestination) {
+      const destination = pendingDestination;
+      pendingDestination = null;
+      await scrollPdfToDestination(destination.dest, destination.preferDefinition);
+    }
   } catch (error) {
-    if (token !== state.pdf.renderToken) return;
+    if (!current()) return;
     const friendly = onPdfLoadFailed(path, error);
-    clearPdfViewer(friendly ?? `Failed to load PDF: ${error instanceof Error ? error.message : String(error)}`);
+    if (state.pdf.document) {
+      pdfLoadStatus(els.pdfViewer, `${friendly ?? t("PDF update failed")} · ${t("Current PDF remains available")}`);
+    } else {
+      clearPdfViewer(friendly ?? t("Failed to load PDF: {0}", error instanceof Error ? error.message : String(error)));
+      pdfLoadStatus(els.pdfViewer, friendly);
+    }
     if (!friendly) console.error(error);
+  } finally {
+    if (task && state.pdf.loadingTask !== task) {
+      if (pendingPdfTask === task) pendingPdfTask = null;
+      void task.destroy().catch(() => {});
+    }
   }
+}
+
+let pdfControlChoices: any[] = [];
+const lastPdfByMode = new Map<string, string>();
+export function syncPdfControls(path: string): void {
+  const preview = path.includes("-preview-");
+  const mode = document.getElementById("pdf-mode-seg")!;
+  state.pdfMode = preview ? "chapter" : "full";
+  for (const button of mode.querySelectorAll<HTMLButtonElement>("button[data-value]"))
+    button.setAttribute("aria-pressed", String(button.dataset.value === state.pdfMode));
+  lastPdfByMode.set(state.pdfMode, path);
+  const choices = pdfControlChoices.filter((c) => c.path.includes("-preview-") === preview);
+  els.pdfSelect.setAttribute("aria-label", preview ? t("PDF chapter") : t("Full book edition"));
+  setHTML(
+    els.pdfSelect,
+    choices.map((c) => `<option value="${escapeHtml(c.path)}">${escapeHtml(c.label)}</option>`).join(""),
+  );
+  els.pdfSelect.value = path;
+}
+export function pdfPathForMode(mode: string): string | undefined {
+  const chapter = (state.selectedSources.md ?? "").split("/").pop()?.replace(/\.md$/, "");
+  return (
+    lastPdfByMode.get(mode) ??
+    (mode === "chapter" && chapter
+      ? pdfControlChoices.find((c) => c.path.endsWith(`-preview-${chapter}.pdf`))?.path
+      : undefined) ??
+    (mode === "chapter" ? pdfControlChoices.find((c) => /-preview-(?!_)[^/]+\.pdf$/.test(c.path))?.path : undefined) ??
+    pdfControlChoices.find((c) => c.path.includes("-preview-") === (mode === "chapter"))?.path
+  );
 }
 
 export async function renderPdfChoices(choices: any[], initialPath: string): Promise<void> {
-  els.pdfSelect.innerHTML = choices
-    .map((choice) => `<option value="${escapeHtml(choice.path)}">${escapeHtml(choice.label)}</option>`)
-    .join("");
+  pdfControlChoices = choices;
+  syncPdfControls(initialPath);
   await setPdf(initialPath);
 }
 
 export function reloadPdf(): void {
+  notePdfContentChanged();
+  invalidateReferenceDocuments();
   // An auto-rebuild reloads the same PDF in place; keep the reader where they
   // were rather than resetting to the top. When nothing is loaded yet (e.g. a
   // first chapter-preview build), there is no anchor and the default applies.

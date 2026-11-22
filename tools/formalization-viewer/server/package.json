@@ -1,4 +1,9 @@
 {
   "private": true,
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "dompurify": "3.4.17",
+    "pagefind": "1.6.0"
+  }
 }

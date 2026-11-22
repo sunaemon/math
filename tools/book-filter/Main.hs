@@ -5,27 +5,34 @@ module Main where
 
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, catch)
-import Control.Monad (forM_, guard, unless, when)
+import Control.Monad (forM, forM_, guard, unless, when, zipWithM, (>=>))
+import Data.Aeson (Value, eitherDecode, parseJSON, withObject, (.:), (.:?))
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (Parser, parseEither)
+import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit, isLetter, isSpace)
 import Data.Foldable (asum)
 import Data.IORef
-import Data.List (find, foldl', intercalate, isPrefixOf, sortOn, stripPrefix)
+import Data.List (find, intercalate, isPrefixOf, sortOn, stripPrefix, zip4)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, listDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit
 import System.IO
+import System.Process (readProcessWithExitCode)
 import Text.Pandoc.JSON
 import Text.Pandoc.Walk (query, walk, walkM)
 
+import Correspondence (correspondenceMain)
 import DependencyGraph (
   OptimizationConfig (..),
   planCacheNodes,
@@ -35,6 +42,9 @@ import DependencyGraph (
   renderDependencyGraph,
   writeDependencyLayoutCache,
  )
+import FormulaAnchors (formulaMarkers)
+import MathSyntax
+import MathSyntaxCLI (mathSyntaxMain)
 import SectionRef (nextSectionRef)
 
 main :: IO ()
@@ -43,12 +53,17 @@ main = do
   case args of
     "lint" : rest -> lintMain rest
     "inject-booklinks" : rest -> injectBooklinksMain rest
+    ["chapter-correspondence"] -> correspondenceMain
+    ["math-syntax"] -> mathSyntaxMain False
+    ["math-syntax-located"] -> mathSyntaxMain True
     _ -> toJSONFilter processDoc
 
 data LintConfig = LintConfig
   { lintMaxLineLength :: Int
   , lintMaxReports :: Int
   , lintFix :: Bool
+  , lintSortAudit :: Bool
+  , lintDslAudit :: Bool
   , lintMacros :: Maybe FilePath
   , lintPaths :: [FilePath]
   }
@@ -70,6 +85,8 @@ defaultLintConfig =
     { lintMaxLineLength = 120
     , lintMaxReports = 40
     , lintFix = False
+    , lintSortAudit = False
+    , lintDslAudit = False
     , lintMacros = Nothing
     , lintPaths = []
     }
@@ -79,14 +96,24 @@ lintMain args =
   case parseLintArgs defaultLintConfig args of
     Left message -> do
       hPutStrLn stderr ("book-filter lint: " <> message)
-      hPutStrLn stderr "usage: book-filter lint [--fix] [--macros=FILE] [--max-line-length=N] [--max-reports=N] FILE..."
+      hPutStrLn stderr "usage: book-filter lint [--fix] [--sort-audit] [--dsl-audit] [--macros=FILE] [--max-line-length=N] [--max-reports=N] FILE..."
       exitWith (ExitFailure 2)
     Right config -> do
       rawNotationRules <- maybe (return []) readRawNotationRules (lintMacros config)
+      signatureViolations <- maybe (return []) lintNotationSignatures (lintMacros config)
       when (lintFix config) $
         mapM_ (fixLintSource config rawNotationRules) (lintPaths config)
       headerIds <- collectLintHeaderIds (lintPaths config)
-      violations <- concat <$> mapM (lintSource config rawNotationRules headerIds) (lintPaths config)
+      chapterViolations <- concat <$> mapM (lintSource config rawNotationRules headerIds) (lintPaths config)
+      when (lintSortAudit config) $
+        case lintMacros config of
+          Just macrosPath -> runSortAudit macrosPath (lintPaths config)
+          Nothing -> hPutStrLn stderr "[lint] --sort-audit requires --macros=FILE"
+      when (lintDslAudit config) $
+        case lintMacros config of
+          Just macrosPath -> runDslAudit macrosPath (lintPaths config)
+          Nothing -> hPutStrLn stderr "[lint] --dsl-audit requires --macros=FILE"
+      let violations = signatureViolations ++ chapterViolations
       unless (null violations) $ do
         hPutStrLn stderr "[lint] source lint failed:"
         forM_ (take (lintMaxReports config) violations) $ \violation ->
@@ -104,6 +131,10 @@ parseLintArgs config [] =
 parseLintArgs config (arg : rest)
   | arg == "--fix" =
       parseLintArgs config{lintFix = True} rest
+  | arg == "--sort-audit" =
+      parseLintArgs config{lintSortAudit = True} rest
+  | arg == "--dsl-audit" =
+      parseLintArgs config{lintDslAudit = True} rest
   | Just raw <- stripPrefix "--macros=" arg =
       if null raw
         then Left "empty --macros value"
@@ -180,6 +211,183 @@ lintRawNotationLine rawNotationRules path lineNumber line =
     | T.null (rawNotationReason rule) = ""
     | otherwise = " (" <> T.unpack (rawNotationReason rule) <> ")"
 
+-- Notation-type signature audit. A semantic macro may carry a sort
+-- signature in a comment immediately before its definition:
+--
+--   % notation-type: \NatPair : Nat x Nat -> Nat
+--   \newcommand{\NatPair}[2]{...}
+--
+-- The audit checks that each hint names the macro it precedes, that the
+-- signature parses, and that its arity agrees with the definition. Two
+-- conventions relax the arity check: a nullary macro with a signature
+-- is a juxtaposed function symbol (as \LambdaNumericPair, whose
+-- arguments follow it by juxtaposition), and a signature containing
+-- "..." is variadic and belongs to a macro taking one comma-list
+-- argument (as \Tuple).
+
+lintNotationSignatures :: FilePath -> IO [String]
+lintNotationSignatures path = do
+  content <- readMacrosFile "lint" path
+  return (collectSignatureViolations path (T.lines content))
+
+collectSignatureViolations :: FilePath -> [Text] -> [String]
+collectSignatureViolations path ls = finish (foldl step initial (zip [(1 :: Int) ..] ls))
+ where
+  initial = (Nothing, Map.empty, [], [])
+
+  finish (pending, macros, sigs, violations) =
+    reverse violations
+      ++ [ report lineNo "notation-type hint is not followed by a \\newcommand"
+         | Just (_, lineNo) <- [pending]
+         ]
+      ++ mapMaybe (checkSignatureArity macros) sigs
+
+  report lineNo message = path <> ":" <> show lineNo <> ": " <> message
+
+  step (pending, macros, sigs, violations) (lineNo, line)
+    | Just hint <- parseNotationTypeHint line =
+        let violations' =
+              case pending of
+                Just (_, prevLine) ->
+                  report prevLine "notation-type hint is not followed by a \\newcommand" : violations
+                Nothing -> violations
+         in (Just (hint, lineNo), macros, sigs, violations')
+    | Just (name, spec) <- parseNewCommand line =
+        let macros' = Map.insert name (macroMandatoryArgs spec) macros
+         in case pending of
+              Nothing -> (Nothing, macros', sigs, violations)
+              Just (hint, hintLine) ->
+                case parseSignatureName hint of
+                  Just sigName
+                    | sigName == name ->
+                        (Nothing, macros', (name, hint, hintLine) : sigs, violations)
+                    | otherwise ->
+                        ( Nothing
+                        , macros'
+                        , sigs
+                        , report hintLine ("notation-type hint names \\" <> T.unpack sigName <> " but precedes \\newcommand{\\" <> T.unpack name <> "}") : violations
+                        )
+                  Nothing ->
+                    (Nothing, macros', sigs, report hintLine "could not parse the name in this notation-type hint" : violations)
+    | T.null (T.strip line) || "%" `T.isPrefixOf` T.strip line =
+        (pending, macros, sigs, violations)
+    | otherwise = (Nothing, macros, sigs, violations)
+
+  checkSignatureArity macros (name, hint, hintLine) =
+    case parseSignatureArity hint of
+      Nothing ->
+        Just (report hintLine ("could not parse notation-type signature: " <> T.unpack hint))
+      Just (arity, variadic) ->
+        case Map.lookup name macros of
+          Nothing ->
+            Just (report hintLine ("notation-type signature for undefined macro \\" <> T.unpack name))
+          Just macroArity
+            | variadic ->
+                if macroArity == 1
+                  then Nothing
+                  else
+                    Just
+                      ( report
+                          hintLine
+                          ( "variadic notation-type signature for \\"
+                              <> T.unpack name
+                              <> " needs a macro taking one comma-list argument, but it takes "
+                              <> show macroArity
+                          )
+                      )
+            | macroArity == 0 -> Nothing
+            | arity == macroArity -> Nothing
+            | otherwise ->
+                Just
+                  ( report
+                      hintLine
+                      ( "notation-type signature for \\"
+                          <> T.unpack name
+                          <> " has arity "
+                          <> show arity
+                          <> " but the macro takes "
+                          <> show macroArity
+                          <> " argument(s)"
+                      )
+                  )
+
+parseSignatureName :: Text -> Maybe Text
+parseSignatureName hint = do
+  let (rawName, rest) = T.breakOn ":" hint
+  guard (not (T.null rest))
+  name <- T.stripPrefix "\\" (T.strip rawName)
+  guard (not (T.null name))
+  return name
+
+-- The arity of a signature: the number of argument sorts on the left of
+-- the top-level arrow, and whether the argument list is variadic.
+-- Trailing annotations are ignored: a parenthesized note after the
+-- result sort, and an arity side condition such as ", n >= 3".
+parseSignatureArity :: Text -> Maybe (Int, Bool)
+parseSignatureArity hint = do
+  let (_, rest) = T.breakOn ":" hint
+  guard (not (T.null rest))
+  let sig = T.strip (T.drop 1 rest)
+      parts = splitTopLevel " -> " sig
+  guard (length parts >= 2)
+  let lhs = T.intercalate " -> " (init parts)
+      rhs = dropTrailingArityNote (dropTrailingParenNote (last parts))
+  guard (not (T.null (T.strip rhs)))
+  let args = map T.strip (splitTopLevel " x " lhs)
+      variadic = any isVariadicPart args
+      fixed = filter (not . isVariadicPart) args
+  guard (not (null args) && not (any T.null args))
+  return (length fixed, variadic)
+ where
+  isVariadicPart part = part == "..." || part == "…"
+
+dropTrailingParenNote :: Text -> Text
+dropTrailingParenNote txt
+  | T.isSuffixOf ")" txt && " (" `T.isInfixOf` txt =
+      let (before, note) = T.breakOnEnd " (" txt
+       in if T.count "(" note == T.count ")" note
+            then T.stripEnd before
+            else txt
+  | otherwise = txt
+
+dropTrailingArityNote :: Text -> Text
+dropTrailingArityNote txt =
+  case splitTopLevel ", " txt of
+    parts
+      | length parts >= 2 && isArityNote (last parts) ->
+          T.intercalate ", " (init parts)
+    _ -> txt
+ where
+  isArityNote part =
+    let p = T.strip part
+        (ident, rest) = T.span (\c -> isAsciiLower c || isDigit c) p
+     in not (T.null ident)
+          && case T.stripPrefix ">=" (T.strip rest) of
+            Just digits ->
+              let digits' = T.strip digits
+               in not (T.null digits') && T.all isDigit digits'
+            Nothing -> False
+
+-- Split on a separator occurring at parenthesis depth zero.
+splitTopLevel :: Text -> Text -> [Text]
+splitTopLevel sep txt =
+  case findTopLevel sep txt of
+    Nothing -> [txt]
+    Just idx ->
+      T.take idx txt : splitTopLevel sep (T.drop (idx + T.length sep) txt)
+
+findTopLevel :: Text -> Text -> Maybe Int
+findTopLevel sep txt = go 0 0
+ where
+  go depth idx
+    | idx >= T.length txt = Nothing
+    | depth == 0 && sep `T.isPrefixOf` T.drop idx txt = Just idx
+    | otherwise =
+        case T.index txt idx of
+          '(' -> go (depth + 1) (idx + 1)
+          ')' -> go (max 0 (depth - 1)) (idx + 1)
+          _ -> go depth (idx + 1)
+
 collectLintHeaderIds :: [FilePath] -> IO (Set Text)
 collectLintHeaderIds paths =
   Set.unions <$> mapM collectPathHeaderIds paths
@@ -203,8 +411,25 @@ lintDanglingSectionRefs headerIds path contents =
   ]
 
 collectMarkdownHeaderIds :: Text -> Set Text
-collectMarkdownHeaderIds contents =
-  Set.fromList (mapMaybe markdownHeaderId (T.lines contents))
+collectMarkdownHeaderIds contents = Set.fromList (go Nothing (T.lines contents))
+ where
+  go _ [] = []
+  go active (line : rest) =
+    let stripped = T.dropWhile (== ' ') line
+        fence = do
+          (char, _) <- T.uncons stripped
+          guard (char == '`' || char == '~')
+          guard (T.length line - T.length stripped <= 3)
+          let (marks, suffix) = T.span (== char) stripped
+          guard (T.length marks >= 3)
+          return (char, T.length marks, suffix)
+     in case active of
+          Just (char, count) -> case fence of
+            Just (closing, size, suffix) | char == closing && size >= count && T.all isSpace suffix -> go Nothing rest
+            _ -> go active rest
+          Nothing -> case fence of
+            Just (char, count, _) -> go (Just (char, count)) rest
+            Nothing -> maybe id (:) (markdownHeaderId line) (go Nothing rest)
 
 markdownHeaderId :: Text -> Maybe Text
 markdownHeaderId line = do
@@ -515,11 +740,11 @@ breakOnString :: String -> String -> Maybe (String, String)
 breakOnString needle = go ""
  where
   go _ "" = Nothing
-  go prefix rest
+  go prefix rest@(char : chars)
     | needle `isPrefixOf` rest =
         Just (reverse prefix, drop (length needle) rest)
     | otherwise =
-        go (head rest : prefix) (tail rest)
+        go (char : prefix) chars
 
 takeLeftOperand :: String -> Maybe (String, String)
 takeLeftOperand source =
@@ -732,7 +957,7 @@ scriptLength source =
 
 balancedGroupLength :: Char -> Char -> String -> Maybe Int
 balancedGroupLength open close source = do
-  guard (not (null source) && head source == open)
+  guard (listToMaybe source == Just open)
   go 0 0 source
  where
   go _ _ [] = Nothing
@@ -917,6 +1142,11 @@ processDoc doc@(Pandoc meta blocks) = do
   debugGraph <- isJust <$> lookupEnv "DEPENDENCY_GRAPH_DEBUG"
   graphOnly <- isJust <$> lookupEnv "DEPENDENCY_GRAPH_ONLY"
   graphTiming <- isJust <$> lookupEnv "DEPENDENCY_GRAPH_TIMING"
+  cacheOverride <- lookupEnv "DEPENDENCY_GRAPH_CACHE"
+  let layoutCachePath =
+        fromMaybe
+          (maybe dependencyLayoutCachePath T.unpack (lookupMeta "dependency-layout-cache" meta >>= metaText))
+          cacheOverride
   disableAnnealingSwaps <- isJust <$> lookupEnv "DEPENDENCY_GRAPH_DISABLE_ANNEALING_SWAPS"
   disableRefinementSwaps <- isJust <$> lookupEnv "DEPENDENCY_GRAPH_DISABLE_REFINEMENT_SWAPS"
   newtonBlockOverride <- (>>= readMaybeInt) <$> lookupEnv "DEPENDENCY_GRAPH_NEWTON_BLOCKS"
@@ -937,15 +1167,16 @@ processDoc doc@(Pandoc meta blocks) = do
       hPutStrLn stderr ("  duplicate id: " <> T.unpack hid)
     exitWith (ExitFailure 1)
   notationData <- maybe (return emptyNotationData) readNotationData (macrosFileFromMeta meta)
+  indexGlossary <- readIndexGlossary meta
   notationRef <- newIORef initialNotationState
   declRef <- newIORef initialDeclState
-  termRef <- newIORef initialTermState
+  termRef <- newIORef initialTermState{termExternal = termForwardExternalFromMeta meta}
   pendingDeclRef <- newIORef []
   let env = Env notationData notationRef declRef termRef pendingDeclRef watchSet
   blocks' <- processBlockList env blocks
   checkDeclStateFinal declRef pendingDeclRef
   checkNotationForwards notationRef watchSet
-  checkTermForwards termRef
+  checkTermForwards termRef (termForwardExternalFromMeta meta)
   -- Run the dependency-graph layout only when the rendered graph is actually
   -- needed (a \DependencyGraph marker, or the standalone graph-only mode), and
   -- do the layout-cache read/write here in IO rather than through
@@ -955,9 +1186,9 @@ processDoc doc@(Pandoc meta blocks) = do
       then do
         let signature = planCacheSignature graphConfig dependencyPlan
             cacheNodes = planCacheNodes dependencyPlan
-        cached <- readDependencyLayoutCache dependencyLayoutCachePath signature cacheNodes
+        cached <- readDependencyLayoutCache layoutCachePath signature cacheNodes
         let (tikz, freshPositions) = renderDependencyGraph debugGraph graphConfig dependencyPlan cached
-        forM_ freshPositions (writeDependencyLayoutCache dependencyLayoutCachePath signature cacheNodes)
+        forM_ freshPositions (writeDependencyLayoutCache layoutCachePath signature cacheNodes)
         return tikz
       else return ""
   unresolved <- newIORef Set.empty
@@ -976,8 +1207,266 @@ processDoc doc@(Pandoc meta blocks) = do
     forM_ (Set.toAscList bad) $ \name ->
       hPutStrLn stderr ("  unknown id: " <> T.unpack name)
     exitWith (ExitFailure 1)
+  -- These passes deliberately retain their order: section-reference diagnostics
+  -- see the full source, comments disappear before raw citation parsing, and
+  -- index localization collects canonical/display pairs from the original blocks.
+  -- Keep the phases explicit rather than fusing stateful traversals blindly.
   let blocksStripped = walk stripHtmlCommentInline (walk stripHtmlCommentBlock blocks'''')
-  return (Pandoc meta blocksStripped)
+  citationCache <- newIORef Map.empty
+  citationInlines <- walkM (expandRawCitationInlineSeq citationCache) blocksStripped
+  citationBlocks <- walkM (expandRawCitationBlock citationCache) citationInlines
+  return (Pandoc meta (walk (renderHeaderBookmarks (notationBookmarks notationData)) (localizeJapaneseIndex indexGlossary meta blocks citationBlocks)))
+
+readIndexGlossary :: Meta -> IO (Map Text Text)
+readIndexGlossary meta = case lookupMeta "index-glossary" meta >>= metaText of
+  Nothing -> return Map.empty
+  Just path -> do
+    yaml <- TIO.readFile (T.unpack path)
+    pandoc <- pandocBinary
+    (code, out, err) <- readProcessWithExitCode pandoc ["-f", "markdown", "-t", "json"] (T.unpack ("---\n" <> yaml <> "\n---\n"))
+    case (code, eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out)))) of
+      (ExitSuccess, Right (Pandoc glossaryMeta _)) ->
+        return $ Map.fromList $ case lookupMeta "terms" glossaryMeta of
+          Just (MetaList terms) -> mapMaybe termPair terms
+          _ -> []
+      (ExitSuccess, Left decodeError) -> ioError (userError ("book-filter: invalid index glossary parser output: " <> decodeError))
+      (ExitFailure _, _) -> ioError (userError ("book-filter: cannot read index glossary: " <> err))
+ where
+  termPair (MetaMap fields) = do
+    english <- Map.lookup "english" fields >>= metaText
+    japanese <- Map.lookup "japanese" fields >>= metaText
+    return (english, japanese)
+  termPair _ = Nothing
+
+-- Keep canonical term keys and hyperlink anchors stable, but display the
+-- translated definition followed by its English key in the Japanese index,
+-- including references emitted before that definition. Collect from the source
+-- before expanding term macros.
+localizeJapaneseIndex :: Map Text Text -> Meta -> [Block] -> [Block] -> [Block]
+localizeJapaneseIndex glossary meta source output
+  | (lookupMeta "index-language" meta >>= metaText) /= Just "ja" = output
+  | otherwise = walk localizeBlock (walk localizeInline output)
+ where
+  translations = Map.union glossary (Map.fromList (concatMap collect (query rawBlock source ++ query rawInline source)))
+  rawBlock (RawBlock fmt txt) | isTexFormat fmt = [txt]
+  rawBlock _ = []
+  rawInline (RawInline fmt txt) | isTexFormat fmt = [txt]
+  rawInline _ = []
+  collect txt = case nextTermMarker (normalizeTheoremTermHeadings txt) of
+    Nothing -> []
+    Just (_, marker, rest) ->
+      let pair = case marker of
+            TermDefine key display | key /= display -> [(key, display)]
+            _ -> []
+       in pair ++ collect rest
+  localizeBlock (RawBlock fmt txt) | isTexFormat fmt = RawBlock fmt (rewrite txt)
+  localizeBlock block = block
+  localizeInline (RawInline fmt txt) | isTexFormat fmt = RawInline fmt (rewrite txt)
+  localizeInline inline = inline
+  rewrite txt = case nextIndex txt of
+    Nothing -> txt
+    Just (prefix, command, payload, rest) ->
+      prefix <> command <> localizePayload payload <> "}" <> rewrite rest
+  nextIndex txt =
+    let candidates =
+          [ (prefix, command, body)
+          | command <- ["\\index{", "\\BookNotationIndex{"]
+          , let (prefix, suffix) = T.breakOn command txt
+          , not (T.null suffix)
+          , let body = T.drop (T.length command) suffix
+          ]
+     in case sortOn (T.length . firstOfThree) candidates of
+          [] -> Nothing
+          (prefix, command, body) : _ -> case takeBalancedArg body of
+            Just (payload, rest) -> Just (prefix, command, payload, rest)
+            Nothing -> do
+              (laterPrefix, laterCommand, payload, rest) <- nextIndex body
+              return (prefix <> command <> laterPrefix, laterCommand, payload, rest)
+  firstOfThree (a, _, _) = a
+  localizePayload payload =
+    let (levels, encapsulator) = T.breakOn "|" payload
+     in T.intercalate "!" (map localizeLevel (T.splitOn "!" levels)) <> encapsulator
+  localizeLevel "0Notation@Notation" = "0Notation@記号"
+  localizeLevel "defined in" = "defined in@定義箇所"
+  localizeLevel "referenced by" = "referenced by@参照箇所"
+  localizeLevel "further reading" = "further reading@関連文献"
+  localizeLevel key =
+    let canonical = fst (T.breakOn "@" key)
+        bilingual display
+          | display == canonical = display
+          | otherwise = display <> "（" <> canonical <> "）"
+     in maybe key (\display -> canonical <> "@" <> bilingual display) (Map.lookup canonical translations)
+
+-- Pandoc's fallback for an unexpanded semantic macro is its literal TeX name.
+-- Supply PDF text for header math only; keep the typeset formula and all ordinary
+-- math nodes unchanged. Unknown formulas still use Pandoc's normal writer.
+renderHeaderBookmarks :: Map Text Text -> Block -> Block
+renderHeaderBookmarks labels (Header level attr inlines) =
+  Header level attr (walk render inlines)
+ where
+  render inline@(Math kind formula) =
+    case bookmarkMathText labels (parseMathExpr formula) of
+      Just plain ->
+        Span
+          nullAttr
+          [ RawInline (Format "latex") ("\\texorpdfstring{" <> renderMathWithIndex kind formula "" <> "}{")
+          , Str plain
+          , RawInline (Format "latex") "}"
+          ]
+      Nothing -> inline
+  render inline = inline
+renderHeaderBookmarks _ block = block
+
+bookmarkMathText :: Map Text Text -> MathExpr -> Maybe Text
+bookmarkMathText labels = render
+ where
+  render (MathSeq xs) = T.concat <$> traverse render xs
+  render (MathGroup x) = render x
+  render (MathCommand name Nothing []) = Map.lookup name labels
+  render (MathText txt)
+    | not (T.any (`elem` ("\\{}%$&#_^" :: String)) txt) = Just txt
+  render (MathScript base marker arg) = do
+    a <- render base
+    b <- render arg
+    digits <- case marker of
+      "_" -> Just "₀₁₂₃₄₅₆₇₈₉"
+      "^" -> Just "⁰¹²³⁴⁵⁶⁷⁸⁹"
+      _ -> Nothing
+    converted <- traverse (convertDigit digits) (T.unpack b)
+    return (a <> T.pack converted)
+  render _ = Nothing
+  convertDigit digits c
+    | isDigit c = Just (T.index digits (fromEnum c - fromEnum '0'))
+    | otherwise = Nothing
+
+-- Raw theorem/proof environments bypass Pandoc's Markdown citation reader.
+-- Expose only bracketed citations as Cite nodes, leaving the surrounding TeX
+-- byte-for-byte intact. The normal downstream citeproc then owns numbering,
+-- locators, bibliography entries and links, just as for ordinary prose.
+type CitationCache = IORef (Map Text (Maybe Inline))
+
+expandRawCitationBlock :: CitationCache -> Block -> IO Block
+expandRawCitationBlock cache block@(RawBlock fmt txt)
+  | isTexFormat fmt = do
+      (changed, inlines) <- rawCitationInlines cache fmt txt
+      return $ if changed then Plain inlines else block
+expandRawCitationBlock _ block = return block
+
+expandRawCitationInlineSeq :: CitationCache -> [Inline] -> IO [Inline]
+expandRawCitationInlineSeq cache = fmap concat . mapM expand
+ where
+  expand inline@(RawInline fmt txt)
+    | isTexFormat fmt = do
+        (changed, inlines) <- rawCitationInlines cache fmt txt
+        return $ if changed then inlines else [inline]
+  expand inline = return [inline]
+
+rawCitationInlines :: CitationCache -> Format -> Text -> IO (Bool, [Inline])
+rawCitationInlines cache fmt = go False "" []
+ where
+  flush raw = [RawInline fmt raw | not (T.null raw)]
+  go changed buffer acc txt
+    | T.null txt = return (changed, acc ++ flush buffer)
+    | Just (literal, rest) <- rawCitationLiteral txt =
+        go changed (buffer <> literal) acc rest
+    | Just (candidate, rest) <- balancedDelimited '[' ']' txt
+    , "@" `T.isInfixOf` candidate = do
+        citation <- cachedRawCitation cache candidate
+        case citation of
+          Just cite -> go True "" (acc ++ flush buffer ++ [cite]) rest
+          Nothing -> copyOrdinary changed buffer acc txt
+    | otherwise = copyOrdinary changed buffer acc txt
+
+  copyOrdinary changed buffer acc txt =
+    let (ordinary, rest) = T.span (`notElem` ("\\[%$" :: String)) (T.drop 1 txt)
+     in go changed (buffer <> T.take 1 txt <> ordinary) acc rest
+
+-- Comments, math and literal TeX examples must never become bibliography items.
+rawCitationLiteral :: Text -> Maybe (Text, Text)
+rawCitationLiteral txt =
+  literalEnvironment <|> literalCommand <|> verb <|> math <|> comment <|> escaped
+ where
+  through open close = do
+    rest <- T.stripPrefix open txt
+    let (body, end) = T.breakOn close rest
+    return $
+      if T.null end
+        then (txt, "")
+        else (open <> body <> close, T.drop (T.length close) end)
+  literalEnvironment =
+    asum
+      [ through ("\\begin{" <> name <> "}") ("\\end{" <> name <> "}")
+      | name <-
+          [ "verbatim"
+          , "verbatim*"
+          , "Verbatim"
+          , "lstlisting"
+          , "minted"
+          , "comment"
+          , "equation"
+          , "equation*"
+          , "align"
+          , "align*"
+          , "gather"
+          , "gather*"
+          , "multline"
+          , "multline*"
+          ]
+      ]
+  literalCommand = asum [commandGroup name | name <- ["texttt", "url", "nolinkurl", "path"]]
+  commandGroup name = do
+    rest <- T.stripPrefix ("\\" <> name) txt
+    let (spaces, body) = T.span isSpace rest
+    (group, after) <- balancedDelimited '{' '}' body
+    return ("\\" <> name <> spaces <> group, after)
+  verb = do
+    rest <- T.stripPrefix "\\verb" txt
+    let (star, body) = if "*" `T.isPrefixOf` rest then ("*", T.drop 1 rest) else ("", rest)
+    (delimiter, _) <- T.uncons body
+    guard (not (isLetter delimiter || isSpace delimiter))
+    through ("\\verb" <> star <> T.singleton delimiter) (T.singleton delimiter)
+  math = asum [mathDelimited "\\(" "\\)", mathDelimited "\\[" "\\]", mathDelimited "$$" "$$", mathDelimited "$" "$"]
+  mathDelimited open close = do
+    rest <- T.stripPrefix open txt
+    return $ case breakRawMath close rest of
+      Nothing -> (txt, "")
+      Just (body, after) -> (open <> body <> close, after)
+  comment = do
+    _ <- T.stripPrefix "%" txt
+    return (T.breakOn "\n" txt)
+  escaped = do
+    _ <- T.stripPrefix "\\" txt
+    return (T.splitAt 2 txt)
+
+-- Delegate the citation grammar (multiple keys, prefixes and locators) to the
+-- same installed Pandoc that reads the book. No filter or citeproc is passed
+-- to this small parsing call, so it cannot recurse into this executable.
+-- Scoped to one document: environment changes and later invocations cannot
+-- reuse another document's parser output. Cache rejected candidates as well.
+cachedRawCitation :: CitationCache -> Text -> IO (Maybe Inline)
+cachedRawCitation cache candidate = do
+  entries <- readIORef cache
+  case Map.lookup candidate entries of
+    Just citation -> return citation
+    Nothing -> do
+      citation <- parseRawCitation candidate
+      modifyIORef' cache (Map.insert candidate citation)
+      return citation
+
+pandocBinary :: IO FilePath
+pandocBinary = fromMaybe "pandoc" <$> lookupEnv "PANDOC_BIN"
+
+parseRawCitation :: Text -> IO (Maybe Inline)
+parseRawCitation candidate = do
+  pandoc <- pandocBinary
+  (code, out, err) <- readProcessWithExitCode pandoc ["-f", "markdown", "-t", "json"] (T.unpack candidate)
+  case code of
+    ExitFailure _ -> ioError (userError ("book-filter: cannot parse raw citation: " <> err))
+    ExitSuccess ->
+      case eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
+        Right (Pandoc _ [Para [cite@(Cite _ _)]]) -> return (Just cite)
+        Right (Pandoc _ _) -> return Nothing
+        Left errMessage -> ioError (userError ("book-filter: invalid citation parser output: " <> errMessage))
 
 -- Extract a plain string from a metadata value.
 metaText :: MetaValue -> Maybe Text
@@ -1009,6 +1498,26 @@ metaNameSet key meta =
 watchSetFromMeta :: Meta -> Set Text
 watchSetFromMeta = metaNameSet "notation-watch"
 
+-- Read the terms whose definitions live outside this build from
+-- `term-forward-external:` YAML metadata. A chapter excerpt shares its source
+-- with the full book, so a \termforward there may point at a definition in a
+-- chapter the excerpt does not include; listing the term here keeps the
+-- forwarded-but-never-defined check strict for everything else. Pandoc parses
+-- metadata strings as markdown, so smart typography turns the ASCII "--" and
+-- "'" of a canonical term key into "–" and "’"; map them back so the listed
+-- keys compare equal to the raw keys of \termforward arguments.
+termForwardExternalFromMeta :: Meta -> Set Text
+termForwardExternalFromMeta = Set.map unsmartifyTermKey . metaNameSet "term-forward-external"
+
+unsmartifyTermKey :: Text -> Text
+unsmartifyTermKey =
+  T.replace "\8212" "---"
+    . T.replace "\8211" "--"
+    . T.replace "\8217" "'"
+    . T.replace "\8216" "'"
+    . T.replace "\8220" "\""
+    . T.replace "\8221" "\""
+
 -- Read the semantic-macros file path from `macros-file:` YAML metadata. The
 -- filter holds no book-specific paths: a book that wants notation displays,
 -- typed notation specs, and macro-derived behavior names its macros file here.
@@ -1022,7 +1531,7 @@ dependencyExcludeFromMeta :: Meta -> Set Text
 dependencyExcludeFromMeta = metaNameSet "dependency-graph-exclude"
 
 emptyNotationData :: NotationData
-emptyNotationData = NotationData Map.empty Map.empty
+emptyNotationData = NotationData Map.empty Map.empty Map.empty defaultBookmarkLabels
 
 data NotationMarker = NotationForward (Set Text) | NotationDefine (Set Text)
   deriving (Eq, Show)
@@ -1043,10 +1552,12 @@ data TermMarker
 data TermState = TermState
   { termDefined :: Set Text
   , termForwarded :: Set Text
+  , termExternal :: Set Text
+  , termAnchors :: Map Text Text
   }
 
 initialTermState :: TermState
-initialTermState = TermState Set.empty Set.empty
+initialTermState = TermState Set.empty Set.empty Set.empty Map.empty
 
 data NotationState = NotationState
   { notationForwarded :: Set Text
@@ -1217,6 +1728,8 @@ parseMarkerNames marker = go Set.empty
                             (filter (not . T.null) (map T.strip (T.splitOn "," inner)))
                      in go (acc `Set.union` names) (T.drop 1 tailText)
 
+-- Syntax-class names also feed Sort inference; see the Lean correspondence
+-- inventory immediately above data Sort before adding or reusing a name.
 type DeclType = Text
 
 data DeclHeadKind = DeclHeadUpper | DeclHeadLower
@@ -1292,7 +1805,34 @@ parseMathMetaBlock raw = do
 
 isMathMetaEnvironment :: Text -> Bool
 isMathMetaEnvironment raw =
-  isJust (stripMathMetaEnvironment raw)
+  "\\begin{mathmeta}" `T.isPrefixOf` T.stripStart raw
+
+-- Pandoc retains a whole theorem/proof environment as one raw block. Split
+-- metadata out at its source position, also when an injected BooklinkStart
+-- precedes the opener on the same line. Ignore delimiters in TeX comments.
+splitEmbeddedMathMeta :: Format -> Text -> Maybe [Block]
+splitEmbeddedMathMeta fmt raw = do
+  (before, rest) <- breakActiveMarker "\\begin{mathmeta}" raw
+  let (body, after) = case breakActiveMarker "\\end{mathmeta}" rest of
+        Nothing -> (rest, "")
+        Just (contents, remaining) -> (contents <> "\\end{mathmeta}", remaining)
+      meta = "\\begin{mathmeta}" <> body
+  guard (not (T.null before && T.null after))
+  return [RawBlock fmt txt | txt <- [before, meta, after], not (T.null (T.strip txt))]
+
+breakActiveMarker :: Text -> Text -> Maybe (Text, Text)
+breakActiveMarker marker = go ""
+ where
+  go before txt =
+    let (line, rest) = T.breakOn "\n" txt
+        (code, comment) = breakLatexComment line
+        (prefix, found) = T.breakOn marker code
+     in if not (T.null found)
+          then Just (before <> prefix, T.drop (T.length marker) found <> comment <> rest)
+          else
+            if T.null rest
+              then Nothing
+              else go (before <> line <> "\n") (T.drop 1 rest)
 
 stripMathMetaEnvironment :: Text -> Maybe Text
 stripMathMetaEnvironment raw = do
@@ -1668,32 +2208,15 @@ activeDeclEnv st =
 data NotationData = NotationData
   { notationDisplays :: Map Text Text
   , notationSpecs :: Map Text MacroSpec
+  , notationSignatures :: Map Text Text
+  , notationBookmarks :: Map Text Text
   }
 
 data MacroSpec = MacroSpec
   { macroMandatoryArgs :: Int
   , macroHasOptionalArg :: Bool
+  , macroMathClass :: Maybe Text
   }
-
-data MathToken
-  = TokCommand Text
-  | TokLBrace
-  | TokRBrace
-  | TokLBracket
-  | TokRBracket
-  | TokSub
-  | TokSup
-  | TokText Text
-  deriving (Eq, Show)
-
-data MathExpr
-  = MathSeq [MathExpr]
-  | MathCommand Text (Maybe MathExpr) [MathExpr]
-  | MathGroup MathExpr
-  | MathScript MathExpr Text MathExpr
-  | MathText Text
-  | MathRaw Text
-  deriving (Eq, Show)
 
 data PendingBooklinkMatch = PendingBooklinkMatch
   { pendingBooklinkName :: Text
@@ -1714,31 +2237,43 @@ data BooklinkInjection = BooklinkInjection
   }
   deriving (Eq, Show)
 
-emptyPendingBooklinkMatch :: Text -> Int -> Maybe Text -> PendingBooklinkMatch
-emptyPendingBooklinkMatch name index kind =
-  PendingBooklinkMatch name index kind Nothing Nothing Nothing Nothing
-
 injectBooklinksMain :: [String] -> IO ()
 injectBooklinksMain args =
   case parseInjectBooklinksArgs args of
     Just (sourceMapPath, sourcePath, outPath) -> do
       sourceText <- TIO.readFile sourcePath
       mapText <- TIO.readFile sourceMapPath
+      (entries, allSkips) <- case parseInjectionMap mapText of
+        Left message -> do
+          hPutStrLn stderr ("book-filter inject-booklinks: invalid source map: " <> message)
+          exitWith (ExitFailure 1)
+        Right parsed -> return parsed
       let injections =
             groupBooklinkInjections
               [ pending
-              | pending <- parseBooklinkSourceMap mapText
+              | pending <- entries
               , pendingBooklinkSource pending == Just sourcePath
               ]
           skips =
             [ skip
-            | skip <- parseSkipInjections mapText
+            | skip <- allSkips
             , skipInjectionSource skip == sourcePath
             ]
       validateBooklinkInjections sourcePath sourceText injections
       validateSkipInjections sourcePath sourceText skips
+      root <- getCurrentDirectory
+      let sourceIdentity = fromMaybe (T.pack sourcePath) (T.stripPrefix (T.pack root <> "/") (T.pack sourcePath))
+      let registry = root <> "/tools/chapter-correspondence/chapters"
+      exists <- doesDirectoryExist registry
+      configs <- if exists then filter (T.isSuffixOf ".json" . T.pack) <$> listDirectory registry else pure []
+      registered <- forM configs $ \name -> do
+        contents <- BL.readFile (registry <> "/" <> name)
+        case eitherDecode contents >>= parseEither (withObject "chapter configuration" (.: "source")) of
+          Right source -> pure (source == sourceIdentity)
+          Left err -> ioError (userError ("Invalid formula source configuration: " <> err))
+      let formulaInsertions = [Insertion offset 4 marker | or registered, (offset, marker) <- formulaMarkers sourceIdentity sourceText]
       createDirectoryIfMissing True (parentDirectory outPath)
-      TIO.writeFile outPath (applyInsertions sourceText (booklinkInsertions sourceText injections <> skipInsertions skips))
+      TIO.writeFile outPath (applyInsertions sourceText (booklinkInsertions sourceText injections <> skipInsertions skips <> formulaInsertions))
     _ -> do
       hPutStrLn stderr "usage: book-filter inject-booklinks --sourcemap MAP.json --source SOURCE.md --out OUT.md"
       exitWith (ExitFailure 2)
@@ -1760,106 +2295,53 @@ parentDirectory path =
     "" -> "."
     dir -> dir
 
-parseBooklinkSourceMap :: Text -> [PendingBooklinkMatch]
-parseBooklinkSourceMap =
-  go Nothing (-1) Nothing False Nothing []
-    . T.lines
+-- Parse JSON structurally: whitespace, object-key order and nested diagnostics
+-- never change entry identity. Even entries without a Lean name consume an
+-- array index, as they do in the sourcemap and PDF destinations.
+parseInjectionMap :: Text -> Either String ([PendingBooklinkMatch], [SkipInjection])
+parseInjectionMap text = do
+  value <- eitherDecode (BL.fromStrict (TE.encodeUtf8 text))
+  parseEither (withObject "source map" parseRoot) value
  where
-  go _ _ _ _ pending entries [] =
-    entries ++ maybe [] finishPending pending
-  go currentName currentIndex currentKind inMatch pending entries (line : rest)
-    | jsonKeyLine "declName" line =
-        -- The "declName" line delimits one entry in the source map, so the
-        -- entry index must advance here even when the value is null (a marker
-        -- with no following declaration). Binding the name through
-        -- jsonTextValue keeps it Nothing for a null declName while still
-        -- counting the entry, so later entry=N indices stay in sync with the
-        -- source map array and the PDF's booklink-entry-N hypertargets.
-        -- Reset currentKind here too: it is set by this entry's later "target"
-        -- line, so it must not leak from the previous entry when this one has
-        -- no "target" line of its own.
-        go (jsonTextValue "declName" line) (currentIndex + 1) Nothing False Nothing entries rest
-    | Just target <- jsonTextValue "target" line =
-        let kind = if target == "statement" then Just "statement" else Nothing
-         in go currentName currentIndex kind inMatch pending entries rest
-    | "\"match\"" `T.isInfixOf` line
-    , Just name <- currentName =
-        go currentName currentIndex currentKind True (Just (emptyPendingBooklinkMatch name currentIndex currentKind)) entries rest
-    | inMatch =
-        let pending' = updatePendingBooklink line <$> pending
-            finished = T.strip line == "}," || T.strip line == "}"
-         in if finished
-              then go currentName currentIndex currentKind False Nothing (entries ++ maybe [] finishPending pending') rest
-              else go currentName currentIndex currentKind True pending' entries rest
-    | otherwise =
-        go currentName currentIndex currentKind inMatch pending entries rest
-
-  finishPending pending
-    | pendingBooklinkStatus pending == Just "matched"
-    , Just _ <- pendingBooklinkSource pending
-    , Just _ <- pendingBooklinkStart pending
-    , Just _ <- pendingBooklinkEnd pending =
-        [pending]
-    | otherwise = []
-
-  updatePendingBooklink line pending =
-    pending
-      { pendingBooklinkStatus = jsonTextValue "status" line <|> pendingBooklinkStatus pending
-      , pendingBooklinkSource = T.unpack <$> jsonTextValue "source" line <|> pendingBooklinkSource pending
-      , pendingBooklinkStart = jsonIntValue "startOffset" line <|> pendingBooklinkStart pending
-      , pendingBooklinkEnd = jsonIntValue "endOffset" line <|> pendingBooklinkEnd pending
-      }
-
-{- | True when the (trimmed) line is the given JSON key, regardless of value
-type, e.g. matches both @"declName": "foo"@ and @"declName": null@.
--}
-jsonKeyLine :: Text -> Text -> Bool
-jsonKeyLine key line = ("\"" <> key <> "\":") `T.isPrefixOf` T.strip line
-
-jsonTextValue :: Text -> Text -> Maybe Text
-jsonTextValue key line = do
-  rest <- T.stripPrefix ("\"" <> key <> "\":") (T.strip line)
-  afterOpen <- T.stripPrefix "\"" (T.stripStart rest)
-  decodeJsonStringBody afterOpen
-
-{- | Decode a JSON string body (the text just after the opening quote) up to its
-closing unescaped double quote, resolving the standard backslash escapes.
-Returns Nothing when there is no closing quote, so a non-string value (null or
-a number) — which has no opening quote to strip above — yields Nothing.
-
-The source map is emitted by tools/booklink_sourcemap.py via
-json.dumps(..., ensure_ascii=False), so values are standard JSON-escaped but
-never use \\uXXXX for the data this map carries (Lean identifiers, fixed
-target/status words, and POSIX source paths). This replaces an earlier
-T.breakOn "\\"" that silently truncated a value at its first escaped quote and
-kept a trailing backslash from an escaped backslash.
--}
-decodeJsonStringBody :: Text -> Maybe Text
-decodeJsonStringBody = go []
- where
-  go acc t = case T.uncons t of
-    Nothing -> Nothing
-    Just ('"', _) -> Just (T.pack (reverse acc))
-    Just ('\\', rest) -> case T.uncons rest of
-      Just (c, rest') -> go (unescape c : acc) rest'
-      Nothing -> Nothing
-    Just (c, rest) -> go (c : acc) rest
-
-  unescape c = case c of
-    '"' -> '"'
-    '\\' -> '\\'
-    '/' -> '/'
-    'n' -> '\n'
-    't' -> '\t'
-    'r' -> '\r'
-    'b' -> '\b'
-    'f' -> '\f'
-    other -> other
-
-jsonIntValue :: Text -> Text -> Maybe Int
-jsonIntValue key line = do
-  rest <- T.stripPrefix ("\"" <> key <> "\":") (T.strip line)
-  readMaybeInt (T.unpack (T.takeWhile isDigit (T.strip rest)))
+  parseRoot root = do
+    entries <- root .: "entries"
+    skips <- case KeyMap.lookup "skips" root of
+      Nothing -> return []
+      Just value -> parseJSON value
+    matches <- catMaybes <$> zipWithM parseEntry [0 ..] entries
+    parsedSkips <- mapM parseSkip skips
+    return (matches, parsedSkips)
+  parseEntry :: Int -> Value -> Parser (Maybe PendingBooklinkMatch)
+  parseEntry index = withObject "entry" $ \entry -> do
+    lean <- entry .: "lean"
+    name <-
+      withObject
+        "lean"
+        ( \fields -> do
+            anchor <- fields .:? "anchorName"
+            declaration <- fields .:? "declName"
+            return (anchor <|> declaration)
+        )
+        lean
+    booklink <- entry .: "booklink"
+    target <- withObject "booklink" (.:? "target") booklink
+    match <- entry .: "match"
+    withObject
+      "match"
+      ( \fields -> do
+          status <- fields .: "status"
+          if status /= ("matched" :: Text)
+            then return Nothing
+            else do
+              source <- fields .: "source"
+              start <- fields .: "startOffset"
+              end <- fields .: "endOffset"
+              let kind = if target == Just ("statement" :: Text) then target else Nothing
+              return ((\key -> PendingBooklinkMatch key index kind (Just status) (Just source) (Just start) (Just end)) <$> name)
+      )
+      match
+  parseSkip = withObject "skip" $ \fields ->
+    SkipInjection <$> fields .: "key" <*> fields .: "source" <*> fields .: "startOffset" <*> fields .: "endOffset"
 
 groupBooklinkInjections :: [PendingBooklinkMatch] -> [BooklinkInjection]
 groupBooklinkInjections pending =
@@ -1924,58 +2406,6 @@ data SkipInjection = SkipInjection
   , skipInjectionEnd :: Int
   }
   deriving (Eq, Show)
-
-data PendingSkip = PendingSkip
-  { pendingSkipKey :: Maybe Text
-  , pendingSkipSource :: Maybe FilePath
-  , pendingSkipStart :: Maybe Int
-  , pendingSkipEnd :: Maybe Int
-  }
-
-emptyPendingSkip :: PendingSkip
-emptyPendingSkip = PendingSkip Nothing Nothing Nothing Nothing
-
-{- | Parse the top-level @"skips"@ array emitted by tools/booklink_sourcemap.py.
-Line-based like 'parseBooklinkSourceMap': scan from the @"skips":@ header to the
-array's closing bracket, accumulating each object's key/source/offsets. Skip
-objects carry no @declName@/@match@, so the booklink parser ignores them and this
-one ignores the surrounding entries.
--}
-parseSkipInjections :: Text -> [SkipInjection]
-parseSkipInjections fullText =
-  case dropWhile (not . T.isInfixOf "\"skips\":") (T.lines fullText) of
-    [] -> []
-    (header : rest)
-      | "[]" `T.isInfixOf` header -> [] -- empty inline array, no objects
-      | otherwise -> go emptyPendingSkip [] rest
- where
-  go _ acc [] = reverse acc
-  go pending acc (line : rest)
-    | isArrayClose line = reverse acc
-    | T.strip line == "{" = go emptyPendingSkip acc rest
-    | isObjectClose line =
-        case toSkip pending of
-          Just skip -> go emptyPendingSkip (skip : acc) rest
-          Nothing -> go emptyPendingSkip acc rest
-    | otherwise = go (updatePendingSkip line pending) acc rest
-
-  isArrayClose line = let s = T.strip line in s == "]" || s == "],"
-  isObjectClose line = let s = T.strip line in s == "}" || s == "},"
-
-  toSkip pending =
-    SkipInjection
-      <$> pendingSkipKey pending
-      <*> pendingSkipSource pending
-      <*> pendingSkipStart pending
-      <*> pendingSkipEnd pending
-
-  updatePendingSkip line pending =
-    pending
-      { pendingSkipKey = jsonTextValue "key" line <|> pendingSkipKey pending
-      , pendingSkipSource = T.unpack <$> jsonTextValue "source" line <|> pendingSkipSource pending
-      , pendingSkipStart = jsonIntValue "startOffset" line <|> pendingSkipStart pending
-      , pendingSkipEnd = jsonIntValue "endOffset" line <|> pendingSkipEnd pending
-      }
 
 validateSkipInjections :: FilePath -> Text -> [SkipInjection] -> IO ()
 validateSkipInjections sourcePath sourceText =
@@ -2123,22 +2553,6 @@ processBlockList env =
     | attr == nullAttr = blocks
   blockList block = [block]
 
-wrapBooklinkTexBlock :: [Text] -> Maybe Text -> [Block] -> [Block]
-wrapBooklinkTexBlock _ _ [] = []
-wrapBooklinkTexBlock names markerKind blocks =
-  [ Div
-      nullAttr
-      ( [RawBlock (Format "latex") (booklinkTexComment "START" names markerKind)]
-          ++ blocks
-          ++ [RawBlock (Format "latex") (booklinkTexComment "END" names markerKind)]
-      )
-  ]
-
-booklinkBlockKind :: [Block] -> Maybe Text
-booklinkBlockKind blocks
-  | any blockIsStatement blocks = Just "statement"
-  | otherwise = Nothing
-
 -- The unnumbered amsthm statement environments from
 -- polish-space/tex/macros.tex, paired with the heading label each one
 -- prints. Keep in sync with STATEMENT_ENVS in tools/booklink_sourcemap.py
@@ -2158,26 +2572,6 @@ statementEnvironments =
   , ("remark*", "Remark")
   , ("statement*", "Statement")
   ]
-
-blockIsStatement :: Block -> Bool
-blockIsStatement (RawBlock fmt txt)
-  | isTexFormat fmt =
-      any
-        (`T.isInfixOf` txt)
-        [ "\\begin{" <> T.dropEnd 1 envName
-        | (envName, _) <- statementEnvironments
-        ]
-blockIsStatement (Div _ blocks) = any blockIsStatement blocks
-blockIsStatement _ = False
-
-booklinkTexComment :: Text -> [Text] -> Maybe Text -> Text
-booklinkTexComment commentKind names markerKind =
-  "% BOOKLINK-"
-    <> commentKind
-    <> " lean="
-    <> T.intercalate "," (map sanitizeBooklinkName names)
-    <> maybe "" (" kind=" <>) markerKind
-    <> "\n"
 
 sanitizeBooklinkName :: Text -> Text
 sanitizeBooklinkName =
@@ -2229,6 +2623,9 @@ processBlock env@(Env notationData ref declRef termRef pendingDeclRef watchSet) 
     , Just directives <- parseMathMetaBlock txt ->
         processMathMetaDirectives env directives
     | isTexFormat fmt
+    , Just parts <- splitEmbeddedMathMeta fmt txt ->
+        Div nullAttr <$> processNestedBlockList env parts
+    | isTexFormat fmt
     , isMathMetaEnvironment txt ->
         declStateError "malformed mathmeta block; each active line must be a valid mathmeta directive, and \\with{...} may contain only \\vars or \\import directives"
     | isTexFormat fmt
@@ -2247,6 +2644,13 @@ processBlock env@(Env notationData ref declRef termRef pendingDeclRef watchSet) 
     Figure attr
       <$> processCaption env cap
       <*> processNestedBlockList env bs
+  Table attr caption columns (TableHead headAttr headRows) bodies (TableFoot footAttr footRows) ->
+    Table attr
+      <$> processCaption env caption
+      <*> pure columns
+      <*> (TableHead headAttr <$> mapM (processTableRow env) headRows)
+      <*> mapM (processTableBody env) bodies
+      <*> (TableFoot footAttr <$> mapM (processTableRow env) footRows)
   DefinitionList items -> DefinitionList <$> mapM (processDefItem env) items
   Plain ils -> Plain <$> processInlineSeqWithComments True env ils
   Para ils -> Para <$> processInlineSeqWithComments True env ils
@@ -2254,6 +2658,16 @@ processBlock env@(Env notationData ref declRef termRef pendingDeclRef watchSet) 
     enterSection declRef level
     Header level attr <$> processInlineSeqWithComments False env ils
   _ -> walkM (processInline env) b
+
+processTableRow :: Env -> Row -> IO Row
+processTableRow env (Row attr cells) = Row attr <$> mapM processCell cells
+ where
+  processCell (Cell attributes alignment rowSpan colSpan blocks) =
+    Cell attributes alignment rowSpan colSpan <$> processNestedBlockList env blocks
+
+processTableBody :: Env -> TableBody -> IO TableBody
+processTableBody env (TableBody attr headColumns headRows rows) =
+  TableBody attr headColumns <$> mapM (processTableRow env) headRows <*> mapM (processTableRow env) rows
 
 processMathMetaDirectives ::
   Env ->
@@ -2362,9 +2776,31 @@ normalizeTheoremTermHeadings raw =
     fromMaybe display parenthesizedHeading
    where
     stripped = T.strip display
-    parenthesizedHeading = do
-      innerWithClose <- T.stripPrefix (headingLabel <> " (") stripped
-      T.stripSuffix ")" innerWithClose
+    -- The environment already prints this label. Japanese translations use
+    -- full-width parentheses and usually omit the space before them.
+    labels = headingLabel : maybe [] pure (lookup headingLabel japaneseHeadingLabels)
+    parenthesizedHeading =
+      asum
+        [ do
+            afterLabel <- T.stripPrefix label stripped
+            innerWithClose <- T.stripPrefix opening (T.stripStart afterLabel)
+            T.stripSuffix closing innerWithClose
+        | label <- labels
+        , (opening, closing) <- [("(", ")"), ("（", "）")]
+        ]
+    japaneseHeadingLabels =
+      [ ("Theorem", "定理")
+      , ("Lemma", "補題")
+      , ("Proposition", "命題")
+      , ("Corollary", "系")
+      , ("Claim", "主張")
+      , ("Fact", "事実")
+      , ("Recall", "復習")
+      , ("Definition", "定義")
+      , ("Example", "例")
+      , ("Construction", "構成")
+      , ("Remark", "注意")
+      ]
 
 replaceTermMarkers :: IORef TermState -> Text -> IO Text
 replaceTermMarkers termRef txt =
@@ -2498,7 +2934,7 @@ takeBalancedArg = go (1 :: Int) ""
       Just (c, rest) -> go depth (T.snoc acc c) rest
 
 termIndexText :: IORef TermState -> TermMarker -> IO Text
-termIndexText _ (TermIndex key)
+termIndexText termRef (TermIndex key)
   | T.null key = return ""
   | isExistingStructuredIndex key = return ("\\index{" <> key <> "}")
   -- A raw \index{A!B} with a subentry separator is a genuine makeindex
@@ -2507,16 +2943,24 @@ termIndexText _ (TermIndex key)
   -- (\index{A!B!defined in}), anchor the page to A's term entry rather than B,
   -- and could overflow makeindex's subsubitem limit on a three-level key.
   | "!" `T.isInfixOf` key = return ("\\index{" <> key <> "}")
-  | otherwise = return ("\\index{" <> termIndexKey key <> "!defined in|termindexpage{" <> termIndexAnchorName key <> "}}")
+  | otherwise = do
+      claimTermAnchor termRef key
+      return ("\\index{" <> termIndexKey key <> "!defined in|termindexpage{" <> termIndexAnchorName key <> "}}")
 termIndexText termRef (TermDefine key rendered)
   | T.null key = return rendered
   | isExistingStructuredIndex key = do
       markTermDefined termRef key
       return ("\\textbf{" <> rendered <> "}\\index{" <> key <> "}")
   | otherwise = do
+      st <- readIORef termRef
       markTermDefined termRef key
+      let anchor =
+            if key `Set.member` termDefined st
+              then ""
+              else "\\hypertarget{" <> termDefAnchorName key <> "}{}"
       return $
-        "\\hyperlink{"
+        anchor
+          <> "\\hyperlink{"
           <> termIndexAnchorName key
           <> "}{\\textbf{"
           <> rendered
@@ -2529,30 +2973,27 @@ termIndexText termRef (TermDefine key rendered)
 termIndexText termRef (TermForward key rendered)
   | T.null key = return rendered
   | otherwise = do
+      claimTermAnchor termRef key
       modifyIORef termRef $ \st ->
         st{termForwarded = Set.insert key (termForwarded st)}
+      st <- readIORef termRef
       return $
-        "\\hyperlink{"
-          <> termIndexAnchorName key
-          <> "}{"
-          <> rendered
-          <> "}"
+        termLink st key rendered
           <> "\\index{"
           <> termIndexKey key
           <> "!referenced by}"
-termIndexText _ (TermRef key)
+termIndexText termRef (TermRef key)
   | T.null key = return ""
-  | otherwise = return ("\\index{" <> termIndexKey key <> "!referenced by}")
+  | otherwise = do
+      claimTermAnchor termRef key
+      return ("\\index{" <> termIndexKey key <> "!referenced by}")
 termIndexText termRef (TermUse key rendered)
   | T.null key = return rendered
   | otherwise = do
       requireTermAvailable termRef key rendered
+      st <- readIORef termRef
       return $
-        "\\hyperlink{"
-          <> termIndexAnchorName key
-          <> "}{"
-          <> rendered
-          <> "}"
+        termLink st key rendered
           <> "\\index{"
           <> termIndexKey key
           <> "!referenced by}"
@@ -2561,13 +3002,37 @@ termIndexText _ (TermMalformed message) = do
   hPutStrLn stderr ("  " <> T.unpack message)
   exitWith (ExitFailure 1)
 
+-- Excerpts may mention a definition belonging to an omitted chapter. Keep
+-- the index reference, but do not emit a PDF link with no destination.
+termLink :: TermState -> Text -> Text -> Text
+termLink st key rendered
+  | key `Set.member` termExternal st = rendered
+  | otherwise = "\\hyperlink{" <> termIndexAnchorName key <> "}{" <> rendered <> "}"
+
 markTermDefined :: IORef TermState -> Text -> IO ()
-markTermDefined termRef key =
-  modifyIORef termRef $ \st ->
-    st{termDefined = Set.insert key (termDefined st)}
+markTermDefined termRef key = do
+  claimTermAnchor termRef key
+  modifyIORef termRef $ \st -> st{termDefined = Set.insert key (termDefined st)}
+
+-- Subentries and explicit display aliases share their canonical index root.
+-- Distinct roots must never silently share the lossy hyperlink slug.
+claimTermAnchor :: IORef TermState -> Text -> IO ()
+claimTermAnchor termRef key
+  | isExistingStructuredIndex key = return ()
+  | otherwise = do
+      st <- readIORef termRef
+      let slug = termAnchorSlug key
+          root = fst (T.breakOn "@" (fst (T.breakOn "!" key)))
+          identity = fromMaybe (T.strip root) (mathTermSortKey root)
+      case Map.lookup slug (termAnchors st) of
+        Just previous | previous /= identity -> do
+          hPutStrLn stderr ("[term-filter] colliding term anchors: " <> T.unpack previous <> " / " <> T.unpack identity <> " -> " <> T.unpack slug)
+          exitWith (ExitFailure 1)
+        _ -> modifyIORef' termRef $ \current -> current{termAnchors = Map.insert slug identity (termAnchors current)}
 
 requireTermAvailable :: IORef TermState -> Text -> Text -> IO ()
 requireTermAvailable termRef key rendered = do
+  claimTermAnchor termRef key
   st <- readIORef termRef
   unless (key `Set.member` termDefined st || key `Set.member` termForwarded st) $ do
     hPutStrLn stderr "[term-filter] term used before \\termdefine or \\termforward:"
@@ -2576,10 +3041,10 @@ requireTermAvailable termRef key rendered = do
     hPutStrLn stderr "  use \\termforward{...} or \\termforwardas{...}{...} for the informal use, or move the \\termdefine{...} earlier"
     exitWith (ExitFailure 1)
 
-checkTermForwards :: IORef TermState -> IO ()
-checkTermForwards termRef = do
+checkTermForwards :: IORef TermState -> Set Text -> IO ()
+checkTermForwards termRef externalTerms = do
   st <- readIORef termRef
-  let missing = termForwarded st `Set.difference` termDefined st
+  let missing = (termForwarded st `Set.difference` termDefined st) `Set.difference` externalTerms
   unless (Set.null missing) $ do
     hPutStrLn stderr "[term-filter] term forwarded but never defined:"
     forM_ (Set.toAscList missing) $ \key ->
@@ -2596,8 +3061,18 @@ termIndexKey key
         Just sortKey -> sortKey <> "@" <> key
 
 termIndexAnchorName :: Text -> Text
-termIndexAnchorName key =
-  "term-index-" <> T.map anchorChar (termAnchorKey key)
+termIndexAnchorName key = "term-index-" <> termAnchorSlug key
+
+-- A zero-width companion anchor dropped at the definition site itself. The
+-- printed book's term links target the index entry (termIndexAnchorName,
+-- whose hypertarget the index creates); the formalization viewer prefers
+-- jumping straight to the definition, and resolves a term-index-<slug> link
+-- to term-def-<slug> when the PDF carries it.
+termDefAnchorName :: Text -> Text
+termDefAnchorName key = "term-def-" <> termAnchorSlug key
+
+termAnchorSlug :: Text -> Text
+termAnchorSlug key = T.map anchorChar (termAnchorKey key)
  where
   anchorChar c
     | isAsciiLower c || isAsciiUpper c || isDigit c = c
@@ -2747,21 +3222,83 @@ linkRawLatexMath notationData ref declRef watchSet = go
         return (open <> linked <> close <> refEntries <> tailText)
 
 breakRawMath :: Text -> Text -> Maybe (Text, Text)
-breakRawMath close = go ""
+breakRawMath close = go []
  where
   go acc txt
     | T.null txt = Nothing
     | "\\$" `T.isPrefixOf` txt =
-        go (acc <> "\\$") (T.drop 2 txt)
+        go ("\\$" : acc) (T.drop 2 txt)
     | close `T.isPrefixOf` txt =
-        Just (acc, T.drop (T.length close) txt)
+        Just (T.concat (reverse acc), T.drop (T.length close) txt)
     | otherwise =
         let (prefix, rest) = T.splitAt 1 txt
-         in go (acc <> prefix) rest
+         in go (prefix : acc) rest
 
 -- Enforce the first-use gate for watched notation, then (when linking is
 -- allowed) hyperlink defined notations and collect their reference index
 -- entries. Shared by raw-TeX math and Pandoc Math inlines.
+
+{- | The stage-4 wiring of the DSL angle-bracket resolution: a raw
+<a, b> literal in math content is replaced by the notation its
+sorts resolve to. When the item sorts are known and the literal is
+ambiguous or matches no notation, the build fails; when the sorts
+are unknown or the span does not parse, the content is untouched.
+-}
+resolveDslContent :: NotationData -> IORef DeclState -> Text -> IO Text
+resolveDslContent notationData declRef content
+  | not ("<" `T.isInfixOf` content || "\\langle" `T.isInfixOf` content) =
+      return content
+  | otherwise = do
+      st <- readIORef declRef
+      case parseDslSpan content of
+        Nothing -> return content
+        Just tree ->
+          let (resolved, findings) =
+                resolveDslExpr (signatureSorts notationData) st Nothing tree
+              bad =
+                [ f
+                | f <- findings
+                , case dslFindingVerdict f of
+                    DslVerdictAmbiguous _ -> True
+                    DslVerdictNoCandidate -> True
+                    _ -> False
+                ]
+              anyResolved =
+                any
+                  ( \f -> case dslFindingVerdict f of
+                      DslVerdictResolved _ -> True
+                      _ -> False
+                  )
+                  findings
+           in if null bad
+                then
+                  return
+                    ( if anyResolved
+                        then renderDsl resolved
+                        else content
+                    )
+                else do
+                  hPutStrLn
+                    stderr
+                    "[notation-filter] angle-bracket literal does not resolve uniquely:"
+                  forM_ bad $ \f ->
+                    hPutStrLn
+                      stderr
+                      ( "  "
+                          <> T.unpack (dslFindingAngle f)
+                          <> ": "
+                          <> verdictText (dslFindingVerdict f)
+                      )
+                  hPutStrLn stderr ("  in math: " <> T.unpack content)
+                  exitWith (ExitFailure 1)
+ where
+  verdictText (DslVerdictAmbiguous names) =
+    "ambiguous: "
+      <> intercalate ", " (map (\n -> '\\' : T.unpack n) names)
+  verdictText DslVerdictNoCandidate =
+    "no notation matches the known sorts"
+  verdictText _ = ""
+
 linkMathContentChecked ::
   Bool -> NotationData -> IORef NotationState -> IORef DeclState -> Set Text -> Text -> IO (Text, Text)
 linkMathContentChecked allowLinks notationData ref declRef watchSet content = do
@@ -2778,22 +3315,23 @@ linkMathContentChecked allowLinks notationData ref declRef watchSet content = do
       offenders = Set.filter (`isUsedIn` content) pending
   if Set.null offenders
     then do
+      dslContent <- resolveDslContent notationData declRef content
       -- Linking parses the math to a MathExpr and re-renders it; that round-trip
       -- is the identity only on brace-balanced input. Skip linking on unbalanced
       -- braces (already invalid LaTeX) so the content is passed through verbatim
       -- rather than having a closing brace fabricated for an unclosed group.
-      let linkable = allowLinks && bracesBalanced content
+      let linkable = allowLinks && bracesBalanced dslContent
       (content', typedNames) <-
         if linkable
-          then linkTypedNotations (notationSpecs notationData) declRef active content
-          else return (content, Set.empty)
+          then linkTypedNotations (notationSpecs notationData) declRef active dslContent
+          else return (dslContent, Set.empty)
       let (content'', usedNames) =
             if linkable
               then linkDefinedNotations (notationSpecs notationData) watchSet active content'
               else (content', Set.empty)
           refEntries =
             notationReferenceIndexText (notationDisplays notationData) (usedNames `Set.union` typedNames)
-      return (content'', refEntries)
+      return (protectAlignedLeadingBracket content'', refEntries)
     else do
       hPutStrLn stderr "[notation-filter] notation used before \\define or \\forward:"
       hPutStrLn
@@ -2804,11 +3342,37 @@ linkMathContentChecked allowLinks notationData ref declRef watchSet content = do
       hPutStrLn stderr ("  in math: " <> T.unpack content)
       exitWith (ExitFailure 1)
 
+-- amsmath reads an initial [T] in aligned as its optional vertical position.
+-- It restores unknown positions as formula text, but emits a warning. Make the
+-- intended formula start explicit while retaining actual [t], [c], [b] options.
+protectAlignedLeadingBracket :: Text -> Text
+protectAlignedLeadingBracket input =
+  case T.breakOn marker input of
+    (_, rest) | T.null rest -> input
+    (before, rest) ->
+      let after = T.drop (T.length marker) rest
+          stripped = T.stripStart after
+          positional = case T.stripPrefix "[" stripped of
+            Nothing -> False
+            Just body ->
+              let (position, close) = T.breakOn "]" body
+               in not (T.null close) && T.strip position `elem` ["t", "c", "b", ""]
+          disambiguator = if "[" `T.isPrefixOf` stripped && not positional then "\\relax" else ""
+       in before <> marker <> disambiguator <> protectAlignedLeadingBracket after
+ where
+  marker = "\\begin{aligned}"
+
 notationIndexText :: Map Text Text -> Set Text -> Set Text -> Text
 notationIndexText displays watchSet names =
   let watchedNames = Set.toAscList (names `Set.intersection` watchSet)
+      -- Alongside the index entry, drop a zero-width notation-def-<name>
+      -- companion anchor at the definition site: the printed notation links
+      -- target the index entry, and the formalization viewer resolves them to
+      -- this anchor to jump straight to where the notation is introduced.
       entry name =
-        "\\index{0Notation@Notation!"
+        "\\hypertarget{notation-def-"
+          <> name
+          <> "}{}\\BookNotationIndex{0Notation@Notation!"
           <> name
           <> "@"
           <> notationIndexDisplayForIndex displays name
@@ -2822,14 +3386,19 @@ notationReferenceIndexText displays names =
   T.concat (map entry (Set.toAscList names))
  where
   entry name =
-    "\\index{0Notation@Notation!" <> name <> "@" <> notationIndexDisplayForIndex displays name <> "!referenced by}"
+    "\\BookNotationIndex{0Notation@Notation!" <> name <> "@" <> notationIndexDisplayForIndex displays name <> "!referenced by}"
 
 notationIndexAnchorName :: Text -> Text
 notationIndexAnchorName name = "notation-index-" <> name
 
-notationHyperlink :: Text -> Text -> Text
-notationHyperlink name body =
-  "{\\hyperlink{" <> notationIndexAnchorName name <> "}{" <> body <> "}}"
+-- A brace group alone is an Ord atom, even when the macro inside is a
+-- relation or binary operator. Preserve the macro's outer math class around
+-- the link so TeX supplies its normal spacing and operator limits.
+notationHyperlink :: Map Text MacroSpec -> Text -> Text -> Text
+notationHyperlink specs name body =
+  let mathClass = Map.lookup name specs >>= macroMathClass
+      wrapper = maybe "" ("\\" <>) mathClass
+   in wrapper <> "{\\hyperlink{" <> notationIndexAnchorName name <> "}{" <> body <> "}}"
 
 notationIndexDisplay :: Map Text Text -> Text -> Text
 notationIndexDisplay displays name =
@@ -2865,30 +3434,57 @@ protectLatexCommands txt
 readNotationData :: FilePath -> IO NotationData
 readNotationData path = do
   content <- readMacrosFile "notation-filter" path
-  let (displays, specs) = collectNotationData Nothing Map.empty Map.empty (T.lines content)
-  return (NotationData displays specs)
+  let (displays, specs, signatures) = collectNotationData Nothing Nothing Map.empty Map.empty Map.empty (T.lines content)
+      bookmarks = Map.union (Map.fromList (mapMaybe parseBookmarkHint (T.lines content))) defaultBookmarkLabels
+  return (NotationData displays specs signatures bookmarks)
+
+defaultBookmarkLabels :: Map Text Text
+defaultBookmarkLabels = Map.fromList [("omega", "ω")]
+
+-- A semantic macro may specify its plain PDF label independently of its math
+-- typography, e.g. "% pdf-bookmark: EventualEqualityER = E₀".
+parseBookmarkHint :: Text -> Maybe (Text, Text)
+parseBookmarkHint line = do
+  rest <- T.stripPrefix "% pdf-bookmark:" (T.strip line)
+  let (name, suffix) = T.breakOn "=" rest
+      label = T.strip (T.drop 1 suffix)
+  guard (not (T.null (T.strip name)) && not (T.null label))
+  guard (not (T.any (`elem` ("\\{}%$&#_^" :: String)) label))
+  return (T.strip name, label)
 
 collectNotationData ::
   Maybe Text ->
+  Maybe Text ->
   Map Text Text ->
   Map Text MacroSpec ->
+  Map Text Text ->
   [Text] ->
-  (Map Text Text, Map Text MacroSpec)
-collectNotationData _ displays specs [] = (displays, specs)
-collectNotationData pending displays specs (line : rest)
+  (Map Text Text, Map Text MacroSpec, Map Text Text)
+collectNotationData _ _ displays specs signatures [] = (displays, specs, signatures)
+collectNotationData pending pendingSig displays specs signatures (line : rest)
   | Just display <- parseNotationIndexHint line =
-      collectNotationData (Just display) displays specs rest
+      collectNotationData (Just display) pendingSig displays specs signatures rest
+  | Just sig <- parseNotationTypeHint line =
+      collectNotationData pending (Just sig) displays specs signatures rest
   | Just (name, spec) <- parseNewCommand line =
       let display = fromMaybe (synthesizedDisplay name (macroMandatoryArgs spec)) pending
-       in collectNotationData Nothing (Map.insert name display displays) (Map.insert name spec specs) rest
+          signatures' =
+            case pendingSig of
+              Just sig -> Map.insert name sig signatures
+              Nothing -> signatures
+       in collectNotationData Nothing Nothing (Map.insert name display displays) (Map.insert name spec specs) signatures' rest
   | T.null (T.strip line) || "%" `T.isPrefixOf` T.strip line =
-      collectNotationData pending displays specs rest
+      collectNotationData pending pendingSig displays specs signatures rest
   | otherwise =
-      collectNotationData Nothing displays specs rest
+      collectNotationData Nothing Nothing displays specs signatures rest
 
 parseNotationIndexHint :: Text -> Maybe Text
 parseNotationIndexHint line =
   T.strip <$> T.stripPrefix "% notation-index:" (T.strip line)
+
+parseNotationTypeHint :: Text -> Maybe Text
+parseNotationTypeHint line =
+  T.strip <$> T.stripPrefix "% notation-type:" (T.strip line)
 
 parseNewCommand :: Text -> Maybe (Text, MacroSpec)
 parseNewCommand line = do
@@ -2905,7 +3501,22 @@ macroSpec afterName =
    in MacroSpec
         { macroMandatoryArgs = if hasOptional then totalArgs - 1 else totalArgs
         , macroHasOptionalArg = hasOptional
+        , macroMathClass = parseNewCommandReplacement afterName >>= outerMathClass
         }
+
+-- Only a whole replacement consisting of one explicitly classified atom
+-- qualifies. A construction such as #1\mathrel{...}#2 includes its operands
+-- and must not itself acquire relation spacing. Large operators may append
+-- displaylimits, which is also the default of the outer mathop.
+outerMathClass :: Text -> Maybe Text
+outerMathClass body =
+  case parseMathExpr (T.strip body) of
+    MathSeq [MathCommand cls Nothing [_]]
+      | cls `elem` ["mathrel", "mathbin", "mathop", "mathord", "mathopen", "mathclose", "mathpunct", "mathinner"] ->
+          Just cls
+    MathSeq [MathCommand "mathop" Nothing [_], MathCommand "displaylimits" Nothing []] ->
+      Just "mathop"
+    _ -> Nothing
 
 parseArgCount :: Text -> (Int, Text)
 parseArgCount txt =
@@ -3006,7 +3617,7 @@ hasUnescapedPercent txt
 
 processInlineWithLinks :: Bool -> Env -> Inline -> IO Inline
 processInlineWithLinks allowLinks env (Emph ils) =
-  Emph <$> processInlineSeqWithComments False env ils
+  Emph <$> processInlineSeqWithComments allowLinks env ils
 processInlineWithLinks allowLinks env (Underline ils) =
   Underline <$> processInlineSeqWithComments allowLinks env ils
 processInlineWithLinks allowLinks env (Strong ils) =
@@ -3064,126 +3675,6 @@ renderMathWithIndex InlineMath content indexEntries =
 renderMathWithIndex DisplayMath content indexEntries =
   "\\[" <> content <> "\\]" <> indexEntries
 
-tokenizeMath :: Text -> [MathToken]
-tokenizeMath txt
-  | T.null txt = []
-  | Just rest <- T.stripPrefix "\\" txt =
-      case T.uncons rest of
-        Nothing -> [TokText "\\"]
-        Just (c, rest')
-          | isLetter c ->
-              let (nameTail, tailText) = T.span isLetter rest'
-               in TokCommand (T.cons c nameTail) : tokenizeMath tailText
-          | otherwise ->
-              TokCommand (T.singleton c) : tokenizeMath rest'
-  | Just rest <- T.stripPrefix "{" txt = TokLBrace : tokenizeMath rest
-  | Just rest <- T.stripPrefix "}" txt = TokRBrace : tokenizeMath rest
-  | Just rest <- T.stripPrefix "[" txt = TokLBracket : tokenizeMath rest
-  | Just rest <- T.stripPrefix "]" txt = TokRBracket : tokenizeMath rest
-  | Just rest <- T.stripPrefix "_" txt = TokSub : tokenizeMath rest
-  | Just rest <- T.stripPrefix "^" txt = TokSup : tokenizeMath rest
-  | otherwise =
-      let (chunk, rest) = T.span (not . isMathSpecial) txt
-       in TokText chunk : tokenizeMath rest
- where
-  isMathSpecial c = c `elem` ("\\{}[]_^" :: String)
-
-parseMathExpr :: Text -> MathExpr
-parseMathExpr = MathSeq . fst . parseMathSeq Nothing . tokenizeMath
-
-parseMathSeq :: Maybe MathToken -> [MathToken] -> ([MathExpr], [MathToken])
-parseMathSeq stop = go []
- where
-  go acc [] = (reverse acc, [])
-  go acc toks@(tok : rest)
-    | Just tok == stop = (reverse acc, rest)
-    | otherwise =
-        let (expr, rest') = parseMathTerm toks
-         in go (expr : acc) rest'
-
-parseMathTerm :: [MathToken] -> (MathExpr, [MathToken])
-parseMathTerm toks =
-  let (base, rest) = parseMathAtom toks
-   in parseScripts base rest
-
-parseMathAtom :: [MathToken] -> (MathExpr, [MathToken])
-parseMathAtom [] = (MathSeq [], [])
-parseMathAtom (TokText txt : rest) = (MathText txt, rest)
-parseMathAtom (TokCommand name : rest) =
-  let (optionalArg, afterOptional) = parseOptionalMathArg rest
-      (args, afterArgs) = parseBracedMathArgs afterOptional
-   in (MathCommand name optionalArg args, afterArgs)
-parseMathAtom (TokLBrace : rest) =
-  let (items, afterGroup) = parseMathSeq (Just TokRBrace) rest
-   in (MathGroup (MathSeq items), afterGroup)
-parseMathAtom (TokLBracket : rest) = (MathText "[", rest)
-parseMathAtom (TokRBrace : rest) = (MathText "}", rest)
-parseMathAtom (TokRBracket : rest) = (MathText "]", rest)
-parseMathAtom (TokSub : rest) = (MathText "_", rest)
-parseMathAtom (TokSup : rest) = (MathText "^", rest)
-
-parseOptionalMathArg :: [MathToken] -> (Maybe MathExpr, [MathToken])
-parseOptionalMathArg toks@(TokLBracket : rest) =
-  case parseBracketedMathArg rest of
-    Just (items, afterArg) -> (Just (MathSeq items), afterArg)
-    Nothing -> (Nothing, toks)
-parseOptionalMathArg toks = (Nothing, toks)
-
-{- | Parse the body of an optional @[...]@ argument, returning 'Nothing' when no
-closing @]@ exists at this level. In that case the @[@ is a literal bracket,
-such as the half-open interval in @\\to[0,\\infty)@, and must not be treated
-as an optional argument: 'renderMathExpr' always re-emits a closing @]@ for an
-optional argument, so accepting an unterminated @[@ would fabricate a stray
-@]@ in the rendered math.
--}
-parseBracketedMathArg :: [MathToken] -> Maybe ([MathExpr], [MathToken])
-parseBracketedMathArg = go []
- where
-  go _ [] = Nothing
-  go acc (TokRBracket : rest) = Just (reverse acc, rest)
-  go acc toks =
-    let (expr, rest') = parseMathTerm toks
-     in go (expr : acc) rest'
-
-parseBracedMathArgs :: [MathToken] -> ([MathExpr], [MathToken])
-parseBracedMathArgs (TokLBrace : rest) =
-  let (items, afterArg) = parseMathSeq (Just TokRBrace) rest
-      (args, tailText) = parseBracedMathArgs afterArg
-   in (MathSeq items : args, tailText)
-parseBracedMathArgs toks = ([], toks)
-
-parseScripts :: MathExpr -> [MathToken] -> (MathExpr, [MathToken])
-parseScripts base (TokSub : rest) =
-  let (arg, afterArg) = parseScriptArg rest
-   in parseScripts (MathScript base "_" arg) afterArg
-parseScripts base (TokSup : rest) =
-  let (arg, afterArg) = parseScriptArg rest
-   in parseScripts (MathScript base "^" arg) afterArg
-parseScripts base toks = (base, toks)
-
-parseScriptArg :: [MathToken] -> (MathExpr, [MathToken])
-parseScriptArg (TokLBrace : rest) =
-  let (items, afterArg) = parseMathSeq (Just TokRBrace) rest
-   in (MathGroup (MathSeq items), afterArg)
-parseScriptArg toks = parseMathAtom toks
-
-renderMathExpr :: MathExpr -> Text
-renderMathExpr (MathSeq items) = T.concat (map renderMathExpr items)
-renderMathExpr (MathCommand name optionalArg args) =
-  "\\" <> name <> renderOptional optionalArg <> T.concat (map renderBraced args)
- where
-  renderOptional Nothing = ""
-  renderOptional (Just arg) = "[" <> renderMathExpr arg <> "]"
-  renderBraced arg = "{" <> renderMathExpr arg <> "}"
-renderMathExpr (MathGroup expr) = "{" <> renderMathExpr expr <> "}"
-renderMathExpr (MathScript base marker arg) =
-  renderMathExpr base <> marker <> renderScriptArg arg
- where
-  renderScriptArg (MathGroup expr) = "{" <> renderMathExpr expr <> "}"
-  renderScriptArg expr = renderMathExpr expr
-renderMathExpr (MathText txt) = txt
-renderMathExpr (MathRaw txt) = txt
-
 linkDefinedNotations :: Map Text MacroSpec -> Set Text -> Set Text -> Text -> (Text, Set Text)
 linkDefinedNotations specs watchSet defined content =
   let (expr, names) = linkDefinedNotationsExpr specs watchSet defined (parseMathExpr content)
@@ -3201,10 +3692,10 @@ linkDefinedNotationsExpr specs watchSet defined = go
     (cmd, Set.empty)
   go cmd@(MathCommand name optionalArg args)
     | name `Set.member` linkable
-    , hasRequiredShape (Map.findWithDefault (MacroSpec 0 False) name specs) optionalArg args =
+    , hasRequiredShape (Map.findWithDefault (MacroSpec 0 False Nothing) name specs) optionalArg args =
         let nestedNames =
               collectLinkedNotationNames optionalArg args
-         in ( MathRaw (notationHyperlink name (renderMathExpr cmd))
+         in ( MathRaw (notationHyperlink specs name (renderMathExpr cmd))
             , Set.insert name nestedNames
             )
     | otherwise =
@@ -3254,7 +3745,7 @@ linkTypedNotationsExpr specs declRef defined = go
         target <- typedNotationTarget st name argText
         checkTypedTargetDefined defined target (renderMathExpr cmd)
         let useText = renderMathExpr cmd
-            linked = notationHyperlink target useText
+            linked = notationHyperlink specs target useText
         return (MathRaw linked, Set.singleton target)
       else processMathCommand cmd
   go (MathCommand name optionalArg args) = do
@@ -3312,7 +3803,7 @@ linkTypedNotationsExpr specs declRef defined = go
             let (args', argNameSets) = unzip processedArgs
                 cmd' = MathCommand name optionalArg' args'
                 useText = renderMathExpr base <> renderMathExpr cmd'
-                linked = MathRaw (notationHyperlink target useText)
+                linked = MathRaw (notationHyperlink specs target useText)
                 names = baseNames `Set.union` optionalNames `Set.union` Set.unions argNameSets `Set.union` Set.singleton target
             processPostfixChain ty linked names rest
   processPostfixChain _ base baseNames rest =
@@ -3340,7 +3831,7 @@ linkTypedNotationsExpr specs declRef defined = go
 
   macroArity :: Text -> Int
   macroArity name =
-    macroMandatoryArgs (Map.findWithDefault (MacroSpec 0 False) name specs)
+    macroMandatoryArgs (Map.findWithDefault (MacroSpec 0 False Nothing) name specs)
 
 typedNotationTarget :: DeclState -> Text -> Text -> IO Text
 typedNotationTarget st notation arg =
@@ -3382,6 +3873,2834 @@ checkTypedTargetDefined defined target useText =
     hPutStrLn stderr ("  target: \\" <> T.unpack target)
     hPutStrLn stderr ("  in math: " <> T.unpack useText)
     exitWith (ExitFailure 1)
+
+-- ---------------------------------------------------------------------------
+-- Notation signature sort audit (validation only)
+--
+-- The @% notation-type:@ registry signatures describe the sorts of a
+-- semantic macro's arguments and its result.  This audit checks every use
+-- of a signed macro in a linted source file whose argument sorts can be
+-- inferred.  A leaf's sort comes from the existing syntactic inference
+-- ('inferDeclType': scoped @\\vars@ declarations, @\\infer*@ rules and the
+-- structural rules); a nested signed application contributes its
+-- signature's result sort under the argument substitution.  Unknown sorts
+-- stay silent: only provable mismatches are reported, and the audit never
+-- fails the lint run.  It is enabled with @lint --sort-audit@ and measures
+-- how far the signature registry and the declaration substrate agree with
+-- the explicit macros in the text, before any generic notation is allowed.
+
+-- Lean correspondence inventory for the canonical English book and the
+-- notation-type registry in polish-space/tex/macros.tex. This is documentation,
+-- not a translation into Lean's Sort u, an elaborator, or a soundness theorem.
+-- Lean source paths below are relative to polish-space/lean/PolishSpaceBook/.
+-- Lean examples identify carrier/predicate implementations, not a certified
+-- per-occurrence or per-macro correspondence. Some roles have several encodings.
+-- Composite declarations are covered recursively by their constructors; sort
+-- variables (a, b, i, A, ...) are signature placeholders, not Lean universes.
+-- The parser is open-ended: these are the currently used vocabulary, not all
+-- admissible names. Test-only vocabulary is not a book/Lean interface.
+--
+-- Atomic sorts:
+--   Nat / Int / Rat / Real / Cplx: intended carriers are Lean's Nat / Int /
+--     Rat / Real / Complex. Nat also labels program indices and syntax codes;
+--     their validity and computation predicates are erased. The number tower
+--     below permits notation coercions, not Lean definitional equalities.
+--   Bit: binary letters, represented by Bool in CantorDerivativeRecursion.lean
+--     and CantorBaireSpace.lean, or by naturals with a binary-value predicate
+--     in internal encodings. The BinaryPair signature supplies this sort;
+--     the filter does not prove a code is a finite binary word.
+--   Card: cardinality, typically Cardinal in Lean. Finite cardinalities may
+--     instead use Nat with a finiteness hypothesis. See Cardinal.mk uses in
+--     CantorBendixsonStages.lean. No Card/Nat compatibility is implemented.
+--   Prop: a proposition (Lean Prop), not a first-order formula's syntax and
+--     not its proof. Relation-shaped text can receive Prop without checking
+--     either operand; this is only a syntactic classification.
+--   Name: total Nat -> Nat, the Baire-space carrier. ComputesName in
+--     LambdaComputablePointAssemblies.lean adds the separate lambda-computation
+--     evidence. Membership in a representation's domain is also separate.
+--   ZFSet: an explicit set-theoretic object, as in SetTheoryInternalListCodes.lean;
+--     distinct from a finite List Nat and its Nat code. No membership or model
+--     hypothesis is supplied by this structural annotation.
+--   Point: the local carrier X at the computable-point assembly definition;
+--     no global Lean Point type. It forgets X's identity and any topology.
+--   PCAElement: the carrier A of PartialCombinatoryAlgebra A, defined in
+--     LambdaIndexPCA.lean. It forgets the chosen algebra and application law;
+--     it is not uniformly Nat (only the numerical instance has that carrier).
+--   Stage: the well-founded index carrier iota in CantorDerivativeRecursion.lean
+--     (stageTree); neither its relation nor well-foundedness is stored here.
+--     It must not be identified automatically with Nat or Ordinal.
+--   fo-term: L.Term Nat, or the appropriate variable carrier, in the
+--     FirstOrderNamedSyntax.lean development; language and free-variable data
+--     are erased. A term variable and a compound term share this syntax class.
+--   fo-formula: Formula L / AlphaFormula L in FirstOrderNamedSyntax.lean and
+--     FirstOrderAlphaSubstitution.lean. Named syntax and its alpha quotient
+--     are not distinguished, nor are closedness, language, or complexity.
+--   fo-context: Context L = Finset (AlphaFormula L), defined in
+--     FirstOrderDeductionSemantics.lean; distinct from an arbitrary theory.
+--   lambda-term: Term in LambdaSyntaxSubstitution.lean / AlphaTerm in
+--     LambdaAlphaEquivalence.lean; named representatives, alpha classes,
+--     closedness and computational behavior are not distinguished.
+--   pca-term: PartialCombinatoryAlgebra.Expression A alpha in PCAAbstraction.lean;
+--     algebraic expressions, not their values in Part A, and not numeric codes.
+--
+-- Constructors and bare-container sorts:
+--   Set(a): usually Lean Set A. Bare Set also covers ZFSet objects in the
+--     SetTheory*.lean development. These are different representations, not
+--     one Lean type; ZFC has no element-type parameter. Set(a) records the
+--     intended element role, not a ZFC universe, transitivity or internality.
+--   Seq(a), bare Seq: both finite List A (finseq in CantorBaireSpace.lean) and
+--     infinite Nat -> A occur in the book. Length and index bounds are erased.
+--     In particular this is NOT a faithful Lean sequence type: callableSort
+--     reads Seq(a) as Nat -> a even though some declared sequences are finite.
+--   Prod(a,b): product data, commonly Lean A x B; set-theoretic
+--     ordered pairs instead use ZFSet.pair. Pair is a legacy alias for Prod;
+--     nesting preserves association. N-ary products record explicit argument
+--     slots without choosing a binary Lean encoding for those slots.
+--   Tuple(a1,...,an): fixed tuples, implemented using products, indexed
+--     functions or set-theoretic tuple encodings as appropriate. No universal
+--     Lean Tuple translation, associativity rule, or dependent typing is given.
+--   Fun(a,b): intended total functions A -> B, or their set-theoretic graphs.
+--     Topology, computability, graph domain and codomain evidence are omitted.
+--     checkSort also accepts a family BODY of sort b in a Fun(a,b) position;
+--     that convenience is not Lean function application/type checking.
+--   Mor(C,A): C and A are source and target OBJECTS, not category and carrier.
+--     Its Lean reading is C --> A in a fixed category (e.g. Assembly maps).
+--     The category, universe, map laws and trackers are absent from this sort.
+--   Elem(A): a declaration lookup, not a Lean type constructor. For a declared
+--     Set(a) or Seq(a), resolveDeclaredSort returns a. It does not construct
+--     a subtype or prove membership in A; identity of the container is lost.
+--   PartialFun(a,b): descriptive signature for partial functions; currently
+--     no callableSort rule or definedness/equality checking. Representation X
+--     in CauchyNamesPolishRepresentations.lean stores domain : Set baire_space,
+--     toFun : domain -> X and surjectivity; the sort forgets the domain restriction
+--     and surjectivity. Numerical partial computation is also expressed
+--     relationally by App in LambdaComputablePointAssemblies.lean, not by a
+--     single uniform PartialFun Lean type.
+--   Assembly(Point): Assembly with a specified intended carrier role. The
+--     computablePointAssembly carrier in LambdaComputablePointAssemblies.lean
+--     is {x : X // HasComputableName delta x}, with a realizability relation and
+--     inhabitation proof. The sort omits that subtype and all realization data.
+--
+-- Ordinal is NOT currently declared in the book's sort annotations/signatures.
+-- Lean has Ordinal and set-theoretic ordinal predicates/constructions (see
+-- SetTheoryOrdinalBookBasics.lean), but merely parsing the name Ordinal would
+-- not connect them or type ordinal arithmetic.
+--
+-- Thus this vocabulary is usually coarser than the formalization, but is NOT
+-- a uniform quotient of Lean types: Seq/Set merge different representations.
+-- Product nesting is preserved; comma-separated function arguments unpack
+-- only the outer product and do not reassociate it or curry the function.
+-- No Lean declarations, booklinks, or proof certificates are consulted here.
+-- A successful audit establishes neither full sort coverage nor Lean typing.
+
+data Sort
+  = SortAtom Text
+  | SortVar Text
+  | SortApp Text [Sort]
+  deriving (Eq, Show)
+
+type SortSubst = Map Text Sort
+
+type SignatureSorts = Map Text ([Sort], Sort)
+
+signatureSorts :: NotationData -> SignatureSorts
+signatureSorts notationData =
+  Map.fromList
+    [ (name, sig)
+    | (name, hint) <- Map.toList (notationSignatures notationData)
+    , Just sig <- [parseSortSignature (signatureBody hint)]
+    ]
+ where
+  signatureBody hint =
+    case T.breakOn ":" hint of
+      (_, rest)
+        | not (T.null rest) -> T.strip (T.drop 1 rest)
+      _ -> hint
+
+-- Schematic variables are local to one application of a signature:
+-- the registry spells every macro's variable "a", so two nested
+-- applications would otherwise share one variable and capture each
+-- other (binding a to Seq(a), say). Each use site freshens the
+-- signature with a digest of the application's arguments, which is
+-- stable for the same application wherever it is computed.
+freshSignature :: Text -> Text -> ([Sort], Sort) -> ([Sort], Sort)
+freshSignature name digest (argSorts, resultSort) =
+  (map fresh argSorts, fresh resultSort)
+ where
+  fresh (SortVar var) = SortVar (var <> "@" <> name <> "#" <> digest)
+  fresh (SortAtom atom) = SortAtom atom
+  fresh (SortApp ctor args) = SortApp ctor (map fresh args)
+
+sortDigest :: Text -> Text
+sortDigest txt =
+  T.pack (show (T.foldl' step 7 txt `mod` 2147483647))
+ where
+  step h c = (h * 31 + toInteger (fromEnum c)) `mod` 2147483647
+
+parseSortSignature :: Text -> Maybe ([Sort], Sort)
+parseSortSignature raw = do
+  let body = dropTrailingArityNote (dropTrailingParenNote (T.strip raw))
+      parts = splitTopLevel " -> " body
+  guard (length parts >= 2)
+  let resultText = last parts
+      argsText = T.intercalate " -> " (init parts)
+      argTexts =
+        if T.null (T.strip argsText)
+          then []
+          else splitTopLevel " x " argsText
+  guard (not (any ("..." `T.isInfixOf`) argTexts))
+  guard (not ("..." `T.isInfixOf` resultText))
+  return (map parseSort argTexts, parseSort resultText)
+
+parseSort :: Text -> Sort
+parseSort raw =
+  let txt = T.strip raw
+      arrowParts = splitTopLevel " -> " txt
+   in if length arrowParts >= 2
+        then
+          SortApp
+            "Fun"
+            [ parseSort (T.intercalate " -> " (init arrowParts))
+            , parseSort (last arrowParts)
+            ]
+        else case splitTopLevel " x " txt of
+          [single] -> parseSortAtom single
+          parts -> SortApp "Prod" (map parseSort parts)
+
+parseSortAtom :: Text -> Sort
+parseSortAtom raw =
+  let txt = T.strip raw
+   in if isOuterParenWrapped txt
+        then parseSort (T.drop 1 (T.dropEnd 1 txt))
+        else case T.breakOn "(" txt of
+          (name, rest)
+            | not (T.null rest)
+            , T.isSuffixOf ")" rest
+            , isSortConstructorName name ->
+                SortApp (if name == "Pair" then "Prod" else name) (map parseSort (splitTopLevel "," (T.drop 1 (T.dropEnd 1 rest))))
+          _
+            | txt == "Pair" -> SortAtom "Prod"
+            | isSortVarName txt -> SortVar txt
+            | otherwise -> SortAtom txt
+
+isOuterParenWrapped :: Text -> Bool
+isOuterParenWrapped txt =
+  T.length txt >= 2 && T.head txt == '(' && matchingClose == T.length txt - 1
+ where
+  matchingClose = go 0 0
+  go depth idx
+    | idx >= T.length txt = -1
+    | otherwise =
+        case T.index txt idx of
+          '(' -> go (depth + 1) (idx + 1)
+          ')' -> if depth == 1 then idx else go (depth - 1) (idx + 1)
+          _ -> go depth (idx + 1)
+
+isSortConstructorName :: Text -> Bool
+isSortConstructorName name =
+  case T.uncons name of
+    Just (c, _) -> isAsciiUpper c && T.all isLetter name
+    Nothing -> False
+
+-- Signature variables are the schematic names: lower-case names and single
+-- letters of either case (the @A@, @B@, @C@ in @Mor(C, A)@).  Multi-letter
+-- capitalised names are concrete sorts (@Nat@, @Real@, ...) or sort
+-- constructors (@Set@, @Seq@, ...).
+isSortVarName :: Text -> Bool
+isSortVarName txt =
+  case T.uncons txt of
+    Just (c, rest) ->
+      (isAsciiLower c || (T.length txt == 1 && isAsciiUpper c))
+        && T.all (\ch -> isLetter ch || isDigit ch) rest
+    Nothing -> False
+
+renderSort :: Sort -> Text
+renderSort (SortAtom name) = name
+renderSort (SortVar name) = name
+renderSort (SortApp "Prod" parts) = T.intercalate " x " (map factor parts)
+ where
+  factor s@(SortApp "Prod" _) = "(" <> renderSort s <> ")"
+  factor s = renderSort s
+renderSort (SortApp "Fun" [lhs, rhs]) =
+  "(" <> renderSort lhs <> " -> " <> renderSort rhs <> ")"
+renderSort (SortApp name args) =
+  name <> "(" <> T.intercalate ", " (map renderSort args) <> ")"
+
+sortTowerRank :: Text -> Maybe Int
+sortTowerRank name = case name of
+  "Nat" -> Just 0
+  "Int" -> Just 1
+  "Rat" -> Just 2
+  "Real" -> Just 3
+  "Cplx" -> Just 4
+  _ -> Nothing
+
+sortConstructorNames :: [Text]
+-- Bare/applied compatibility whitelist, NOT the complete constructor registry.
+-- Elem, PartialFun and Assembly are parsed too; their semantics differ above.
+sortConstructorNames = ["Set", "Seq", "Tuple", "Mor", "Prod", "Fun"]
+
+-- @checkSort subst expected actual@ extends the substitution when the
+-- actual sort fits the expected sort: equal sorts, a sort variable on
+-- either side, a bare constructor against one of its applications
+-- (@Set@ against @Set(Real)@), constructor congruence, or a step up the
+-- number tower @Nat < Int < Rat < Real < Cplx@.
+checkSort :: SortSubst -> Sort -> Sort -> Maybe SortSubst
+checkSort subst expected actual =
+  case (expected, actual) of
+    (SortVar name, _) ->
+      case Map.lookup name subst of
+        Nothing
+          | sortOccurs name (applySortSubst subst actual) -> Nothing
+          | otherwise -> Just (Map.insert name actual subst)
+        Just bound -> checkSort subst bound actual
+    (_, SortVar name) ->
+      case Map.lookup name subst of
+        Nothing
+          | sortOccurs name (applySortSubst subst expected) -> Nothing
+          | otherwise -> Just (Map.insert name expected subst)
+        Just bound -> checkSort subst expected bound
+    (SortAtom a, SortAtom b)
+      | a == b -> Just subst
+      | Just rankExpected <- sortTowerRank a
+      , Just rankActual <- sortTowerRank b
+      , rankActual <= rankExpected ->
+          Just subst
+      -- A name is a sequence of naturals: Name is a subsort of Seq.
+      | a == "Seq" && b == "Name" -> Just subst
+      | otherwise -> Nothing
+    (SortApp "Seq" [elt], SortAtom "Name") ->
+      checkSort subst elt (SortAtom "Nat")
+    -- Baire names are exactly total natural-number-valued functions
+    -- on Nat. Do not widen their codomain along the number tower.
+    (SortAtom "Name", SortApp "Fun" [SortAtom "Nat", SortAtom "Nat"]) -> Just subst
+    (SortApp "Fun" [SortAtom "Nat", SortAtom "Nat"], SortAtom "Name") -> Just subst
+    (SortAtom a, SortApp b _)
+      | a == b && a `elem` sortConstructorNames -> Just subst
+    (SortApp a _, SortAtom b)
+      | a == b && a `elem` sortConstructorNames -> Just subst
+    (SortApp "Fun" [dom, cod], actualSort) ->
+      let funReading = case actualSort of
+            SortApp "Fun" [dom', cod'] ->
+              checkSortList subst [(dom, dom'), (cod, cod')]
+            _ -> Nothing
+          -- A sequence used as a family: its index sort is Nat.
+          sequenceReading = case actualSort of
+            SortApp "Seq" [elt] ->
+              checkSort subst dom (SortAtom "Nat") >>= \s -> checkSort s cod elt
+            _ -> Nothing
+          -- A family argument written as a body term: the term's own
+          -- sort is the family's codomain sort.
+          bodyReading = checkSort subst cod actualSort
+       in funReading <|> sequenceReading <|> bodyReading
+    (SortApp f fArgs, SortApp g gArgs)
+      | f == g && length fArgs == length gArgs ->
+          checkSortList subst (zip fArgs gArgs)
+    _ -> Nothing
+
+sortOccurs :: Text -> Sort -> Bool
+sortOccurs name (SortVar var) = name == var
+sortOccurs _ (SortAtom _) = False
+sortOccurs name (SortApp _ args) = any (sortOccurs name) args
+
+checkSortList :: SortSubst -> [(Sort, Sort)] -> Maybe SortSubst
+checkSortList subst [] = Just subst
+checkSortList subst ((expected, actual) : rest) =
+  checkSort subst expected actual >>= \subst' -> checkSortList subst' rest
+
+applySortSubst :: SortSubst -> Sort -> Sort
+applySortSubst subst = go Set.empty
+ where
+  go _ (SortAtom name) = SortAtom name
+  go seen (SortVar name)
+    | name `Set.member` seen = SortVar name
+    | otherwise =
+        case Map.lookup name subst of
+          Nothing -> SortVar name
+          Just bound -> go (Set.insert name seen) bound
+  go seen (SortApp name args) = SortApp name (map (go seen) args)
+
+checkInferredArgs :: [Sort] -> [Maybe Sort] -> Maybe SortSubst
+checkInferredArgs expected inferred = go Map.empty (zip expected inferred)
+ where
+  go subst [] = Just subst
+  go subst ((_, Nothing) : rest) = go subst rest
+  go subst ((expectedSort, Just actualSort) : rest) =
+    checkSort subst expectedSort actualSort >>= \subst' -> go subst' rest
+
+checkInferredArgsP ::
+  [Sort] -> [Maybe (Sort, Bool)] -> Maybe (SortSubst, Bool)
+checkInferredArgsP expected inferred = go Map.empty False (zip expected inferred)
+ where
+  go subst taint [] = Just (subst, taint)
+  go subst taint ((_, Nothing) : rest) = go subst taint rest
+  go subst taint ((expectedSort, Just (actualSort, t)) : rest) =
+    checkSort subst expectedSort actualSort
+      >>= \subst' -> go subst' (taint || t) rest
+
+-- The sort of a math expression, when it can be established: a signed
+-- application whose known argument sorts fit contributes its result sort;
+-- anything else falls back to the syntactic inference substrate, then to
+-- the sorts harvested from signed applications in the same section
+-- (see 'checkApplication'), and a bare numeral is a natural number.
+inferExprSort ::
+  SignatureSorts -> DeclState -> Map Text Sort -> MathExpr -> Maybe Sort
+inferExprSort sigs st henv expr = fst <$> inferExprSortP sigs st henv expr
+
+-- Commands that only decorate their single argument (accents and
+-- rules above or below): the decorated expression keeps the
+-- argument's sort.
+texAccentCmds :: [Text]
+texAccentCmds =
+  [ "hat"
+  , "check"
+  , "tilde"
+  , "bar"
+  , "vec"
+  , "dot"
+  , "ddot"
+  , "acute"
+  , "grave"
+  , "breve"
+  , "mathring"
+  , "overline"
+  , "underline"
+  ]
+
+-- A sequence with a relation at its top level is a proposition,
+-- whatever the operands' sorts are. Sequences that look like set
+-- builders (braces, a colon) or that start with a binder are not
+-- read this way.
+propFormOf :: MathExpr -> Maybe (Sort, Bool)
+propFormOf expr = case expr of
+  MathGroup inner -> propFormOf inner
+  MathSeq [item] -> propFormOf item
+  MathSeq items
+    | any isRelationItem items
+    , not (any isSetBuilderItem items)
+    , not (startsWithBinder items) ->
+        Just (SortAtom "Prop", False)
+  _ -> Nothing
+ where
+  isRelationItem (MathText txt) = txt `elem` ["=", "<", ">"]
+  isRelationItem (MathCommand name _ _) =
+    name
+      `elem` [ "in"
+             , "notin"
+             , "subseteq"
+             , "subset"
+             , "supseteq"
+             , "supset"
+             , "le"
+             , "leq"
+             , "ge"
+             , "geq"
+             , "ne"
+             , "neq"
+             , "equiv"
+             , "approx"
+             , "cong"
+             , "sim"
+             , "simeq"
+             , "prec"
+             , "succ"
+             , "preceq"
+             , "succeq"
+             , "models"
+             , "propto"
+             ]
+  isRelationItem _ = False
+  isSetBuilderItem (MathText txt) = txt `elem` ["\\{", "\\}", ":"]
+  isSetBuilderItem (MathCommand name _ _) = name `elem` ["{", "}"]
+  isSetBuilderItem _ = False
+  startsWithBinder (MathCommand name _ _ : _) =
+    name `elem` ["lambda", "forall", "exists"]
+  startsWithBinder _ = False
+
+-- Declarations may describe a container, a function, or the entries of an
+-- indexed family. A wildcard subscript is local to the same declaration
+-- frame as an ordinary variable, and an exact entry overrides the family.
+sortDeclarationKey :: MathExpr -> Text
+sortDeclarationKey (MathSeq [item]) = sortDeclarationKey item
+sortDeclarationKey (MathGroup inner) = sortDeclarationKey inner
+sortDeclarationKey (MathScript base marker arg) =
+  sortDeclarationKey base <> marker <> sortDeclarationKey arg
+sortDeclarationKey expr = normalizeMathExpr (renderMathExpr expr)
+
+resolveDeclaredSort :: DeclState -> Text -> Maybe Sort
+resolveDeclaredSort st = resolve [] . parseSort
+ where
+  resolve seen (SortApp "Elem" [container]) = do
+    let name = renderSort container
+    guard (name `notElem` seen)
+    declared <- Map.lookup name (activeDeclEnv st)
+    resolved <- resolve (name : seen) (parseSort declared)
+    case resolved of
+      SortApp constructor [element]
+        | constructor `elem` ["Set", "Seq"] -> Just element
+      _ -> Nothing
+  resolve seen (SortApp name args) = SortApp name <$> mapM (resolve seen) args
+  resolve _ sort = Just sort
+
+explicitExprSort :: DeclState -> MathExpr -> Maybe Sort
+explicitExprSort st expr = exact <|> indexed expr
+ where
+  env = Map.mapKeys (sortDeclarationKey . parseMathExpr) (activeDeclEnv st)
+  exact = Map.lookup (sortDeclarationKey expr) env >>= resolveDeclaredSort st
+  indexed (MathSeq [item]) = indexed item
+  indexed (MathGroup inner) = indexed inner
+  indexed (MathScript base "_" _) =
+    (Map.lookup (sortDeclarationKey base <> "_*") env >>= resolveDeclaredSort st)
+      <|> do
+        SortApp "Seq" [element] <- explicitExprSort st base
+        return element
+  indexed _ = Nothing
+
+callableSort :: Sort -> Maybe (Sort, Sort)
+callableSort (SortApp "Fun" [domain, codomain]) = Just (domain, codomain)
+callableSort (SortAtom "Name") = Just (SortAtom "Nat", SortAtom "Nat")
+callableSort (SortApp "Seq" [element]) = Just (SortAtom "Nat", element)
+callableSort _ = Nothing
+
+-- The comma-call notation f(a,b) unpacks only the OUTER product domain.
+-- f(pair) still takes one product-valued argument. Nested products retain
+-- their grouping; a three-argument call requires an explicit three-component
+-- product domain. This notation convention never identifies a curried function
+-- with a function on a product.
+applicationArgumentSorts :: Sort -> Int -> Maybe [Sort]
+applicationArgumentSorts domain 1 = Just [domain]
+applicationArgumentSorts (SortApp "Prod" domains) count
+  | length domains == count = Just domains
+applicationArgumentSorts _ _ = Nothing
+
+namedSortApplication :: DeclState -> MathExpr -> Maybe (Text, [Sort], Sort, [MathExpr])
+namedSortApplication st expr = do
+  let raw = normalizeMathExpr (renderMathExpr expr)
+  (name, rest) <- splitApplication raw
+  guard (not (T.null name) && isOuterParenWrapped rest)
+  (domain, codomain) <- explicitExprSort st (parseMathExpr name) >>= callableSort
+  let arguments = splitArguments (T.drop 1 (T.dropEnd 1 rest))
+  domains <- applicationArgumentSorts domain (length arguments)
+  return (name, domains, codomain, map parseMathExpr arguments)
+ where
+  -- Commas in an index, a macro argument, or a nested call do not
+  -- separate this call's arguments.
+  splitArguments = go 0 [] [] . T.unpack
+   where
+    go :: Int -> String -> [Text] -> String -> [Text]
+    go _ current parts [] = reverse (T.pack (reverse current) : parts)
+    go depth current parts (character : rest)
+      | character == ',' && depth == 0 = go 0 [] (T.pack (reverse current) : parts) rest
+      | character `elem` ("({[" :: String) = go (depth + 1) (character : current) parts rest
+      | character `elem` (")}]" :: String) = go (max 0 (depth - 1)) (character : current) parts rest
+      | otherwise = go depth (character : current) parts rest
+  -- Parentheses inside a braced index belong to the index, as in
+  -- a_{s(k)}(n). The outer application may have an indexed head.
+  splitApplication raw = search 0 0 (T.unpack raw)
+   where
+    search :: Int -> Int -> String -> Maybe (Text, Text)
+    search _ _ [] = Nothing
+    search depth offset (character : rest)
+      | character == '(' && depth == 0 = Just (T.splitAt offset raw)
+      | character == '{' = search (depth + 1) (offset + 1) rest
+      | character == '}' = search (depth - 1) (offset + 1) rest
+      | otherwise = search depth (offset + 1) rest
+
+untainted :: Sort -> (Sort, Bool)
+untainted s = (s, False)
+
+tainted :: Sort -> (Sort, Bool)
+tainted s = (s, True)
+
+-- The same inference, carrying provenance: the flag is True when
+-- the derivation used a harvested sort anywhere. A harvested sort
+-- is a hypothesis from context, not a declaration, so a conflict
+-- it causes retracts the hypothesis instead of reporting a
+-- mismatch (see 'checkApplication').
+inferExprSortP ::
+  SignatureSorts ->
+  DeclState ->
+  Map Text Sort ->
+  MathExpr ->
+  Maybe (Sort, Bool)
+inferExprSortP sigs st henv expr =
+  (untainted <$> explicitExprSort st expr)
+    <|> namedResult
+    <|> signedResult
+    <|> declared
+    <|> harvested
+    <|> propForm
+    <|> literal
+ where
+  namedResult = do
+    (_, domains, codomain, args) <- namedSortApplication st expr
+    (subst, provenance) <- checkInferredArgsP domains (map (inferExprSortP sigs st henv) args)
+    return (applySortSubst subst codomain, provenance)
+  signedResult =
+    case expr of
+      MathSeq [item] -> inferExprSortP sigs st henv item
+      MathGroup inner -> inferExprSortP sigs st henv inner
+      MathScript base _ _ -> inferExprSortP sigs st henv base
+      MathCommand name _ [arg]
+        | name `elem` texAccentCmds -> inferExprSortP sigs st henv arg
+      MathCommand name _ args
+        | Just sig <- Map.lookup name sigs
+        , (argSorts, resultSort) <-
+            freshSignature name (sortDigest (T.concat (map renderMathExpr args))) sig
+        , length args == length argSorts
+        , Just (subst, taint) <-
+            checkInferredArgsP
+              argSorts
+              (map (inferExprSortP sigs st henv) args) ->
+            Just (applySortSubst subst resultSort, taint)
+      _ -> Nothing
+  declared = untainted <$> (inferDeclType st (renderMathExpr expr) >>= resolveDeclaredSort st)
+  harvested = lookupHenv expr
+  propForm = propFormOf expr
+  lookupHenv e = case e of
+    MathSeq [item] -> lookupHenv item
+    MathGroup inner -> lookupHenv inner
+    MathText txt -> tainted <$> Map.lookup txt henv
+    _ -> Nothing
+  literal =
+    case expr of
+      MathText txt
+        | let digits = T.strip txt
+        , not (T.null digits) && T.all isDigit digits ->
+            Just (SortAtom "Nat", False)
+      _ -> Nothing
+
+-- A sort with no schematic variables in it.
+sortIsConcrete :: Sort -> Bool
+sortIsConcrete (SortVar _) = False
+sortIsConcrete (SortAtom _) = True
+sortIsConcrete (SortApp _ args) = all sortIsConcrete args
+
+-- Every bare single letter occurring in an expression.
+mathLetters :: MathExpr -> [Text]
+mathLetters expr = case expr of
+  MathText txt
+    | T.length txt == 1 && T.all isLetter txt -> [txt]
+    | otherwise -> []
+  MathSeq items -> concatMap mathLetters items
+  MathGroup inner -> mathLetters inner
+  MathScript base _ arg -> mathLetters base ++ mathLetters arg
+  MathCommand _ opt args ->
+    maybe [] mathLetters opt ++ concatMap mathLetters args
+  _ -> []
+
+-- A bare single letter, the form a harvested sort can attach to.
+bareLetter :: MathExpr -> Maybe Text
+bareLetter expr = case expr of
+  MathSeq [item] -> bareLetter item
+  MathGroup inner -> bareLetter inner
+  MathText txt
+    | T.length txt == 1 && T.all isLetter txt -> Just txt
+  _ -> Nothing
+
+data SortAuditResult = SortAuditResult
+  { sortAuditSeen :: Int
+  , sortAuditChecked :: Int
+  , sortAuditFindings :: [Text]
+  , sortAuditHarvest :: [(Text, Sort)]
+  , sortAuditNotes :: [Text]
+  , sortAuditRetract :: [Text]
+  }
+
+emptySortAudit :: SortAuditResult
+emptySortAudit = SortAuditResult 0 0 [] [] [] []
+
+mergeSortAudit :: SortAuditResult -> SortAuditResult -> SortAuditResult
+mergeSortAudit a b =
+  SortAuditResult
+    (sortAuditSeen a + sortAuditSeen b)
+    (sortAuditChecked a + sortAuditChecked b)
+    (sortAuditFindings a ++ sortAuditFindings b)
+    (sortAuditHarvest a ++ sortAuditHarvest b)
+    (sortAuditNotes a ++ sortAuditNotes b)
+    (sortAuditRetract a ++ sortAuditRetract b)
+
+checkMathExpr ::
+  SignatureSorts -> DeclState -> Map Text Sort -> MathExpr -> SortAuditResult
+checkMathExpr sigs st henv0 expr = fst (go (henv0, Set.empty) expr)
+ where
+  -- Applications are visited in textual order, threading a
+  -- span-local harvest environment: a sort stated by an earlier
+  -- application in the same span (an aligned display, say) is
+  -- available to the later ones, exactly as across spans within
+  -- a section. Letters whose harvested sorts conflict inside the
+  -- span are poisoned for the rest of the span.
+  go state expression
+    | Just (name, domains, _, args) <- namedSortApplication st expression =
+        let (children, state1) = goSeq state args
+            appRes = checkApplication (fst state1) (T.dropWhile (== '\\') name) domains args
+            (state2, notes) = applyLocalHarvest state1 (sortAuditHarvest appRes) (sortAuditRetract appRes)
+         in (mergeSortAudit children (mergeSortAudit appRes emptySortAudit{sortAuditNotes = notes}), state2)
+  go state (MathSeq items) = goSeq state items
+  go state (MathGroup inner) = go state inner
+  go state (MathScript base _ arg) =
+    let (res1, state1) = go state base
+        (res2, state2) = go state1 arg
+     in (mergeSortAudit res1 res2, state2)
+  go state (MathCommand name optArg args) =
+    let (optRes, state1) = maybe (emptySortAudit, state) (go state) optArg
+        (argsRes, state2) = goSeq state1 args
+        children = mergeSortAudit optRes argsRes
+     in case Map.lookup name sigs of
+          Just sig
+            | (argSorts, _) <-
+                freshSignature name (sortDigest (T.concat (map renderMathExpr args))) sig
+            , length argSorts == length args ->
+                let appRes = checkApplication (fst state2) name argSorts args
+                    (state3, notes) =
+                      applyLocalHarvest
+                        state2
+                        (sortAuditHarvest appRes)
+                        (sortAuditRetract appRes)
+                    noteRes = emptySortAudit{sortAuditNotes = notes}
+                 in ( mergeSortAudit (mergeSortAudit children appRes) noteRes
+                    , state3
+                    )
+          _ -> (children, state2)
+  go state _ = (emptySortAudit, state)
+
+  goSeq state = foldl stepSeq (emptySortAudit, state)
+   where
+    stepSeq (res, s) item =
+      let (r, s') = go s item
+       in (mergeSortAudit res r, s')
+
+  applyLocalHarvest (env, poisoned) pairs retracts =
+    let (env1, poisoned1, notes) = foldl step (env, poisoned, []) pairs
+     in (
+          ( foldr Map.delete env1 retracts
+          , foldr Set.insert poisoned1 retracts
+          )
+        , notes
+        )
+   where
+    step (e, pz, notes) (letter, sort)
+      | letter `Set.member` pz = (e, pz, notes)
+      | Just existing <- Map.lookup letter e
+      , existing /= sort =
+          ( Map.delete letter e
+          , Set.insert letter pz
+          , notes
+              ++ [ "harvest conflict: "
+                     <> letter
+                     <> " used as both "
+                     <> renderSort existing
+                     <> " and "
+                     <> renderSort sort
+                     <> "; left unknown"
+                 ]
+          )
+      | otherwise = (Map.insert letter sort e, pz, notes)
+
+  checkApplication env name argSorts args =
+    let inferred = map (inferExprSortP sigs st env) args
+        harvestHere =
+          [ (letter, expectedSort)
+          | (expectedSort, arg) <- zip argSorts args
+          , sortIsConcrete expectedSort
+          , Just letter <- [bareLetter arg]
+          , -- Explicit declarations already participate in the check below.
+          -- Do not replace them with an argument's expected supertype.
+          isNothing (inferDeclType st letter)
+          ]
+        retractHere =
+          [ letter
+          | ((_, arg), (_, _, True)) <- retractMarks
+          , letter <- mathLetters arg
+          , Map.member letter env
+          ]
+        retractMarks =
+          [ ((idx, arg), (expectedSort, actualSort, taint))
+          | (idx, expectedSort, arg, Just (actualSort, taint)) <-
+              zip4 [1 :: Int ..] argSorts args inferred
+          , isNothing (checkSort Map.empty expectedSort actualSort)
+          ]
+        checkedHere = if all isJust inferred then 1 else 0
+        step (subst, acc) (idx, expectedSort, Just (actualSort, taint)) =
+          case checkSort subst expectedSort actualSort of
+            Just subst' -> (subst', acc)
+            -- A conflict caused by a harvested sort retracts the
+            -- hypothesis (recorded in sortAuditRetracted); it is
+            -- not a mismatch.
+            Nothing
+              | taint -> (subst, acc)
+              | otherwise ->
+                  (subst, acc ++ [mismatchText idx expectedSort actualSort])
+        step acc _ = acc
+        (_, findings) =
+          foldl step (Map.empty, []) (zip3 [1 :: Int ..] argSorts inferred)
+     in SortAuditResult 1 checkedHere findings harvestHere [] retractHere
+   where
+    mismatchText idx expectedSort actualSort =
+      "\\"
+        <> name
+        <> " argument "
+        <> T.pack (show idx)
+        <> ": expected sort "
+        <> renderSort expectedSort
+        <> " but inferred "
+        <> renderSort actualSort
+
+data SortWalkRefs = SortWalkRefs
+  { swDecl :: IORef DeclState
+  , swPending :: IORef [DeclCommand]
+  , swResult :: IORef SortAuditResult
+  , swInFence :: IORef Bool
+  , swInComment :: IORef Bool
+  , swMathMeta :: IORef (Maybe [Text])
+  , swMathSpan :: IORef (Maybe (Text, Int, Text))
+  , swHarvest :: IORef [(Int, Map Text Sort)]
+  , swHarvestUnion :: IORef (Map Text [Sort])
+  }
+
+runSortAudit :: FilePath -> [FilePath] -> IO ()
+runSortAudit macrosPath paths = do
+  notationData <- readNotationData macrosPath
+  let sigs = signatureSorts notationData
+  results <- mapM (sortAuditFile sigs) paths
+  let total = foldr mergeSortAudit emptySortAudit results
+  hPutStrLn stderr "[lint] sort audit (validation only):"
+  forM_ (sortAuditFindings total) $ \finding ->
+    TIO.hPutStrLn stderr ("  " <> finding)
+  forM_ (sortAuditNotes total) $ \note ->
+    TIO.hPutStrLn stderr ("  " <> note)
+  hPutStrLn
+    stderr
+    ( "  "
+        <> show (sortAuditSeen total)
+        <> " signed applications, "
+        <> show (sortAuditChecked total)
+        <> " fully inferred, "
+        <> show (length (sortAuditFindings total))
+        <> " mismatch(es), "
+        <> show (length (sortAuditRetract total))
+        <> " harvest retraction(s)"
+    )
+
+sortAuditFile :: SignatureSorts -> FilePath -> IO SortAuditResult
+sortAuditFile sigs path = do
+  contents <- TIO.readFile path
+  -- Two passes over the file: the first collects every harvested
+  -- sort in the file, and the second starts from the letters that
+  -- were harvested unambiguously, so a sort the text states late
+  -- in a chapter is also known at the letter's earlier uses.
+  -- Letters harvested with two different sorts are left out.
+  (_, union) <- walkFile contents Map.empty
+  let prefill = Map.mapMaybe uniqueSort union
+  if Map.null prefill
+    then fst <$> walkFile contents Map.empty
+    else fst <$> walkFile contents prefill
+ where
+  walkFile contents prefill = do
+    refs <-
+      SortWalkRefs
+        <$> newIORef initialDeclState
+        <*> newIORef []
+        <*> newIORef emptySortAudit
+        <*> newIORef False
+        <*> newIORef False
+        <*> newIORef Nothing
+        <*> newIORef Nothing
+        <*> newIORef [(0, prefill)]
+        <*> newIORef Map.empty
+    forM_ (zip [1 ..] (T.lines contents)) $
+      uncurry (sortAuditLine sigs path refs)
+    result <- readIORef (swResult refs)
+    union <- readIORef (swHarvestUnion refs)
+    return (result, union)
+
+uniqueSort :: [Sort] -> Maybe Sort
+uniqueSort [s] = Just s
+uniqueSort _ = Nothing
+
+addHarvestedSort :: Sort -> Maybe [Sort] -> Maybe [Sort]
+addHarvestedSort sort Nothing = Just [sort]
+addHarvestedSort sort (Just old)
+  | sort `elem` old = Just old
+  | otherwise = Just (sort : old)
+
+-- Feed one span's harvested sorts into the current section frame.
+-- A letter harvested with two different concrete sorts in one
+-- section is a dual use: it is dropped again and reported, so it
+-- stays unknown rather than acquiring a sort it may not have.
+applySortHarvest ::
+  SortWalkRefs -> Text -> Text -> [(Text, Sort)] -> IO ()
+applySortHarvest refs prefix context pairs =
+  forM_ pairs $ \(letter, sort) -> do
+    stack <- readIORef (swHarvest refs)
+    case stack of
+      ((level, frame) : rest)
+        | Just existing <- Map.lookup letter frame
+        , existing /= sort -> do
+            writeIORef
+              (swHarvest refs)
+              ((level, Map.delete letter frame) : rest)
+            let note =
+                  prefix
+                    <> "harvest conflict: "
+                    <> letter
+                    <> " used as both "
+                    <> renderSort existing
+                    <> " and "
+                    <> renderSort sort
+                    <> "; left unknown"
+                    <> context
+            modifyIORef
+              (swResult refs)
+              ( \current ->
+                  mergeSortAudit
+                    current
+                    emptySortAudit{sortAuditNotes = [note]}
+              )
+        | otherwise ->
+            writeIORef
+              (swHarvest refs)
+              ((level, Map.insert letter sort frame) : rest)
+      [] -> return ()
+
+sortAuditLine :: SignatureSorts -> FilePath -> SortWalkRefs -> Int -> Text -> IO ()
+sortAuditLine sigs path refs lineNo rawLine = do
+  mathMeta <- readIORef (swMathMeta refs)
+  case mathMeta of
+    Just acc
+      | "\\end{mathmeta}" `T.isInfixOf` rawLine -> do
+          applySortMathMeta refs (T.unlines (reverse (rawLine : acc)))
+          writeIORef (swMathMeta refs) Nothing
+      | otherwise ->
+          writeIORef (swMathMeta refs) (Just (rawLine : acc))
+    Nothing
+      | "\\begin{mathmeta}" `T.isInfixOf` rawLine -> do
+          resetSortInline refs
+          if "\\end{mathmeta}" `T.isInfixOf` rawLine
+            then applySortMathMeta refs rawLine
+            else writeIORef (swMathMeta refs) (Just [rawLine])
+      | isFenceLine rawLine -> do
+          resetSortInline refs
+          inFence <- readIORef (swInFence refs)
+          writeIORef (swInFence refs) (not inFence)
+      | otherwise -> do
+          inFence <- readIORef (swInFence refs)
+          mathSpan <- readIORef (swMathSpan refs)
+          unless inFence $ do
+            when (T.null (T.strip rawLine)) (resetSortInline refs)
+            let inDisplay = case mathSpan of
+                  Just ("$$", _, _) -> True
+                  _ -> False
+            when (not inDisplay && isHeadingLine rawLine) $ do
+              resetSortInline refs
+              flushSortPending refs
+              enterSection (swDecl refs) (T.length (T.takeWhile (== '#') rawLine))
+              let level = T.length (T.takeWhile (== '#') rawLine)
+              modifyIORef (swHarvest refs) $ \stack ->
+                (level, Map.empty) : dropWhile (\(l, _) -> l >= level) stack
+            inComment <- readIORef (swInComment refs)
+            let (visible, inComment') = stripHtmlCommentSpan inComment rawLine
+            writeIORef (swInComment refs) inComment'
+            sortAuditText sigs path refs lineNo (stripLatexComments visible)
+
+applySortMathMeta :: SortWalkRefs -> Text -> IO ()
+applySortMathMeta refs blockText =
+  case parseMathMetaBlock blockText of
+    Just directives -> forM_ directives applyDirective
+    Nothing -> return ()
+ where
+  applyDirective (MathMetaDecl cmd) = applyDeclCommand (swDecl refs) cmd
+  applyDirective (MathMetaWith cmds) = modifyIORef (swPending refs) (++ cmds)
+  applyDirective _ = return ()
+
+flushSortPending :: SortWalkRefs -> IO ()
+flushSortPending refs = do
+  cmds <- readIORef (swPending refs)
+  writeIORef (swPending refs) []
+  mapM_ (applyDeclCommand (swDecl refs)) cmds
+
+stripHtmlCommentSpan :: Bool -> Text -> (Text, Bool)
+stripHtmlCommentSpan inComment txt
+  | inComment =
+      case T.breakOn "-->" txt of
+        (_, rest)
+          | not (T.null rest) -> stripHtmlCommentSpan False (T.drop 3 rest)
+        _ -> ("", True)
+  | otherwise =
+      case T.breakOn "<!--" txt of
+        (before, rest)
+          | T.null rest -> (before, False)
+          | otherwise ->
+              let (after, stillIn) = stripHtmlCommentSpan True (T.drop 4 rest)
+               in (before <> after, stillIn)
+
+-- Inline math cannot cross a Markdown block boundary. Display math can.
+resetSortInline :: SortWalkRefs -> IO ()
+resetSortInline refs = modifyIORef (swMathSpan refs) $ \spanState ->
+  case spanState of
+    Just ("$", _, _) -> Nothing
+    _ -> spanState
+
+-- Find an unescaped dollar, retaining escaped dollars in the span's contents.
+breakMathDollar :: Text -> (Text, Text)
+breakMathDollar txt =
+  case T.breakOn "$" txt of
+    (before, rest)
+      | not (T.null rest) && odd (T.length (T.takeWhileEnd (== '\\') before)) ->
+          let (after, suffix) = breakMathDollar (T.drop 1 rest)
+           in (before <> "$" <> after, suffix)
+      | otherwise -> (before, rest)
+
+sortAuditText :: SignatureSorts -> FilePath -> SortWalkRefs -> Int -> Text -> IO ()
+sortAuditText sigs path refs lineNo txt = do
+  modifyIORef (swMathSpan refs) (fmap (\(delimiter, startLine, acc) -> (delimiter, startLine, acc <> "\n")))
+  go txt
+ where
+  go remaining = do
+    spanState <- readIORef (swMathSpan refs)
+    let (before, rest) = breakMathDollar remaining
+        delimiter = if "$$" `T.isPrefixOf` rest then "$$" else "$"
+        after = T.drop (T.length delimiter) rest
+    case spanState of
+      Nothing -> unless (T.null rest) $ do
+        writeIORef (swMathSpan refs) (Just (delimiter, lineNo, ""))
+        go after
+      Just (opening, startLine, acc)
+        | T.null rest ->
+            writeIORef (swMathSpan refs) (Just (opening, startLine, acc <> before))
+        | delimiter == opening -> do
+            writeIORef (swMathSpan refs) Nothing
+            sortAuditSpan sigs path refs startLine (acc <> before)
+            go after
+        | opening == "$" -> do
+            -- A display opener ends an incomplete inline span.
+            writeIORef (swMathSpan refs) (Just (delimiter, lineNo, ""))
+            go after
+        | otherwise -> do
+            writeIORef (swMathSpan refs) (Just (opening, startLine, acc <> before <> delimiter))
+            go after
+
+sortAuditSpan :: SignatureSorts -> FilePath -> SortWalkRefs -> Int -> Text -> IO ()
+sortAuditSpan sigs path refs lineNo spanText = do
+  flushSortPending refs
+  st <- readIORef (swDecl refs)
+  stack <- readIORef (swHarvest refs)
+  let henv = Map.unions (map snd stack)
+      res = checkMathExpr sigs st henv (parseMathExpr spanText)
+      prefix = T.pack path <> ":" <> T.pack (show lineNo) <> ": sort mismatch: "
+      context = "  (in $" <> truncateSpan spanText <> "$)"
+      findings' = map (\finding -> prefix <> finding <> context) (sortAuditFindings res)
+      plainPrefix = T.pack path <> ":" <> T.pack (show lineNo) <> ": "
+      notes' = map (\note -> plainPrefix <> note <> context) (sortAuditNotes res)
+  modifyIORef
+    (swResult refs)
+    ( \current ->
+        mergeSortAudit
+          current
+          res{sortAuditFindings = findings', sortAuditNotes = notes'}
+    )
+  modifyIORef (swHarvestUnion refs) $ \union ->
+    foldl
+      (\u (letter, sort) -> Map.alter (addHarvestedSort sort) letter u)
+      union
+      (sortAuditHarvest res)
+  applySortHarvest
+    refs
+    (T.pack path <> ":" <> T.pack (show lineNo) <> ": ")
+    context
+    (sortAuditHarvest res)
+  unless (null (sortAuditRetract res)) $
+    modifyIORef (swHarvest refs) $ \frames ->
+      [ (level, foldr Map.delete frame (sortAuditRetract res))
+      | (level, frame) <- frames
+      ]
+ where
+  truncateSpan txt =
+    let flat = T.replace "\n" " " txt
+     in if T.length flat > 80 then T.take 77 flat <> "..." else flat
+
+-- Generic-notation DSL: a table-driven grammar for the math the book
+-- writes, in the spirit of Coq's notation system.  Operators are data
+-- (dslInfixTable and its companions), so extending the grammar means
+-- adding rows, not parser code.  The angle bracket <a, b> is a primary,
+-- so it can appear wherever a term can: nested, as an argument, on
+-- either side of a relation.  A raw < is read as a bracket when it
+-- opens at a primary position, or when a term is followed by a <...>
+-- whose interior carries a top-level comma (an application argument);
+-- otherwise it is the comparison.  This section parses a math span
+-- into DslExpr, and resolves every raw angle bracket to the one
+-- registered notation whose argument sorts -- and the sort the
+-- surrounding context expects -- it fits, the resolution stage of the
+-- generic-notation plan.  Only resolutions the declarations prove are
+-- made; when the winner is not unique the bracket stays unresolved.
+-- The lint mode --dsl-audit reports the verdicts over the book
+-- without changing any output, ahead of wiring the resolution into
+-- the filter itself.
+
+data DslAssoc = DslAssocLeft | DslAssocRight | DslAssocNone
+  deriving (Eq, Show)
+
+-- A token: the raw text that precedes it (whitespace and spacing
+-- commands, folded in so the semantic token stream stays clean) and
+-- its own text.  Commands keep their backslash.
+data DslTok = DslTok
+  { dslTokLead :: Text
+  , dslTokText :: Text
+  }
+  deriving (Eq, Show)
+
+dslTokRender :: DslTok -> Text
+dslTokRender tok = dslTokLead tok <> dslTokText tok
+
+dslSpacingTexts :: [Text]
+dslSpacingTexts =
+  [ "\\,"
+  , "\\;"
+  , "\\:"
+  , "\\!"
+  , "\\ "
+  , "\\quad"
+  , "\\qquad"
+  , "\\displaystyle"
+  ]
+
+lexDsl :: Text -> [DslTok]
+lexDsl = scan ""
+ where
+  scan lead txt
+    | T.null txt = [DslTok lead "" | not (T.null lead)]
+    | isSpace (T.head txt) =
+        let (ws, rest) = T.span isSpace txt
+         in scan (lead <> ws) rest
+    | otherwise =
+        case lexDslCommand txt of
+          Just (core, rest)
+            | core `elem` dslSpacingTexts -> scan (lead <> core) rest
+            | otherwise -> DslTok lead core : scan "" rest
+          Nothing ->
+            let (core, rest) = lexDslSymbol txt
+             in DslTok lead core : scan "" rest
+
+lexDslCommand :: Text -> Maybe (Text, Text)
+lexDslCommand txt = do
+  rest <- T.stripPrefix "\\" txt
+  case T.uncons rest of
+    Just (c, rest')
+      | isLetter c ->
+          let (tailText, rest'') = T.span isLetter rest'
+           in Just ("\\" <> T.cons c tailText, rest'')
+      | otherwise -> Just ("\\" <> T.singleton c, rest')
+    Nothing -> Just ("\\", "")
+
+lexDslSymbol :: Text -> (Text, Text)
+lexDslSymbol txt
+  | Just rest <- T.stripPrefix ":=" txt = (":=", rest)
+  | otherwise =
+      case T.uncons txt of
+        Just (c, _)
+          | isDigit c ->
+              let (digits, rest) = T.span isDigit txt
+               in case T.uncons rest of
+                    Just ('.', rest')
+                      | Just (c', _) <- T.uncons rest'
+                      , isDigit c' ->
+                          let (frac, rest'') = T.span isDigit rest'
+                           in (digits <> "." <> frac, rest'')
+                    _ -> (digits, rest)
+        Just (c, rest) -> (T.singleton c, rest)
+        Nothing -> ("", "")
+
+-- The expression tree.  Nodes keep their tokens so a parsed span
+-- renders back byte-for-byte; resolution replaces a raw angle node
+-- with a generated DslResolved call.
+data DslBraced = DslBraced DslTok [DslItem] DslTok
+  deriving (Eq, Show)
+
+-- A list item with the separator token that precedes it (Nothing for
+-- the first item).  Separators are commas and semicolons; a relation
+-- token also appears here where a list feeds a multi-variable
+-- relation (x, y \in X), keeping the rendering faithful.
+type DslItem = (Maybe DslTok, DslExpr)
+
+data DslExpr
+  = DslAtom DslTok
+  | DslSeq [DslExpr]
+  | DslApp DslExpr DslExpr
+  | DslCmd DslTok (Maybe DslBraced) [DslBraced]
+  | DslGroup DslBraced
+  | DslInfix DslTok DslExpr DslExpr
+  | DslPrefix DslTok DslExpr
+  | DslScript DslExpr [DslTok] DslExpr
+  | DslBinder DslTok [DslTok] DslExpr
+  | DslDelimited DslTok [DslItem] DslTok
+  | DslSet DslTok [DslItem] (Maybe (DslTok, [DslItem])) DslTok
+  | DslAngle DslTok [DslItem] (Maybe (DslTok, [DslItem])) DslTok Bool
+  | DslBars DslTok DslExpr DslTok
+  | DslEnv DslTok [DslItem] DslTok
+  | DslResolved Text [[DslItem]]
+  deriving (Eq, Show)
+
+dslItemsExprs :: [DslItem] -> [DslExpr]
+dslItemsExprs = map snd
+
+renderDslItems :: [DslItem] -> Text
+renderDslItems items =
+  T.concat [maybe "" dslTokRender sep <> renderDsl expr | (sep, expr) <- items]
+
+renderDslBraced :: DslBraced -> Text
+renderDslBraced (DslBraced open items close) =
+  dslTokRender open <> renderDslItems items <> dslTokRender close
+
+renderDsl :: DslExpr -> Text
+renderDsl (DslAtom tok) = dslTokRender tok
+renderDsl (DslSeq exprs) = T.concat (map renderDsl exprs)
+renderDsl (DslApp fun arg) = renderDsl fun <> renderDsl arg
+renderDsl (DslCmd tok opt args) =
+  dslTokRender tok
+    <> maybe "" renderDslBraced opt
+    <> T.concat (map renderDslBraced args)
+renderDsl (DslGroup braced) = renderDslBraced braced
+renderDsl (DslInfix op lhs rhs) =
+  renderDsl lhs <> dslTokRender op <> renderDsl rhs
+renderDsl (DslPrefix op expr) = dslTokRender op <> renderDsl expr
+renderDsl (DslScript base markers arg) =
+  renderDsl base <> T.concat (map dslTokRender markers) <> renderDsl arg
+renderDsl (DslBinder kw spec body) =
+  dslTokRender kw <> T.concat (map dslTokRender spec) <> renderDsl body
+renderDsl (DslDelimited open items close) =
+  dslTokRender open <> renderDslItems items <> dslTokRender close
+renderDsl (DslSet open items cond close) =
+  dslTokRender open
+    <> renderDslItems items
+    <> maybe "" (\(sep, condItems) -> dslTokRender sep <> renderDslItems condItems) cond
+    <> dslTokRender close
+renderDsl (DslAngle open items cond close _) =
+  dslTokRender open
+    <> renderDslItems items
+    <> maybe "" (\(sep, condItems) -> dslTokRender sep <> renderDslItems condItems) cond
+    <> dslTokRender close
+renderDsl (DslBars open expr close) =
+  dslTokRender open <> renderDsl expr <> dslTokRender close
+renderDsl (DslEnv open items close) =
+  dslTokRender open <> renderDslItems items <> dslTokRender close
+renderDsl (DslResolved name args) =
+  "\\"
+    <> name
+    <> T.concat ["{" <> renderDslItems items <> "}" | items <- args]
+
+-- Operator table: token text to (level, associativity).  Larger
+-- levels bind tighter.  This is the grammar; the parser below only
+-- interprets it.
+dslInfixTable :: [(Text, (Int, DslAssoc))]
+dslInfixTable =
+  [ ("\\cdot", (60, DslAssocLeft))
+  , ("\\times", (60, DslAssocLeft))
+  , ("\\cap", (60, DslAssocLeft))
+  , ("\\circ", (60, DslAssocLeft))
+  , ("\\concat", (60, DslAssocLeft))
+  , ("\\otimes", (60, DslAssocLeft))
+  , ("\\ast", (60, DslAssocLeft))
+  , ("\\div", (60, DslAssocLeft))
+  , ("*", (60, DslAssocLeft))
+  , ("/", (60, DslAssocLeft))
+  , ("+", (50, DslAssocLeft))
+  , ("-", (50, DslAssocLeft))
+  , ("\\cup", (50, DslAssocLeft))
+  , ("\\sqcup", (50, DslAssocLeft))
+  , ("\\setminus", (50, DslAssocLeft))
+  , ("\\oplus", (50, DslAssocLeft))
+  , ("\\triangle", (50, DslAssocLeft))
+  , ("\\pm", (50, DslAssocLeft))
+  , ("\\mp", (50, DslAssocLeft))
+  , ("=", (40, DslAssocNone))
+  , ("\\ne", (40, DslAssocNone))
+  , ("<", (40, DslAssocNone))
+  , (">", (40, DslAssocNone))
+  , ("\\le", (40, DslAssocNone))
+  , ("\\ge", (40, DslAssocNone))
+  , ("\\in", (40, DslAssocNone))
+  , ("\\notin", (40, DslAssocNone))
+  , ("\\subseteq", (40, DslAssocNone))
+  , ("\\IncludedIn", (40, DslAssocNone))
+  , ("\\subset", (40, DslAssocNone))
+  , ("\\supseteq", (40, DslAssocNone))
+  , ("\\supset", (40, DslAssocNone))
+  , ("\\equiv", (40, DslAssocNone))
+  , ("\\sim", (40, DslAssocNone))
+  , ("\\approx", (40, DslAssocNone))
+  , ("\\cong", (40, DslAssocNone))
+  , ("\\preceq", (40, DslAssocNone))
+  , ("\\prefixOf", (40, DslAssocNone))
+  , ("\\sqsubseteq", (40, DslAssocNone))
+  , ("\\prec", (40, DslAssocNone))
+  , ("\\succeq", (40, DslAssocNone))
+  , ("\\mid", (40, DslAssocNone))
+  , ("\\perp", (40, DslAssocNone))
+  , ("\\models", (40, DslAssocNone))
+  , ("\\vdash", (40, DslAssocNone))
+  , ("\\nvdash", (40, DslAssocNone))
+  , ("\\forces", (40, DslAssocNone))
+  , ("\\dashv", (40, DslAssocNone))
+  , ("\\parallel", (40, DslAssocNone))
+  , ("\\propto", (40, DslAssocNone))
+  , ("\\asymp", (40, DslAssocNone))
+  , ("\\land", (35, DslAssocLeft))
+  , ("\\lor", (30, DslAssocLeft))
+  , ("\\to", (20, DslAssocRight))
+  , ("\\rightarrow", (20, DslAssocRight))
+  , ("\\Rightarrow", (20, DslAssocRight))
+  , ("\\leftrightarrow", (20, DslAssocRight))
+  , ("\\iff", (20, DslAssocRight))
+  , ("\\longrightarrow", (20, DslAssocRight))
+  , ("\\implies", (20, DslAssocRight))
+  , ("\\impliedby", (20, DslAssocRight))
+  , ("\\mapsto", (20, DslAssocRight))
+  , (":", (15, DslAssocNone))
+  , (":=", (5, DslAssocNone))
+  ]
+
+dslInfix :: Text -> Maybe (Int, DslAssoc)
+dslInfix tok = lookup tok dslInfixTable
+
+dslInfixLbp :: (Int, DslAssoc) -> Int
+dslInfixLbp (level, _) = 2 * level
+
+dslInfixRbp :: (Int, DslAssoc) -> Int
+dslInfixRbp (level, DslAssocLeft) = 2 * level + 1
+dslInfixRbp (level, _) = 2 * level - 1
+
+-- Unary prefix operators and the binding power of their operand:
+-- negation binds above conjunction, unary minus just above addition
+-- (so -1/2 and -a + b read as usual).
+dslPrefixTable :: [(Text, Int)]
+dslPrefixTable =
+  [ ("\\neg", 71)
+  , ("\\sim", 71)
+  , ("-", 101)
+  , ("+", 101)
+  ]
+
+dslBigops :: [Text]
+dslBigops =
+  [ "\\sum"
+  , "\\prod"
+  , "\\bigcup"
+  , "\\bigcap"
+  , "\\bigvee"
+  , "\\bigwedge"
+  , "\\bigoplus"
+  , "\\bigotimes"
+  , "\\bigsqcup"
+  , "\\sup"
+  , "\\inf"
+  , "\\lim"
+  , "\\max"
+  , "\\min"
+  , "\\limsup"
+  , "\\liminf"
+  ]
+
+dslAccents :: [Text]
+dslAccents =
+  [ "\\hat"
+  , "\\bar"
+  , "\\tilde"
+  , "\\dot"
+  , "\\ddot"
+  , "\\vec"
+  , "\\widehat"
+  , "\\widetilde"
+  , "\\overline"
+  , "\\underline"
+  , "\\check"
+  , "\\breve"
+  , "\\acute"
+  , "\\grave"
+  , "\\mathring"
+  ]
+
+-- Commands with a fixed number of mandatory arguments, in the
+-- TeX sense: when the braces are missing, the next single token
+-- is the argument, so \frac12 reads as \frac{1}{2} and
+-- \mathcal B as \mathcal{B}. The argument capture in
+-- 'parseDslCommand' fills the argument list in order, braced and
+-- bare arguments alike.
+dslBareArgCmds :: [(Text, Int)]
+dslBareArgCmds =
+  [ ("\\frac", 2)
+  , ("\\dfrac", 2)
+  , ("\\tfrac", 2)
+  , ("\\binom", 2)
+  , ("\\sqrt", 1)
+  , ("\\pmod", 1)
+  , ("\\mathcal", 1)
+  , ("\\mathbb", 1)
+  , ("\\mathrm", 1)
+  , ("\\mathbf", 1)
+  , ("\\mathsf", 1)
+  , ("\\mathfrak", 1)
+  , ("\\boldsymbol", 1)
+  , ("\\operatorname", 1)
+  ]
+
+-- Commands whose braced argument is prose, not math: the argument
+-- is kept raw. Font commands and the \xrightarrow family are not
+-- here; their arguments are math and parse as ordinary groups.
+dslOpaqueArgCmds :: [Text]
+dslOpaqueArgCmds =
+  [ "\\text"
+  , "\\textbf"
+  , "\\textit"
+  , "\\emph"
+  , "\\textrm"
+  , "\\texttt"
+  , "\\textsf"
+  ]
+
+-- Size commands that close or separate a delimited construct; when
+-- one is followed by a closer it belongs to that closer, not to an
+-- application.
+dslClosingSizeCmds :: [Text]
+dslClosingSizeCmds =
+  [ "\\right"
+  , "\\bigr"
+  , "\\Bigr"
+  , "\\biggr"
+  , "\\Biggr"
+  , "\\middle"
+  , "\\bigm"
+  , "\\Bigm"
+  ]
+
+dslSizeCmds :: [Text]
+dslSizeCmds =
+  [ "\\left"
+  , "\\right"
+  , "\\middle"
+  , "\\bigl"
+  , "\\bigr"
+  , "\\Bigl"
+  , "\\Bigr"
+  , "\\biggl"
+  , "\\biggr"
+  , "\\Biggl"
+  , "\\Biggr"
+  , "\\big"
+  , "\\Big"
+  , "\\bigm"
+  , "\\Bigm"
+  ]
+
+data DslCtx = DslCtx
+  { dslCtxAngle :: Bool
+  , dslCtxNoBar :: Bool
+  , dslCtxNoRestrict :: Bool
+  }
+
+dslCtx0 :: DslCtx
+dslCtx0 = DslCtx False False False
+
+dropEnd :: Int -> [a] -> [a]
+dropEnd n xs = take (length xs - n) xs
+
+takeDslBracedGroup :: [DslTok] -> Maybe ([DslTok], [DslTok])
+takeDslBracedGroup toks@(tok : rest)
+  | dslTokText tok == "{" = go 1 [tok] rest
+  | otherwise = Nothing
+ where
+  go depth acc []
+    | depth == 0 = Just (reverse acc, [])
+    | otherwise = Nothing
+  go depth acc (t : r)
+    | depth == 0 = Just (reverse acc, t : r)
+    | dslTokText t == "{" = go (depth + 1) (t : acc) r
+    | dslTokText t == "}" = go (depth - 1) (t : acc) r
+    | otherwise = go depth (t : acc) r
+takeDslBracedGroup [] = Nothing
+
+isDslAtomTok :: DslTok -> Bool
+isDslAtomTok tok =
+  case T.uncons (dslTokText tok) of
+    Just (c, rest) ->
+      (isLetter c || isDigit c) && (T.null rest || T.all isDigit (dslTokText tok))
+    Nothing -> False
+
+isDslVarTok :: DslTok -> Bool
+isDslVarTok tok =
+  case T.uncons (dslTokText tok) of
+    Just (c, rest) -> isLetter c && T.null rest
+    Nothing -> False
+
+canStartDslPrimary :: DslCtx -> DslTok -> Bool
+canStartDslPrimary ctx tok
+  | txt `elem` [")", "]", "}", "\\}", "\\rangle"] = False
+  | txt `elem` ["|", "\\|"] && dslCtxNoBar ctx = False
+  | txt `elem` ["(", "[", "{", "\\{", "|", "\\|", "\\langle", "."] = True
+  | T.isPrefixOf "\\" txt =
+      txt `notElem` ["\\}", "\\end"]
+        && isNothing (dslInfix txt)
+        && isNothing (lookup txt dslPrefixTable)
+  | otherwise = isDslAtomTok tok
+ where
+  txt = dslTokText tok
+
+-- Scan for the angle bracket that matches the < at the head of the
+-- token stream: its position, and whether its interior carries a
+-- comma at its own top level (the application-argument test).
+scanDslAngle :: [DslTok] -> Maybe (Int, Bool)
+scanDslAngle toks = go 0 0 False 0 toks
+ where
+  rawMode = case toks of
+    (t : _) -> dslTokText t == "<"
+    [] -> True
+  opensAngle txt = txt == "\\langle" || (rawMode && txt == "<")
+  closesAngle txt = txt == "\\rangle" || (rawMode && txt == ">")
+  go _ _ _ _ [] = Nothing
+  go angleDepth otherDepth comma idx (tok : rest) =
+    let txt = dslTokText tok
+     in if opensAngle txt && otherDepth == 0
+          then go (angleDepth + 1) otherDepth comma (idx + 1) rest
+          else
+            if closesAngle txt && otherDepth == 0
+              then
+                if angleDepth == 1
+                  then Just (idx, comma)
+                  else go (angleDepth - 1) otherDepth comma (idx + 1) rest
+              else
+                if txt `elem` ["(", "[", "{", "\\{"]
+                  then go angleDepth (otherDepth + 1) comma (idx + 1) rest
+                  else
+                    if txt `elem` [")", "]", "}", "\\}"]
+                      then
+                        if otherDepth == 0
+                          then Nothing
+                          else go angleDepth (otherDepth - 1) comma (idx + 1) rest
+                      else
+                        go
+                          angleDepth
+                          otherDepth
+                          (comma || (txt == "," && otherDepth == 0 && angleDepth == 1))
+                          (idx + 1)
+                          rest
+
+parseDslExpr :: DslCtx -> Int -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslExpr ctx minBp toks@(tok : _)
+  | dslTokText tok `elem` ["&", "\\\\"] = do
+      (inner, rest) <- parseDslExpr ctx minBp (drop 1 toks)
+      return (DslSeq [DslAtom tok, inner], rest)
+parseDslExpr ctx minBp toks = do
+  (left, rest) <- parseDslHead ctx toks
+  parseDslLoop ctx minBp left rest
+
+{- | Scripts carried by an infix operator itself, as in \sim_1 or
+\forces^*: the decoration belongs to the operator, not the rhs.
+-}
+takeDslOpScripts :: DslCtx -> [DslTok] -> [DslTok] -> ([DslTok], [DslTok])
+takeDslOpScripts ctx acc toks@(mark : argToks)
+  | dslTokText mark `elem` ["_", "^"]
+  , Just (_, rest') <- parseDslScriptArg ctx argToks =
+      takeDslOpScripts
+        ctx
+        (acc ++ take (length toks - length rest') toks)
+        rest'
+takeDslOpScripts _ acc toks = (acc, toks)
+
+{- | Fold an operator and its scripts into one token; the scripts'
+rendered text is kept, so rendering stays byte-exact.
+-}
+mergeDslOp :: [DslTok] -> DslTok
+mergeDslOp [] = DslTok "" ""
+mergeDslOp (t : ts) =
+  t{dslTokText = dslTokText t <> T.concat (map dslTokRender ts)}
+
+parseDslLoop :: DslCtx -> Int -> DslExpr -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslLoop ctx minBp left rest@(tok : tailToks)
+  | dslTokText tok `elem` ["&", "\\\\"] && minBp > 0 = Just (left, rest)
+  | dslTokText tok `elem` ["\\right", "\\middle"] = Just (left, rest)
+  | dslTokText tok == "<" =
+      case scanDslAngle rest of
+        Just (_, True)
+          | 2 * 90 >= minBp -> do
+              (arg, rest') <- parseDslUnit ctx rest
+              parseDslLoop ctx minBp (DslApp left arg) rest'
+        _
+          | Just spec <- dslInfix "<"
+          , dslInfixLbp spec >= minBp -> do
+              (rhs, rest') <- parseDslExpr ctx (dslInfixRbp spec) tailToks
+              parseDslLoop ctx minBp (DslInfix tok left rhs) rest'
+          | otherwise -> Just (left, rest)
+  | dslTokText tok `elem` ["&", "\\\\"] && minBp == 0 =
+      case tailToks of
+        [] -> Just (DslSeq [left, DslAtom tok], [])
+        (opTok : afterOp)
+          | dslTokText opTok /= "<"
+          , Just spec <- dslInfix (dslTokText opTok) -> do
+              (rhs, rest') <- parseDslExpr ctx (dslInfixRbp spec) afterOp
+              parseDslLoop
+                ctx
+                minBp
+                (DslInfix opTok (DslSeq [left, DslAtom tok]) rhs)
+                rest'
+        _ -> case parseDslExpr ctx 0 tailToks of
+          Just (rhs, rest') ->
+            parseDslLoop ctx minBp (DslSeq [left, DslAtom tok, rhs]) rest'
+          -- Nothing past the separator starts an expression (the
+          -- \end of an environment, a closing delimiter): the
+          -- separator is a trailing one and the rest belongs to
+          -- the enclosing construct.
+          Nothing -> Just (DslSeq [left, DslAtom tok], tailToks)
+  | Just spec <- dslInfix (dslTokText tok)
+  , not (dslTokText tok == ">" && dslCtxAngle ctx)
+  , not (dslTokText tok == "|" && dslCtxNoBar ctx)
+  , dslInfixLbp spec >= minBp = do
+      let (opToks, rhsToks) = takeDslOpScripts ctx [tok] tailToks
+      case parseDslExpr ctx (dslInfixRbp spec) rhsToks of
+        Just (rhs, rest') ->
+          parseDslLoop ctx minBp (DslInfix (mergeDslOp opToks) left rhs) rest'
+        -- An operator with nothing after it that could start its
+        -- right side is a mention, juxtaposed like the ** of G^{**}.
+        Nothing -> case rhsToks of
+          [] ->
+            parseDslLoop ctx minBp (DslApp left (DslAtom tok)) tailToks
+          (t : _)
+            | not (canStartDslPrimary ctx t) ->
+                parseDslLoop ctx minBp (DslApp left (DslAtom tok)) tailToks
+            | otherwise -> Nothing
+  | dslTokText tok `elem` dslSizeCmds
+  , (barTok : subTok : _) <- tailToks
+  , dslTokText barTok == "|"
+  , dslTokText subTok == "_" = do
+      (arg, rest') <- parseDslScriptArg ctx (drop 2 tailToks)
+      parseDslLoop
+        ctx
+        minBp
+        (DslScript left [tok, barTok, subTok] arg)
+        rest'
+  | dslTokText tok `elem` dslSizeCmds
+  , (nextTok : _) <- tailToks
+  , dslTokText nextTok
+      `elem` [")", "]", "}", "\\}", "\\rangle", "|", "\\|", ">"] =
+      Just (left, rest)
+  | isJust (lookup (dslTokText tok) dslPrefixTable) && 2 * 90 >= minBp = do
+      (arg, rest') <- parseDslHead ctx rest
+      parseDslLoop ctx minBp (DslApp left arg) rest'
+  | canStartDslPrimary ctx tok && 2 * 90 >= minBp = do
+      (arg, rest') <- parseDslUnit ctx rest
+      parseDslLoop ctx minBp (DslApp left arg) rest'
+  | otherwise = Just (left, rest)
+parseDslLoop _ _ left [] = Just (left, [])
+
+parseDslHead :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslHead ctx toks@(tok : rest)
+  | dslTokText tok `elem` ["\\forall", "\\exists"] =
+      parseDslBinder ctx toks <|> parseDslUnit ctx toks
+  | dslTokText tok == "\\lambda" =
+      case rest of
+        (v : dot : _)
+          | isDslVarTok v && dslTokText dot == "." ->
+              parseDslBinder ctx toks
+        _ -> parseDslUnit ctx toks
+  | Just rbp <- lookup (dslTokText tok) dslPrefixTable =
+      case parseDslExpr ctx rbp rest of
+        Just (expr, rest') -> Just (DslPrefix tok expr, rest')
+        -- A lone operator as a term (the placeholder in A \\times -,
+        -- a mentioned \\sim): the operator itself is the atom.
+        Nothing -> Just (DslAtom tok, rest)
+  | dslTokText tok `elem` dslBigops = do
+      (base, rest') <- parseDslPostfixes ctx (DslAtom tok) rest
+      case parseDslExpr ctx (2 * 60 + 1) rest' of
+        Just (body, rest'') -> return (DslSeq [base, body], rest'')
+        -- A mentioned big operator with no body (\\bigcup).
+        Nothing -> return (base, rest')
+  | dslTokText tok `elem` dslAccents = do
+      (unit, rest') <- parseDslUnit ctx rest
+      return (DslSeq [DslAtom tok, unit], rest')
+  | otherwise = parseDslUnit ctx toks
+parseDslHead _ [] = Nothing
+
+parseDslBinder :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslBinder ctx (kw : rest0) =
+  trySpec (parseDslBinderSpec ctx [] rest1)
+    <|> trySpec (parseDslBinderSpecMinimal ctx rest1)
+ where
+  rest1 = case rest0 of
+    (t : r) | dslTokText t == "!" -> r
+    _ -> rest0
+  trySpec spec = do
+    bodyStart <- spec
+    (body, rest') <- parseDslExpr ctx (2 * 10) bodyStart
+    let specToks = take (length rest1 - length bodyStart) rest1
+    return (DslBinder kw specToks body, rest')
+parseDslBinder _ [] = Nothing
+
+-- One variable (with an optional relation), then the separator: the
+-- fallback when the greedy multi-variable specification would
+-- swallow the body (\\forall n,\\ x\\in F reads x\\in F as the body).
+parseDslBinderSpecMinimal :: DslCtx -> [DslTok] -> Maybe [DslTok]
+parseDslBinderSpecMinimal ctx toks = do
+  (varExpr, rest1) <- parseDslUnit ctx toks
+  case varExpr of
+    DslAtom _ -> return ()
+    DslScript (DslAtom _) _ _ -> return ()
+    DslCmd{} -> return ()
+    _ -> Nothing
+  rest2 <- case rest1 of
+    (opTok : r)
+      | Just (40, _) <- dslInfix (dslTokText opTok) -> do
+          (_, r') <- parseDslSpecRhs ctx r
+          return r'
+    _ -> return rest1
+  case rest2 of
+    (sep : r) | dslTokText sep `elem` [",", "."] -> return r
+    _ -> Nothing
+
+parseDslBinderSpec :: DslCtx -> [Text] -> [DslTok] -> Maybe [DslTok]
+parseDslBinderSpec ctx bound toks = do
+  (varExpr, rest1) <- parseDslUnit ctx toks
+  let varName = case varExpr of
+        DslAtom t -> dslTokText t
+        DslScript (DslAtom t) _ _ -> dslTokText t
+        _ -> ""
+  rest2 <- case rest1 of
+    (opTok : r)
+      | Just (40, _) <- dslInfix (dslTokText opTok) -> do
+          (_, r') <- parseDslSpecRhs ctx r
+          return r'
+    _ -> return rest1
+  case rest2 of
+    (commaTok : r)
+      | dslTokText commaTok == "," ->
+          case r of
+            (v : after)
+              | isDslVarTok v
+              , dslTokText v `notElem` bound
+              , startsDslSpec after ->
+                  parseDslBinderSpec ctx (varName : bound) r
+            _ -> return r
+    (dotTok : r)
+      | dslTokText dotTok == "." -> return r
+    _ -> return rest2
+ where
+  startsDslSpec [] = False
+  startsDslSpec (t : _) =
+    dslTokText t `elem` [",", "."] || isJust (dslInfix (dslTokText t))
+
+parseDslSpecRhs :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslSpecRhs ctx toks = do
+  (unit, rest) <- parseDslUnit ctx toks
+  go unit rest
+ where
+  go acc rest@(tok : tailToks)
+    | Just (level, assoc) <- dslInfix (dslTokText tok)
+    , level >= 50 = do
+        (rhs, rest') <- parseDslUnit ctx tailToks
+        go (DslInfix tok acc rhs) rest'
+    | otherwise = Just (acc, rest)
+  go acc [] = Just (acc, [])
+
+parseDslUnit :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslUnit ctx toks = do
+  (base, rest) <- parseDslPrimary ctx toks
+  parseDslPostfixes ctx base rest
+
+parseDslPostfixes :: DslCtx -> DslExpr -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslPostfixes ctx base toks@(tok : rest)
+  | dslTokText tok == "|" && nextIsSub && not (dslCtxNoRestrict ctx) = do
+      (arg, rest') <- parseDslScriptArg ctx (drop 2 toks)
+      parseDslPostfixes ctx (DslScript base [tok, toks !! 1] arg) rest'
+  | dslTokText tok `elem` ["^", "_"] = do
+      (arg, rest') <- parseDslScriptArg ctx rest
+      parseDslPostfixes ctx (DslScript base [tok] arg) rest'
+  | dslTokText tok `elem` ["'", "!"] =
+      parseDslPostfixes ctx (DslScript base [tok] (DslSeq [])) rest
+  | otherwise = Just (base, toks)
+ where
+  nextIsSub = case rest of
+    (t : _) -> dslTokText t == "_"
+    [] -> False
+parseDslPostfixes _ base [] = Just (base, [])
+
+parseDslScriptArg :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslScriptArg ctx toks@(tok : _)
+  | dslTokText tok == "{" = do
+      (braced, rest) <- parseDslBraced ctx toks
+      return (DslGroup braced, rest)
+  | otherwise =
+      parseDslPrimary ctx toks
+        <|> case toks of
+          (t : rest)
+            | dslTokText t
+                `notElem` [")", "]", "}", "\\}", "\\rangle", ",", ";", "&", "\\\\"] ->
+                Just (DslAtom t, rest)
+          _ -> Nothing
+parseDslScriptArg _ [] = Nothing
+
+-- Braced groups are grammar: their contents must parse as items.
+-- There is no raw fallback; a group outside the grammar fails the
+-- span (which then passes through untouched, like any span that
+-- does not parse).
+parseDslBraced :: DslCtx -> [DslTok] -> Maybe (DslBraced, [DslTok])
+parseDslBraced ctx toks@(open : rest)
+  | dslTokText open == "{" = do
+      (items, rest') <- parseDslItems ctx "}" rest
+      (close, rest'') <- expectDslTokEof "}" rest'
+      return (DslBraced open items close, rest'')
+parseDslBraced _ _ = Nothing
+
+expectDslTok :: Text -> [DslTok] -> Maybe (DslTok, [DslTok])
+expectDslTok txt (tok : rest)
+  | dslTokText tok == txt = Just (tok, rest)
+  | dslTokText tok `elem` dslSizeCmds =
+      case rest of
+        (close : rest')
+          | dslTokText close == txt ->
+              Just
+                ( close
+                    { dslTokLead =
+                        dslTokRender tok <> dslTokLead close
+                    }
+                , rest'
+                )
+        _ -> Nothing
+expectDslTok _ _ = Nothing
+
+{- | 'expectDslTok' that also succeeds at the very end of the span:
+TeX does not balance delimiters, and a span may end inside one
+(the distribution function in borel-reducibility-synthesis ends
+inside an unclosed parenthesis); the closer renders as nothing.
+-}
+expectDslTokEof :: Text -> [DslTok] -> Maybe (DslTok, [DslTok])
+expectDslTokEof txt toks =
+  expectDslTok txt toks
+    <|> case toks of
+      [] -> Just (DslTok "" "", [])
+      _ -> Nothing
+
+{- | 'expectDslTokEof' that also accepts a \right<delim> as the
+closer: TeX pairs \left with \right whatever the delimiter shapes,
+so \left( x \right. closes with an invisible right delimiter. The
+\right pair becomes the closing token.
+-}
+expectDslClose :: Text -> [DslTok] -> Maybe (DslTok, [DslTok])
+expectDslClose close toks =
+  expectDslTokEof close toks
+    <|> case toks of
+      (rt : delim : r)
+        | dslTokText rt == "\\right" ->
+            Just (mergeDslOp [rt, delim], r)
+      _ -> Nothing
+
+parseDslItems :: DslCtx -> Text -> [DslTok] -> Maybe ([DslItem], [DslTok])
+parseDslItems ctx close toks@(tok : _)
+  | dslTokText tok == close = Just ([], toks)
+parseDslItems ctx close toks = do
+  (first, rest) <- parseDslExpr ctx 0 toks
+  go [(Nothing, first)] rest
+ where
+  go acc rest@(sep : tailToks)
+    | dslTokText sep `elem` [",", ";", "&", "\\\\"] =
+        case tailToks of
+          [] -> Just (acc, rest)
+          (nextTok : _)
+            | dslTokText nextTok == close -> Just (acc, rest)
+          _ -> do
+            (item, rest') <- parseDslExpr ctx 0 tailToks
+            go (acc ++ [(Just sep, item)]) rest'
+    | dslTokText sep == "\\middle"
+    , (delim : afterDelim) <- tailToks =
+        case afterDelim of
+          [] -> Just (acc, rest)
+          (nextTok : _)
+            | dslTokText nextTok == close -> Just (acc, rest)
+          _ -> do
+            (item, rest') <- parseDslExpr ctx 0 afterDelim
+            go (acc ++ [(Just (mergeDslOp [sep, delim]), item)]) rest'
+    | otherwise = Just (acc, rest)
+  go acc [] = Just (acc, [])
+
+-- A comma list that may feed one relation applying to all its items
+-- (x, y \in X): the relation is kept as the last item's separator.
+parseDslItemsWithRelation :: DslCtx -> [DslTok] -> Maybe ([DslItem], [DslTok])
+parseDslItemsWithRelation ctx toks = do
+  (items, rest) <- parseDslItems ctx "" toks
+  case rest of
+    (opTok : tailToks)
+      | Just spec@(40, _) <- dslInfix (dslTokText opTok)
+      , length items > 1 -> do
+          (rhs, rest') <- parseDslExpr ctx (dslInfixRbp spec) tailToks
+          return (items ++ [(Just opTok, rhs)], rest')
+    _ -> return (items, rest)
+
+parseDslPrimary :: DslCtx -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslPrimary ctx toks@(tok : rest)
+  | txt == "(" = delimited "(" ")"
+  | txt == "[" = delimited "[" "]"
+  | txt == "\\{" = parseDslSet ctx tok rest
+  | txt == "{" = do
+      (braced, rest') <- parseDslBraced ctx toks
+      return (DslGroup braced, rest')
+  | txt == "<" =
+      parseDslAngle ctx tok ">" True toks
+        <|> Just (DslAtom tok, rest)
+  | txt == "\\langle" = parseDslAngle ctx tok "\\rangle" False toks
+  | txt == "|" = parseDslBars ctx tok "|" rest
+  | txt == "\\|" = parseDslBars ctx tok "\\|" rest
+  | txt == "\\left" =
+      parseDslLeftRight ctx tok rest <|> sizePrimary
+  | txt `elem` dslSizeCmds = sizePrimary
+  | txt == "\\begin" = parseDslEnv ctx tok rest
+  | txt == "\\end" = Nothing
+  | txt `elem` dslOpaqueArgCmds = case takeDslBracedGroup rest of
+      Just (group, rest') ->
+        let arg = case group of
+              (open : interiorAndClose)
+                | not (null interiorAndClose) ->
+                    DslBraced
+                      open
+                      [ (Nothing, DslSeq (map DslAtom (dropEnd 1 interiorAndClose)))
+                      | not (null (dropEnd 1 interiorAndClose))
+                      ]
+                      (last interiorAndClose)
+              _ -> DslBraced (DslTok "" "") [] (DslTok "" "")
+         in Just (DslCmd tok Nothing [arg], rest')
+      Nothing -> Just (DslCmd tok Nothing [], rest)
+  | txt `elem` [")", "]", "}", "\\}", "\\rangle", ",", ";", "&", "\\\\"] =
+      Nothing
+  | T.isPrefixOf "\\" txt = parseDslCommand ctx tok rest
+  | isDslAtomTok tok = Just (DslAtom tok, rest)
+  | txt `elem` [":", ":=", "*", "=", ">"] = Just (DslAtom tok, rest)
+  | isJust (dslInfix txt) = Nothing
+  | otherwise = Just (DslAtom tok, rest)
+ where
+  txt = dslTokText tok
+  delimited open close = do
+    (items, rest') <- parseDslItems ctx close rest
+    (closeTok, rest'') <- expectDslClose close rest'
+    return (DslDelimited tok items closeTok, rest'')
+  sizePrimary = do
+    (inner, rest') <- case rest of
+      (dot : r) | dslTokText dot == "." -> return (DslAtom dot, r)
+      (closer : r)
+        | dslTokText closer `elem` [")", "]", "\\}", "\\rangle", ">"] ->
+            return (DslAtom closer, r)
+      _ -> parseDslPrimary ctx rest
+    return (DslSeq [DslAtom tok, inner], rest')
+parseDslPrimary _ [] = Nothing
+
+{- | One bare argument in TeX's sense: the next single token. A
+numeric token is split after its first digit, the way TeX reads
+\frac12; anything else is one primary. The argument is wrapped
+in a brace-less group, so it renders back without braces and is
+indistinguishable from a braced argument downstream.
+-}
+parseDslBareArg :: DslCtx -> [DslTok] -> Maybe (DslBraced, [DslTok])
+parseDslBareArg ctx toks@(tok : rest)
+  | txt /= "" && T.all isDigit txt && T.length txt > 1 = do
+      let (firstDigit, remainder) = T.splitAt 1 txt
+          argTok = tok{dslTokText = firstDigit}
+          restTok = tok{dslTokLead = "", dslTokText = remainder}
+      return (wrapBare (DslAtom argTok), restTok : rest)
+  | canStartDslPrimary ctx tok = do
+      (unit, rest') <- parseDslPrimary ctx toks
+      return (wrapBare unit, rest')
+  | otherwise = Nothing
+ where
+  txt = dslTokText tok
+  wrapBare unit =
+    DslBraced (DslTok "" "") [(Nothing, unit)] (DslTok "" "")
+parseDslBareArg _ [] = Nothing
+
+parseDslCommand :: DslCtx -> DslTok -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslCommand ctx tok rest0 = do
+  (opt, rest1) <-
+    if dslTokText tok == "\\sqrt"
+      then case rest0 of
+        (open : r)
+          | dslTokText open == "[" -> do
+              (items, r') <- parseDslItems ctx "]" r
+              (close, r'') <- expectDslTokEof "]" r'
+              return (Just (DslBraced open items close), r'')
+        _ -> return (Nothing, rest0)
+      else return (Nothing, rest0)
+  (args, rest2) <- case lookup (dslTokText tok) dslBareArgCmds of
+    Just total -> do
+      (filled, rest') <- goTableArgs total rest1 []
+      (extra, rest'') <- goArgs rest'
+      return (filled ++ extra, rest'')
+    Nothing -> goArgs rest1
+  return (DslCmd tok opt args, rest2)
+ where
+  goArgs rest@(t : _)
+    | dslTokText t == "{" = do
+        (braced, rest') <- parseDslBraced ctx rest
+        (more, rest'') <- goArgs rest'
+        return (braced : more, rest'')
+  goArgs rest = return ([], rest)
+  goTableArgs 0 rest acc = return (reverse acc, rest)
+  goTableArgs n rest@(t : _) acc
+    | dslTokText t == "{" = do
+        (braced, rest') <- parseDslBraced ctx rest
+        goTableArgs (n - 1) rest' (braced : acc)
+    | otherwise = case parseDslBareArg ctx rest of
+        Just (arg, rest') -> goTableArgs (n - 1) rest' (arg : acc)
+        Nothing -> return (reverse acc, rest)
+  goTableArgs _ [] acc = return (reverse acc, [])
+
+{- | A \begin{name} ... \end{name} environment as a first-class
+construct: the header (with the column spec of an array-like
+environment, when present) is folded into the opening token and
+the footer into the closing token, and the rows between them are
+ordinary items, read through the level-0 row separators.
+-}
+parseDslEnv :: DslCtx -> DslTok -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslEnv ctx beginTok rest = do
+  (nameGroup, rest1) <- takeDslBracedGroup rest
+  let envName =
+        T.concat (map dslTokText (drop 1 (dropEnd 1 nameGroup)))
+  (specGroup, rest2) <-
+    if envName `elem` ["array", "tabular", "alignat", "subarray"]
+      then case takeDslBracedGroup rest1 of
+        Just (group, r) -> return (group, r)
+        Nothing -> return ([], rest1)
+      else return ([], rest1)
+  (items, rest3) <- parseDslItems ctx "\\end" rest2
+  -- A separator just before the \end is a trailing separator
+  -- with an empty last cell, as TeX reads it.
+  let (trailing, rest3') =
+        span ((`elem` [",", ";", "&", "\\\\"]) . dslTokText) rest3
+      items' = items ++ [(Just sep, DslSeq []) | sep <- trailing]
+  (endTok, rest4) <- case rest3' of
+    (e : r) | dslTokText e == "\\end" -> return (e, r)
+    _ -> Nothing
+  (endNameGroup, rest5) <- takeDslBracedGroup rest4
+  let open = mergeDslOp (beginTok : nameGroup ++ specGroup)
+      close = mergeDslOp (endTok : endNameGroup)
+  return (DslEnv open items' close, rest5)
+
+{- | A \left<delim> ... \right<delim> pair as a first-class
+delimited construct: the opener is the merged token, the closer is
+found by 'expectDslClose', and \middle separators inside are item
+separators (see 'parseDslItems'). An invisible left delimiter reads
+its items up to the \right. A delimiter outside this grammar falls
+back to the plain primary parse of the delimiter construct, with
+the \left riding as raw text, as before.
+-}
+parseDslLeftRight :: DslCtx -> DslTok -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslLeftRight ctx leftTok toks@(delim : rest)
+  | d == "(" || d == "[" = do
+      (items, rest') <- parseDslItems ctx close rest
+      (closeTok, rest'') <- expectDslClose close rest'
+      return (DslDelimited merged items closeTok, rest'')
+  | d == "\\lfloor" || d == "\\lceil" = do
+      let closeCmd = if d == "\\lfloor" then "\\rfloor" else "\\rceil"
+      (items, rest') <- parseDslItems ctx closeCmd rest
+      (closeTok, rest'') <- expectDslClose closeCmd rest'
+      return (DslDelimited merged items closeTok, rest'')
+  | d == "\\{" = parseDslSet ctx merged rest
+  | d == "|" || d == "\\|" = do
+      (expr, rest') <-
+        parseDslExpr ctx{dslCtxNoBar = True, dslCtxNoRestrict = True} 0 rest
+      (closeTok, rest'') <- expectDslClose d rest'
+      return (DslBars merged expr closeTok, rest'')
+  | d == "\\langle" =
+      parseDslAngle ctx merged "\\rangle" False toks
+  | d == "<" =
+      parseDslAngle ctx merged ">" True toks
+  | d == "." = do
+      (items, rest') <- parseDslItems ctx "\\right" rest
+      (closeTok, rest'') <- case rest' of
+        (rt : delim2 : r)
+          | dslTokText rt == "\\right" ->
+              return (mergeDslOp [rt, delim2], r)
+        _ -> Nothing
+      return (DslDelimited merged items closeTok, rest'')
+  | otherwise = do
+      (inner, rest') <- parseDslPrimary ctx toks
+      return (DslSeq [DslAtom leftTok, inner], rest')
+ where
+  d = dslTokText delim
+  merged = mergeDslOp [leftTok, delim]
+  close = if d == "(" then ")" else "]"
+parseDslLeftRight _ _ [] = Nothing
+
+parseDslSet :: DslCtx -> DslTok -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslSet ctx open rest = do
+  (first, rest1) <-
+    parseDslExpr ctx{dslCtxNoBar = True} (2 * 15 + 1) rest
+  case rest1 of
+    (sep : r)
+      | dslTokText sep `elem` [":", "\\mid", "|"] -> do
+          (condItems, rest2) <- parseDslItemsWithRelation ctx r
+          (close, rest3) <- expectDslClose "\\}" rest2
+          return (DslSet open [(Nothing, first)] (Just (sep, condItems)) close, rest3)
+    (sizeTok : sep : r)
+      | dslTokText sizeTok `elem` dslSizeCmds
+      , dslTokText sep `elem` [":", "\\mid", "|"] -> do
+          let sep' = sep{dslTokLead = dslTokRender sizeTok <> dslTokLead sep}
+          (condItems, rest2) <- parseDslItemsWithRelation ctx r
+          (close, rest3) <- expectDslClose "\\}" rest2
+          return (DslSet open [(Nothing, first)] (Just (sep', condItems)) close, rest3)
+    _ -> do
+      (items, rest2) <- continueItems [(Nothing, first)] rest1
+      (close, rest3) <- expectDslClose "\\}" rest2
+      return (DslSet open items Nothing close, rest3)
+ where
+  continueItems acc rest'@(sep : tailToks)
+    | dslTokText sep `elem` [",", ";"] = do
+        (item, rest'') <- parseDslExpr ctx 0 tailToks
+        continueItems (acc ++ [(Just sep, item)]) rest''
+    | otherwise = Just (acc, rest')
+  continueItems acc [] = Just (acc, [])
+
+parseDslAngle ::
+  DslCtx -> DslTok -> Text -> Bool -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslAngle ctx open close raw toks = do
+  _ <- scanDslAngle toks
+  (items, rest') <- parseDslItems ctx{dslCtxAngle = True} close (drop 1 toks)
+  (cond, rest'') <- case rest' of
+    (sep : r)
+      | dslTokText sep `elem` [":", "|", "\\mid"] -> do
+          (condItems, r') <- parseDslItemsWithRelation ctx r
+          return (Just (sep, condItems), r')
+    _ -> return (Nothing, rest')
+  (closeTok, rest''') <- expectDslClose close rest''
+  return (DslAngle open items cond closeTok raw, rest''')
+
+parseDslBars :: DslCtx -> DslTok -> Text -> [DslTok] -> Maybe (DslExpr, [DslTok])
+parseDslBars ctx open close rest = do
+  (expr, rest') <-
+    parseDslExpr ctx{dslCtxNoBar = True, dslCtxNoRestrict = True} 0 rest
+  (closeTok, rest'') <- expectDslClose close rest'
+  return (DslBars open expr closeTok, rest'')
+
+-- Parse a whole math span: a comma list, optionally feeding one
+-- relation, with trailing sentence punctuation kept as atoms.
+parseDslSpan :: Text -> Maybe DslExpr
+parseDslSpan content = fullParse <|> leadingOp <|> prefixOnly
+ where
+  toks = lexDsl content
+  fullParse = do
+    (items, rest) <- parseDslItemsWithRelation dslCtx0 toks
+    let (tailToks, rest') =
+          span ((`elem` [",", ".", ";"]) . dslTokText) rest
+    guard (all (T.null . dslTokText) rest')
+    return (DslSeq (map snd items ++ map DslAtom tailToks))
+  -- A relation tail used as a prose fragment (class <\\alpha, the
+  -- symbol <_W): an operator followed by one expression.
+  leadingOp = case toks of
+    (opTok : rest)
+      | isJust (dslInfix (dslTokText opTok)) -> do
+          (rhs, rest') <- parseDslExpr dslCtx0 0 rest
+          let (tailToks, rest'') =
+                span ((`elem` [",", ".", ";"]) . dslTokText) rest'
+          guard (all (T.null . dslTokText) rest'')
+          return (DslSeq (DslAtom opTok : rhs : map DslAtom tailToks))
+    _ -> Nothing
+  -- A mention of prefix operators with no operand (\\neg\\neg), or
+  -- with a single unit as the operand.
+  prefixOnly =
+    let (ops, rest) = span (isDslPrefixTok . dslTokText) toks
+     in if null ops
+          then Nothing
+          else case rest of
+            [] -> Just (DslSeq (map DslAtom toks))
+            _ -> do
+              (unit, rest') <- parseDslUnit dslCtx0 rest
+              guard (all (T.null . dslTokText) rest')
+              return (DslSeq (map DslAtom ops ++ [unit]))
+
+isDslPrefixTok :: Text -> Bool
+isDslPrefixTok txt = isJust (lookup txt dslPrefixTable) || txt `elem` ["-", "+"]
+
+-- Sort inference over DslExpr, mirroring inferExprSort: a signed
+-- application whose argument sorts fit contributes its result sort;
+-- a declared atom contributes its declared sort (read as a sort when
+-- it is one); a numeral is a natural.
+inferDslSort :: SignatureSorts -> DeclState -> DslExpr -> Maybe Sort
+inferDslSort sigs st expr = case expr of
+  DslSeq [single] -> inferDslSort sigs st single
+  DslSeq _ -> Nothing
+  DslApp fun arg -> do
+    (domain, codomain) <- inferDslSort sigs st fun >>= callableSort
+    subst <- checkInferredArgs [domain] [inferDslSort sigs st arg]
+    return (applySortSubst subst codomain)
+  DslEnv{} -> Nothing
+  DslAtom tok
+    | let txt = dslTokText tok
+    , not (T.null txt)
+    , T.all isDigit txt ->
+        Just (SortAtom "Nat")
+    | otherwise -> inferDeclType st (renderDsl expr) >>= resolveDeclaredSort st
+  DslGroup braced -> dslBracedSingle braced >>= inferDslSort sigs st
+  DslDelimited _ [(_, single)] _ -> inferDslSort sigs st single
+  DslDelimited{} -> Nothing
+  DslScript base _ _ ->
+    explicitExprSort st (parseMathExpr (renderDsl expr)) <|> inferDslSort sigs st base
+  DslPrefix op inner
+    | dslTokText op == "-" -> inferDslSort sigs st inner
+    | otherwise -> Nothing
+  DslInfix op _ rhs
+    | dslTokText op == ":=" -> inferDslSort sigs st rhs
+    | otherwise -> Nothing
+  DslCmd tok _ args
+    | Just sig <- Map.lookup (dslCmdName tok) sigs
+    , (argSorts, resultSort) <-
+        freshSignature
+          (dslCmdName tok)
+          (sortDigest (renderDsl expr))
+          sig
+    , length args == length argSorts
+    , Just subst <-
+        checkInferredArgs
+          argSorts
+          (map (dslBracedSingle >=> inferDslSort sigs st) args) ->
+        Just (applySortSubst subst resultSort)
+    | otherwise -> inferDeclType st (renderDsl expr) >>= resolveDeclaredSort st
+  DslAngle _ items cond _ _
+    | isNothing cond ->
+        case dslOutcomeWinner (dslAngleOutcome sigs st Nothing items) of
+          Just (_, resultSort, _) -> Just resultSort
+          Nothing -> Nothing
+    | otherwise -> Nothing
+  DslResolved name args
+    | Just sig <- Map.lookup name sigs
+    , (argSorts, resultSort) <-
+        freshSignature
+          name
+          (sortDigest (renderDsl expr))
+          sig
+    , length args == length argSorts
+    , Just subst <-
+        checkInferredArgs
+          argSorts
+          (map (dslItemListSort sigs st) args) ->
+        Just (applySortSubst subst resultSort)
+    | otherwise -> Nothing
+  DslBinder{} -> Nothing
+  DslSet{} -> Nothing
+  DslBars{} -> Nothing
+
+dslCmdName :: DslTok -> Text
+dslCmdName tok = fromMaybe (dslTokText tok) (T.stripPrefix "\\" (dslTokText tok))
+
+dslItemListSort :: SignatureSorts -> DeclState -> [DslItem] -> Maybe Sort
+dslItemListSort sigs st [(_, single)] = inferDslSort sigs st single
+dslItemListSort _ _ _ = Nothing
+
+dslBracedSingle :: DslBraced -> Maybe DslExpr
+dslBracedSingle (DslBraced _ [(_, single)] _) = Just single
+dslBracedSingle _ = Nothing
+
+-- Resolution of raw angle brackets.
+
+data DslVerdict
+  = DslVerdictResolved Text
+  | DslVerdictAmbiguous [Text]
+  | DslVerdictNoCandidate
+  | DslVerdictUnknownArgs
+  deriving (Eq, Show)
+
+data DslAngleFinding = DslAngleFinding
+  { dslFindingAngle :: Text
+  , dslFindingVerdict :: DslVerdict
+  }
+  deriving (Eq, Show)
+
+-- The angle-printed notations a raw bracket can mean, by item count.
+-- Their sort behaviour comes from the registry signatures; \Tuple is
+-- variadic and handled directly.
+dslCandidateNames :: Int -> [Text]
+dslCandidateNames 1 = ["SingletonSeq"]
+dslCandidateNames 2 =
+  ["Pair", "NatPair", "NamePair", "PCAPair", "LambdaPair", "BinaryPair"]
+dslCandidateNames n
+  | n >= 3 = ["Tuple"]
+  | otherwise = []
+
+sortHasConcrete :: Sort -> Bool
+sortHasConcrete (SortAtom _) = True
+sortHasConcrete (SortVar _) = False
+sortHasConcrete (SortApp _ args) = any sortHasConcrete args
+
+-- Try one candidate against known item sorts and an expected sort.
+-- Returns (name, specificity rank, result sort).  A candidate counts
+-- only when every item sort is known and fits; the rank counts the
+-- argument positions whose signature mentions a concrete sort, so a
+-- specific notation (NamePair) beats the generic Pair, while
+-- same-rank collisions (NatPair against LambdaPair) stay ambiguous.
+dslTryCandidate ::
+  SignatureSorts -> Maybe Sort -> [Maybe Sort] -> Text -> Maybe (Text, Int, Sort)
+dslTryCandidate sigs expected sorts name
+  | name == "Tuple" = do
+      itemSorts <- sequence sorts
+      let result = SortApp "Tuple" itemSorts
+      case expected of
+        Just e -> do
+          _ <- checkSort Map.empty e result
+          return (name, 0, result)
+        Nothing -> return (name, 0, result)
+  | otherwise = do
+      sig <- Map.lookup name sigs
+      let (argSorts, resultSort0) =
+            freshSignature
+              name
+              (sortDigest (T.concat (map (maybe "" renderSort) sorts)))
+              sig
+      guard (length argSorts == length sorts)
+      guard (all isJust sorts)
+      subst <- checkInferredArgs argSorts sorts
+      let result = applySortSubst subst resultSort0
+          rank = length (filter sortHasConcrete argSorts)
+      case expected of
+        Just e -> do
+          _ <- checkSort Map.empty e result
+          return (name, rank, result)
+        Nothing -> return (name, rank, result)
+
+data DslAngleOutcome = DslAngleOutcome
+  { dslOutcomeWinner :: Maybe (Text, Sort, [DslItem])
+  , dslOutcomeViable :: [Text]
+  , dslOutcomeSortsKnown :: Bool
+  , dslOutcomeRefined :: Bool
+  }
+
+dslAngleOutcome ::
+  SignatureSorts -> DeclState -> Maybe Sort -> [DslItem] -> DslAngleOutcome
+dslAngleOutcome sigs st expected items =
+  let itemExprs = dslItemsExprs items
+      sorts1 = map (inferDslSort sigs st) itemExprs
+      names = dslCandidateNames (length items)
+      pass1 =
+        [ (name, rank, result, items)
+        | name <- names
+        , Just (name', rank, result) <- [dslTryCandidate sigs expected sorts1 name]
+        , name' == name
+        ]
+      pass2 =
+        [ (name, rank, result, items')
+        | name <- names
+        , Just (argSorts, _) <- [Map.lookup name sigs]
+        , length argSorts == length items
+        , let items' =
+                zipWith
+                  ( \(sep, expr) argSort ->
+                      ( sep
+                      , fst
+                          ( resolveDslExpr
+                              sigs
+                              st
+                              (Just argSort)
+                              expr
+                          )
+                      )
+                  )
+                  items
+                  argSorts
+        , Just (name', rank, result) <-
+            [ dslTryCandidate
+                sigs
+                expected
+                (map (inferDslSort sigs st . snd) items')
+                name
+            ]
+        , name' == name
+        ]
+      viableByName =
+        Map.fromList
+          ( [(name, (rank, result, its)) | (name, rank, result, its) <- pass1]
+              ++ [(name, (rank, result, its)) | (name, rank, result, its) <- pass2]
+          )
+      viable =
+        [ (name, rank, result, its)
+        | (name, (rank, result, its)) <- Map.toList viableByName
+        ]
+      maxRank = maximum (0 : [rank | (_, rank, _, _) <- viable])
+      winners = [v | v@(_, rank, _, _) <- viable, rank == maxRank]
+      (winner, refined) = case winners of
+        [(name, _, result, its)] ->
+          ( Just (name, result, its)
+          , any (\(n, _, _, _) -> n == name) pass2
+              && not (any (\(n, _, _, _) -> n == name) pass1)
+          )
+        _ -> (Nothing, False)
+   in DslAngleOutcome
+        { dslOutcomeWinner = winner
+        , dslOutcomeViable = sortOn id [name | (name, _, _, _) <- winners]
+        , dslOutcomeSortsKnown = all isJust sorts1
+        , dslOutcomeRefined = refined
+        }
+
+-- Resolve every raw angle bracket in an expression, propagating the
+-- expected sort through the contexts that determine one: signatured
+-- arguments, membership (through Set), definitions and relations
+-- (through the other side), and transparent groupings.
+resolveDslExpr ::
+  SignatureSorts -> DeclState -> Maybe Sort -> DslExpr -> (DslExpr, [DslAngleFinding])
+resolveDslExpr sigs st expected expr = case expr of
+  DslAngle open items cond close raw
+    | isNothing cond ->
+        resolveDslAngle sigs st expected open items close
+    | otherwise ->
+        let (items', findings) = resolveDslItems sigs st Nothing items
+            (cond', condFindings) = case cond of
+              Just (sep, condItems) ->
+                let (condItems', fs) = resolveDslItems sigs st Nothing condItems
+                 in (Just (sep, condItems'), fs)
+              Nothing -> (Nothing, [])
+         in (DslAngle open items' cond' close raw, findings ++ condFindings)
+  DslAtom _ -> (expr, [])
+  DslEnv open items close ->
+    let (items', findings) = resolveDslItems sigs st Nothing items
+     in (DslEnv open items' close, findings)
+  DslSeq exprs ->
+    let (exprs', findings) = unzip (map (resolveDslExpr sigs st Nothing) exprs)
+     in (DslSeq exprs', concat findings)
+  DslApp fun arg ->
+    let (fun', funFindings) = resolveDslExpr sigs st Nothing fun
+        argExpected = fst <$> (inferDslSort sigs st fun' >>= callableSort)
+        (arg', argFindings) = resolveDslExpr sigs st argExpected arg
+     in (DslApp fun' arg', funFindings ++ argFindings)
+  DslCmd tok opt args ->
+    let (opt', optFindings) = case opt of
+          Nothing -> (Nothing, [])
+          Just braced ->
+            let (braced', fs) = resolveDslBraced sigs st Nothing braced
+             in (Just braced', fs)
+        sig = Map.lookup (dslCmdName tok) sigs
+        resolveArg idx braced =
+          let argExpected = case sig of
+                Just (argSorts, _)
+                  | idx < length argSorts -> Just (argSorts !! idx)
+                _ -> Nothing
+           in resolveDslBraced sigs st argExpected braced
+        (args', argFindings) = unzip (zipWith resolveArg [0 ..] args)
+     in (DslCmd tok opt' args', optFindings ++ concat argFindings)
+  DslGroup braced ->
+    let (braced', findings) = resolveDslBraced sigs st expected braced
+     in (DslGroup braced', findings)
+  DslInfix op lhs rhs
+    | dslTokText op `elem` ["\\in", "\\notin"] ->
+        let (rhs', rhsFindings) = resolveDslExpr sigs st Nothing rhs
+            lhsExpected = case inferDslSort sigs st rhs' of
+              Just (SortApp "Set" [tau]) -> Just tau
+              _ -> Nothing
+            (lhs', lhsFindings) = resolveDslExpr sigs st lhsExpected lhs
+         in (DslInfix op lhs' rhs', rhsFindings ++ lhsFindings)
+    | isDslRelationTok op || dslTokText op == ":=" ->
+        let (lhs', lhsFindings) = resolveDslExpr sigs st Nothing lhs
+            (rhs', rhsFindings) =
+              resolveDslExpr sigs st (inferDslSort sigs st lhs') rhs
+            (lhs'', lhsFindings') =
+              case (lhs, inferDslSort sigs st rhs') of
+                (DslAngle _ _ Nothing _ _, Just siblingSort) ->
+                  resolveDslExpr sigs st (Just siblingSort) lhs
+                _ -> (lhs', lhsFindings)
+         in (DslInfix op lhs'' rhs', lhsFindings' ++ rhsFindings)
+    | otherwise ->
+        let (lhs', lhsFindings) = resolveDslExpr sigs st Nothing lhs
+            (rhs', rhsFindings) = resolveDslExpr sigs st Nothing rhs
+         in (DslInfix op lhs' rhs', lhsFindings ++ rhsFindings)
+  DslPrefix op inner ->
+    let (inner', findings) = resolveDslExpr sigs st Nothing inner
+     in (DslPrefix op inner', findings)
+  DslScript base markers arg ->
+    let (base', baseFindings) = resolveDslExpr sigs st Nothing base
+        (arg', argFindings) = resolveDslExpr sigs st Nothing arg
+     in (DslScript base' markers arg', baseFindings ++ argFindings)
+  DslBinder kw spec body ->
+    let (body', findings) = resolveDslExpr sigs st Nothing body
+     in (DslBinder kw spec body', findings)
+  DslDelimited open items close ->
+    let (items', findings) = case items of
+          [item] -> let (item', fs) = resolveDslItems sigs st expected [item] in (item', fs)
+          _ -> resolveDslItems sigs st Nothing items
+     in (DslDelimited open items' close, findings)
+  DslSet open items cond close ->
+    let (items', itemFindings) = resolveDslItems sigs st Nothing items
+        (cond', condFindings) = case cond of
+          Nothing -> (Nothing, [])
+          Just (sep, condItems) ->
+            let (condItems', fs) = resolveDslItems sigs st Nothing condItems
+             in (Just (sep, condItems'), fs)
+     in (DslSet open items' cond' close, itemFindings ++ condFindings)
+  DslBars open inner close ->
+    let (inner', findings) = resolveDslExpr sigs st expected inner
+     in (DslBars open inner' close, findings)
+  DslResolved _ _ -> (expr, [])
+
+isDslRelationTok :: DslTok -> Bool
+isDslRelationTok tok = case dslInfix (dslTokText tok) of
+  Just (40, _) -> True
+  _ -> False
+
+resolveDslItems ::
+  SignatureSorts -> DeclState -> Maybe Sort -> [DslItem] -> ([DslItem], [DslAngleFinding])
+resolveDslItems sigs st expected items =
+  let itemExpected = case items of
+        [_] -> expected
+        _ -> Nothing
+      resolved =
+        [ (sep, resolveDslExpr sigs st itemExpected expr)
+        | (sep, expr) <- items
+        ]
+   in ( [(sep, expr') | (sep, (expr', _)) <- resolved]
+      , concat [fs | (_, (_, fs)) <- resolved]
+      )
+
+resolveDslItemsEach ::
+  SignatureSorts ->
+  DeclState ->
+  [Maybe Sort] ->
+  [DslItem] ->
+  ([DslItem], [DslAngleFinding])
+resolveDslItemsEach sigs st expecteds items =
+  let resolved =
+        zipWith
+          (\(sep, expr) itemExpected -> (sep, resolveDslExpr sigs st itemExpected expr))
+          items
+          (expecteds ++ repeat Nothing)
+   in ( [(sep, expr') | (sep, (expr', _)) <- resolved]
+      , concat [fs | (_, (_, fs)) <- resolved]
+      )
+
+resolveDslBraced ::
+  SignatureSorts -> DeclState -> Maybe Sort -> DslBraced -> (DslBraced, [DslAngleFinding])
+resolveDslBraced sigs st expected (DslBraced open items close) =
+  let (items', findings) = resolveDslItems sigs st expected items
+   in (DslBraced open items' close, findings)
+
+-- Drop the leading whitespace of an expression's leftmost token, so
+-- a resolved bracket renders as a compact macro call.
+dslStripLead :: DslExpr -> DslExpr
+dslStripLead expr = case expr of
+  DslAtom tok -> DslAtom tok{dslTokLead = ""}
+  DslEnv open items close -> DslEnv open{dslTokLead = ""} items close
+  DslSeq (first : rest) -> DslSeq (dslStripLead first : rest)
+  DslSeq [] -> expr
+  DslApp fun arg -> DslApp (dslStripLead fun) arg
+  DslCmd tok opt args -> DslCmd tok{dslTokLead = ""} opt args
+  DslGroup (DslBraced open items close) ->
+    DslGroup (DslBraced open{dslTokLead = ""} items close)
+  DslInfix op lhs rhs -> DslInfix op (dslStripLead lhs) rhs
+  DslPrefix tok inner -> DslPrefix tok{dslTokLead = ""} inner
+  DslScript base markers arg -> DslScript (dslStripLead base) markers arg
+  DslBinder kw spec body -> DslBinder kw{dslTokLead = ""} spec body
+  DslDelimited open items close ->
+    DslDelimited open{dslTokLead = ""} items close
+  DslSet open items cond close ->
+    DslSet open{dslTokLead = ""} items cond close
+  DslAngle open items cond close raw ->
+    DslAngle open{dslTokLead = ""} items cond close raw
+  DslBars open inner close -> DslBars open{dslTokLead = ""} inner close
+  DslResolved _ _ -> expr
+
+resolveDslAngle ::
+  SignatureSorts ->
+  DeclState ->
+  Maybe Sort ->
+  DslTok ->
+  [DslItem] ->
+  DslTok ->
+  (DslExpr, [DslAngleFinding])
+resolveDslAngle sigs st expected open items close =
+  let (items1, itemFindings) = resolveDslItems sigs st Nothing items
+      outcome = dslAngleOutcome sigs st expected items1
+      angleText = renderDsl (DslAngle open items Nothing close True)
+   in case dslOutcomeWinner outcome of
+        Just (name, _, _) ->
+          let winnerExpecteds = case Map.lookup name sigs of
+                Just (argSorts, _)
+                  | length argSorts == length items ->
+                      map Just argSorts
+                _ -> replicate (length items) Nothing
+              (winnerItems, winnerFindings) =
+                resolveDslItemsEach sigs st winnerExpecteds items
+              args = case name of
+                "Tuple" -> [stripFirstLead winnerItems]
+                _ ->
+                  [ [(Nothing, dslStripLead expr)]
+                  | (_, expr) <- winnerItems
+                  ]
+              stripFirstLead [] = []
+              stripFirstLead ((sep, expr) : rest) =
+                (sep, dslStripLead expr) : rest
+           in ( DslResolved name args
+              , winnerFindings
+                  ++ [DslAngleFinding angleText (DslVerdictResolved name)]
+              )
+        Nothing ->
+          let verdict = case dslOutcomeViable outcome of
+                [] ->
+                  if dslOutcomeSortsKnown outcome
+                    then DslVerdictNoCandidate
+                    else DslVerdictUnknownArgs
+                names -> DslVerdictAmbiguous names
+           in ( DslAngle open items1 Nothing close True
+              , itemFindings ++ [DslAngleFinding angleText verdict]
+              )
+
+-- The --dsl-audit lint mode: parse every math span in the book with
+-- the DSL grammar and report the resolution verdicts, without
+-- changing any output.
+data DslAuditResult = DslAuditResult
+  { dslAuditSpans :: Int
+  , dslAuditParsed :: Int
+  , dslAuditAngles :: Int
+  , dslAuditResolved :: Int
+  , dslAuditAmbiguous :: Int
+  , dslAuditNoCandidate :: Int
+  , dslAuditUnknown :: Int
+  , dslAuditFindings :: [Text]
+  }
+
+emptyDslAudit :: DslAuditResult
+emptyDslAudit = DslAuditResult 0 0 0 0 0 0 0 []
+
+mergeDslAudit :: DslAuditResult -> DslAuditResult -> DslAuditResult
+mergeDslAudit a b =
+  DslAuditResult
+    (dslAuditSpans a + dslAuditSpans b)
+    (dslAuditParsed a + dslAuditParsed b)
+    (dslAuditAngles a + dslAuditAngles b)
+    (dslAuditResolved a + dslAuditResolved b)
+    (dslAuditAmbiguous a + dslAuditAmbiguous b)
+    (dslAuditNoCandidate a + dslAuditNoCandidate b)
+    (dslAuditUnknown a + dslAuditUnknown b)
+    (dslAuditFindings a ++ dslAuditFindings b)
+
+data DslWalkRefs = DslWalkRefs
+  { dwDecl :: IORef DeclState
+  , dwPending :: IORef [DeclCommand]
+  , dwResult :: IORef DslAuditResult
+  , dwInFence :: IORef Bool
+  , dwInComment :: IORef Bool
+  , dwMathMeta :: IORef (Maybe [Text])
+  , dwDisplay :: IORef (Maybe (Int, Text))
+  , dwInline :: IORef (Maybe (Int, Text))
+  }
+
+runDslAudit :: FilePath -> [FilePath] -> IO ()
+runDslAudit macrosPath paths = do
+  notationData <- readNotationData macrosPath
+  let sigs = signatureSorts notationData
+  results <- mapM (dslAuditFile sigs) paths
+  let total = foldr mergeDslAudit emptyDslAudit results
+  hPutStrLn stderr "[lint] dsl audit (validation only):"
+  forM_ (dslAuditFindings total) $ \finding ->
+    TIO.hPutStrLn stderr ("  " <> finding)
+  hPutStrLn
+    stderr
+    ( "  "
+        <> show (dslAuditSpans total)
+        <> " spans, "
+        <> show (dslAuditParsed total)
+        <> " parsed, "
+        <> show (dslAuditAngles total)
+        <> " angle brackets: "
+        <> show (dslAuditResolved total)
+        <> " resolved, "
+        <> show (dslAuditAmbiguous total)
+        <> " ambiguous, "
+        <> show (dslAuditNoCandidate total)
+        <> " no candidate, "
+        <> show (dslAuditUnknown total)
+        <> " unknown arguments"
+    )
+
+dslAuditFile :: SignatureSorts -> FilePath -> IO DslAuditResult
+dslAuditFile sigs path = do
+  contents <- TIO.readFile path
+  refs <-
+    DslWalkRefs
+      <$> newIORef initialDeclState
+      <*> newIORef []
+      <*> newIORef emptyDslAudit
+      <*> newIORef False
+      <*> newIORef False
+      <*> newIORef Nothing
+      <*> newIORef Nothing
+      <*> newIORef Nothing
+  forM_ (zip [1 ..] (T.lines contents)) $
+    uncurry (dslAuditLine sigs path refs)
+  readIORef (dwResult refs)
+
+dslAuditLine :: SignatureSorts -> FilePath -> DslWalkRefs -> Int -> Text -> IO ()
+dslAuditLine sigs path refs lineNo rawLine = do
+  mathMeta <- readIORef (dwMathMeta refs)
+  case mathMeta of
+    Just acc
+      | "\\end{mathmeta}" `T.isInfixOf` rawLine -> do
+          applyDslMathMeta refs (T.unlines (reverse (rawLine : acc)))
+          writeIORef (dwMathMeta refs) Nothing
+      | otherwise ->
+          writeIORef (dwMathMeta refs) (Just (rawLine : acc))
+    Nothing
+      | "\\begin{mathmeta}" `T.isInfixOf` rawLine ->
+          if "\\end{mathmeta}" `T.isInfixOf` rawLine
+            then applyDslMathMeta refs rawLine
+            else writeIORef (dwMathMeta refs) (Just [rawLine])
+      | isFenceLine rawLine -> do
+          inFence <- readIORef (dwInFence refs)
+          writeIORef (dwInFence refs) (not inFence)
+      | otherwise -> do
+          inFence <- readIORef (dwInFence refs)
+          display <- readIORef (dwDisplay refs)
+          unless inFence $ do
+            when (isNothing display && isHeadingLine rawLine) $ do
+              flushDslPending refs
+              enterSection (dwDecl refs) (T.length (T.takeWhile (== '#') rawLine))
+            inComment <- readIORef (dwInComment refs)
+            let (visible, inComment') = stripHtmlCommentSpan inComment rawLine
+            writeIORef (dwInComment refs) inComment'
+            dslAuditText sigs path refs lineNo (stripLatexComments visible)
+
+applyDslMathMeta :: DslWalkRefs -> Text -> IO ()
+applyDslMathMeta refs blockText =
+  case parseMathMetaBlock blockText of
+    Just directives -> forM_ directives applyDirective
+    Nothing -> return ()
+ where
+  applyDirective (MathMetaDecl cmd) = applyDeclCommand (dwDecl refs) cmd
+  applyDirective (MathMetaWith cmds) = modifyIORef (dwPending refs) (++ cmds)
+  applyDirective _ = return ()
+
+flushDslPending :: DslWalkRefs -> IO ()
+flushDslPending refs = do
+  cmds <- readIORef (dwPending refs)
+  writeIORef (dwPending refs) []
+  mapM_ (applyDeclCommand (dwDecl refs)) cmds
+
+dslAuditText :: SignatureSorts -> FilePath -> DslWalkRefs -> Int -> Text -> IO ()
+dslAuditText sigs path refs lineNo txt = do
+  display <- readIORef (dwDisplay refs)
+  case display of
+    Just (startLine, acc) ->
+      case T.breakOn "$$" txt of
+        (before, rest)
+          | T.null rest ->
+              writeIORef (dwDisplay refs) (Just (startLine, acc <> "\n" <> txt))
+          | otherwise -> do
+              writeIORef (dwDisplay refs) Nothing
+              dslAuditSpan sigs path refs startLine (acc <> "\n" <> before)
+              dslAuditText sigs path refs lineNo (T.drop 2 rest)
+    Nothing ->
+      case T.breakOn "$$" txt of
+        (before, rest)
+          | T.null rest -> dslAuditInline sigs path refs lineNo txt
+          | otherwise -> do
+              dslAuditInline sigs path refs lineNo before
+              let inner = T.drop 2 rest
+              case T.breakOn "$$" inner of
+                (spanText, rest')
+                  | T.null rest' ->
+                      writeIORef (dwDisplay refs) (Just (lineNo, inner))
+                  | otherwise -> do
+                      dslAuditSpan sigs path refs lineNo spanText
+                      dslAuditText sigs path refs lineNo (T.drop 2 rest')
+
+-- Inline spans may wrap across source lines; a pending span is
+-- carried in dwInline until its closing $ arrives.
+dslAuditInline :: SignatureSorts -> FilePath -> DslWalkRefs -> Int -> Text -> IO ()
+dslAuditInline sigs path refs lineNo txt = do
+  pending <- readIORef (dwInline refs)
+  case pending of
+    Just (startLine, acc) ->
+      case T.breakOn "$" txt of
+        (before, rest)
+          | T.null rest ->
+              writeIORef (dwInline refs) (Just (startLine, acc <> "\n" <> txt))
+          | otherwise -> do
+              writeIORef (dwInline refs) Nothing
+              dslAuditSpan sigs path refs startLine (acc <> "\n" <> before)
+              dslAuditInline sigs path refs lineNo (T.drop 1 rest)
+    Nothing -> go txt
+ where
+  go t = case T.breakOn "$" t of
+    (_, rest)
+      | T.null rest -> return ()
+      | otherwise -> do
+          let inner = T.drop 1 rest
+          case T.breakOn "$" inner of
+            (spanText, rest')
+              | T.null rest' ->
+                  writeIORef (dwInline refs) (Just (lineNo, inner))
+              | otherwise -> do
+                  dslAuditSpan sigs path refs lineNo spanText
+                  go (T.drop 1 rest')
+
+dslAuditSpan :: SignatureSorts -> FilePath -> DslWalkRefs -> Int -> Text -> IO ()
+dslAuditSpan sigs path refs lineNo spanText = do
+  flushDslPending refs
+  st <- readIORef (dwDecl refs)
+  let result = case parseDslSpan spanText of
+        Nothing ->
+          emptyDslAudit
+            { dslAuditSpans = 1
+            , dslAuditFindings =
+                [ T.pack path
+                    <> ":"
+                    <> T.pack (show lineNo)
+                    <> ": does not parse: $"
+                    <> T.map (\c -> if c == '\n' then ' ' else c) spanText
+                    <> "$"
+                ]
+            }
+        Just expr ->
+          let (_, findings) = resolveDslExpr sigs st Nothing expr
+              base =
+                emptyDslAudit
+                  { dslAuditSpans = 1
+                  , dslAuditParsed = 1
+                  , dslAuditAngles = length findings
+                  }
+              step acc finding =
+                let verdictText = case dslFindingVerdict finding of
+                      DslVerdictResolved name ->
+                        "would resolve "
+                          <> dslFindingAngle finding
+                          <> " to \\"
+                          <> name
+                      DslVerdictAmbiguous names ->
+                        "ambiguous "
+                          <> dslFindingAngle finding
+                          <> ": could be "
+                          <> T.intercalate ", " (map ("\\" <>) names)
+                      DslVerdictNoCandidate ->
+                        "no notation fits " <> dslFindingAngle finding
+                      DslVerdictUnknownArgs -> ""
+                    line =
+                      T.pack path
+                        <> ":"
+                        <> T.pack (show lineNo)
+                        <> ": "
+                        <> verdictText
+                        <> "  (in $"
+                        <> truncateSpan spanText
+                        <> "$)"
+                 in case dslFindingVerdict finding of
+                      DslVerdictResolved _ ->
+                        acc
+                          { dslAuditResolved = dslAuditResolved acc + 1
+                          , dslAuditFindings = dslAuditFindings acc ++ [line]
+                          }
+                      DslVerdictAmbiguous _ ->
+                        acc
+                          { dslAuditAmbiguous = dslAuditAmbiguous acc + 1
+                          , dslAuditFindings = dslAuditFindings acc ++ [line]
+                          }
+                      DslVerdictNoCandidate ->
+                        acc
+                          { dslAuditNoCandidate = dslAuditNoCandidate acc + 1
+                          , dslAuditFindings = dslAuditFindings acc ++ [line]
+                          }
+                      DslVerdictUnknownArgs ->
+                        acc{dslAuditUnknown = dslAuditUnknown acc + 1}
+           in foldl step base findings
+  modifyIORef (dwResult refs) (mergeDslAudit result)
+ where
+  truncateSpan txt =
+    let flat = T.replace "\n" " " txt
+     in if T.length flat > 80 then T.take 77 flat <> "..." else flat
 
 inferDeclType :: DeclState -> Text -> Maybe DeclType
 inferDeclType st rawArg =
@@ -3651,7 +6970,7 @@ isUsedIn name = go
 --     ## Boundary and the mediant-limit map {#sec:boundary-mediant-limit}
 --
 -- A cross-reference is written `§{sec:boundary-mediant-limit}` and is
--- expanded to `§"<title of that section>"` (as a Link to the section
+-- expanded to `§<section number>` (as a Link to the section
 -- anchor) at filter time. Unknown ids fail the build.
 --
 -- Raw LaTeX environments are not parsed into normal Pandoc inlines, so the
@@ -3691,6 +7010,8 @@ readMaybeInt input =
     [(value, "")] -> Just value
     _ -> Nothing
 
+-- Standalone default. Make supplies a per-book DEPENDENCY_GRAPH_CACHE; direct
+-- callers may instead set dependency-layout-cache metadata.
 dependencyLayoutCachePath :: FilePath
 dependencyLayoutCachePath = "build/dependency-graph-layout.cache"
 
@@ -3739,11 +7060,11 @@ expandStr hmap ref = go
       Nothing -> return [Str t | not (T.null t)]
       Just (before, hid, after) -> do
         sub <- case Map.lookup hid hmap of
-          Just title ->
+          Just _ ->
             return
               [ Link
                   nullAttr
-                  (Str "\167" : Space : title)
+                  [Str "\167", Space, RawInline (Format "latex") ("\\ref*{" <> hid <> "}")]
                   ("#" <> hid, "")
               ]
           Nothing -> do
@@ -3771,4 +7092,4 @@ expandRawTexSecRefs hmap ref = go
 
 rawTexSecRef :: Text -> Text
 rawTexSecRef hid =
-  "\\hyperref[" <> hid <> "]{\167 \\nameref*{" <> hid <> "}}"
+  "\\hyperref[" <> hid <> "]{\167 \\ref*{" <> hid <> "}}"

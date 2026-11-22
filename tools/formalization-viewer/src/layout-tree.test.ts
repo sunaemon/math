@@ -29,10 +29,10 @@ test("makeSplit: empty -> null, single -> bare leaf, many -> split with unit rat
   });
 });
 
-test("defaultTree is a row of every pane except tex", () => {
+test("defaultTree omits optional tex and parallel-PDF panes", () => {
   assert.deepEqual(
     treeLeaves(defaultTree()),
-    PANE_NAMES.filter((p) => p !== "tex"),
+    PANE_NAMES.filter((p) => p !== "tex" && p !== "pdf-peer"),
   );
 });
 
@@ -146,4 +146,10 @@ test("flattenSameDir merges nested same-direction splits but not cross-direction
     ratios: [1, 1],
   };
   assert.deepEqual(flattenSameDir(crossDir), crossDir);
+});
+
+test("remove and flatten repair absent ratios instead of propagating undefined", () => {
+  const tree: any = { dir: "row", children: [{ pane: "pdf" }, { pane: "md" }, { pane: "lean" }], ratios: [2] };
+  assert.deepEqual(removeLeaf(tree, "md")?.ratios, [2, 1]);
+  assert.deepEqual(flattenSameDir(tree)?.ratios, [2, 1, 1]);
 });

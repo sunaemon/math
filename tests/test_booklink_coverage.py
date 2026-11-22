@@ -1,24 +1,29 @@
 """Tests for booklink_coverage: the formalization-scope mechanism.
 
 These cover how units resolve to covered / uncovered / partial / exempt:
-default-exempt statement kinds (recall/remark/example/fact), the author
+explicit scope for statement kinds, the author
 `formalization:` annotations (single-unit skip/require and skip-begin/skip-end
-regions), the rule that a real booklink anchor outranks any exemption, and that
+regions), the rule that explicit skips cannot overlap links, and that
 HTML-comment-only blocks (including the annotations themselves) are structural.
 Run with `python -m unittest` (stdlib only, no pytest).
 """
 
-import os
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
+from itertools import pairwise
 from pathlib import Path
 from unittest import mock
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(REPO_ROOT, "tools"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-import booklink_coverage as cov  # noqa: E402
+import booklink_coverage as cov
+import booklink_sourcemap as sourcemap
+from booklink_fixtures import lean_booklink as _marker
 
 
 def units(text: str, covered=()):
@@ -40,7 +45,7 @@ class CoveredSpansStatusTest(unittest.TestCase):
 
     def _spans(self, entries):
         sm = {"entries": entries}
-        with mock.patch.object(cov.bk, "build_combined_sourcemap", return_value=sm):
+        with mock.patch.object(sourcemap, "build_combined_sourcemap", return_value=sm):
             return cov.covered_spans_by_source(Path("."), [])
 
     def test_matched_and_weak_count_unresolved_does_not(self):
@@ -54,13 +59,43 @@ class CoveredSpansStatusTest(unittest.TestCase):
         )
         self.assertEqual(spans, {"a.md": [(0, 10), (20, 30)]})
 
-    def test_unresolved_only_yields_no_coverage(self):
+    def test_unresolved_only_retains_source_with_zero_coverage(self):
         spans = self._spans(
             [
                 {"match": {"status": "unresolved", "source": "a.md", "startOffset": 0, "endOffset": 9}},
             ]
         )
-        self.assertEqual(spans, {})
+        self.assertEqual(spans, {"a.md": []})
+
+    def test_cli_reports_a_chapter_when_all_statement_selectors_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "book/src/chap.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("A real mathematical claim without a matching statement title.\n")
+            lean = root / "book/lean/Main.lean"
+            lean.parent.mkdir(parents=True)
+            lean.write_text(
+                "/-@ booklink:\n  source: chap.md\n  target: statement\n  title: Missing\n-/\n"
+                "theorem proof : True := by trivial\n"
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = cov.main(["coverage", str(lean), "--root", str(root), "--json", "--strict"])
+            report = json.loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertEqual(len(report), 1)
+            self.assertEqual(Path(report[0]["source"]).resolve(), source.resolve())
+            self.assertEqual(report[0]["prose"]["uncovered"], 1)
+
+    def test_statement_and_prose_in_one_block_are_disjoint_and_complete(self):
+        text = "Introductory claim.\n\\begin{lemma*}[Lemma]\nA statement.\n\\end{lemma*}\nTrailing claim.\n"
+        start, end = text.index("\\begin"), text.index("\\end{lemma*}") + len("\\end{lemma*}")
+        result = units(text, [(start, end)])
+        self.assertEqual([unit.kind for unit in result], ["prose", "statement", "prose"])
+        self.assertEqual([unit.status for unit in result], ["uncovered", "covered", "uncovered"])
+        self.assertTrue(all(first.end_offset <= second.start_offset for first, second in pairwise(result)))
+        self.assertEqual(sum(unit.end_offset - unit.start_offset for unit in result), len(text))
 
 
 # A statement whose unmatched body carries real content, so it counts as a gap.
@@ -79,10 +114,10 @@ LEMMA = (
 
 
 class DefaultExemptKindTest(unittest.TestCase):
-    def test_fact_is_exempt_by_default(self):
+    def test_fact_requires_explicit_scope_decision(self):
         u = by_label(units(FACT), "fact")
-        self.assertEqual(u.status, "exempt")
-        self.assertIn("default-exempt kind: fact", u.exempt_reason)
+        self.assertEqual(u.status, "uncovered")
+        self.assertIsNone(u.exempt_reason)
 
     def test_lemma_is_not_exempt(self):
         u = by_label(units(LEMMA), "lemma")
@@ -161,6 +196,20 @@ class AnnotationTest(unittest.TestCase):
         # A delimiter line followed by real prose in the same block is NOT
         # structural — that proof body is genuine content to cover.
         self.assertFalse(cov.is_structural("\\begin{proof}[Proof]\nThe real argument goes here and is long."))
+
+    def test_mathmeta_payload_is_structural_but_adjacent_prose_is_not(self):
+        metadata = "\\begin{mathmeta}\n\\vars{x,y}\n\\type{x}{X}\n\\end{mathmeta}"
+        self.assertTrue(cov.is_structural(metadata))
+        self.assertFalse(cov.is_structural(metadata + "\nThis space has a countable basis."))
+
+    def test_layout_commands_are_structural_but_do_not_hide_prose(self):
+        for layout in (
+            "\\begingroup\\small",
+            "\\endgroup",
+            "\\cleardoublepage\n\\phantomsection\n\\addcontentsline{toc}{chapter}{Index}\n\\printindex",
+        ):
+            self.assertTrue(cov.is_structural(layout))
+            self.assertFalse(cov.is_structural(layout + "\nThis space has a countable basis."))
 
 
 class SubstantiveGapTest(unittest.TestCase):
@@ -264,14 +313,34 @@ def _check_lean(*lines: str):
         cov.check_decl_target_multiplicity([path])
 
 
-def _marker(target: str, *, excerpt: str | None = None) -> str:
-    body = f"/-@ booklink:\n  source: chap.md\n  target: {target}\n"
-    if excerpt is not None:
-        body += f"  excerpt: |\n    {excerpt}\n"
-    return body + "-/"
-
-
 class DeclTargetMultiplicityTests(unittest.TestCase):
+    def test_shared_proof_counts_each_source_passage(self):
+        first = "The first argument follows by induction on the given natural number."
+        second = "The second argument applies the same induction to the restricted family."
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            lean = root / "book/lean/Chap.lean"
+            source = root / "book/src/chap.md"
+            lean.parent.mkdir(parents=True)
+            source.parent.mkdir(parents=True)
+            source.write_text(f"{first}\n\n{second}\n", encoding="utf-8")
+            lean.write_text(
+                "\n".join(
+                    [
+                        _marker("proof", excerpt=first),
+                        _marker("proof", excerpt=second),
+                        "theorem foo : True := by trivial",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cov.check_decl_target_multiplicity([lean])
+            spans = cov.covered_spans_by_source(root, [lean])
+            paragraphs = [u for u in cov.units_for_source(source, spans[str(source)]) if not u.structural]
+            self.assertEqual(len(paragraphs), 2)
+            self.assertEqual([u.status for u in paragraphs], ["covered", "covered"])
+
     def test_statement_plus_proof_is_allowed(self):
         _check_lean(
             _marker("statement"),
@@ -287,13 +356,49 @@ class DeclTargetMultiplicityTests(unittest.TestCase):
                 "theorem foo : True := by trivial",
             )
 
+    def test_distinct_statement_excerpts_share_a_declaration(self):
+        _check_lean(
+            _marker("statement", excerpt="First conclusion."),
+            _marker("statement", excerpt="Second conclusion."),
+            "theorem foo : True := by trivial",
+        )
+
+    def test_duplicate_statement_excerpt_raises(self):
+        with self.assertRaises(ValueError):
+            _check_lean(
+                _marker("statement", excerpt="Same conclusion."),
+                _marker("statement", excerpt="Same   conclusion."),
+                "theorem foo : True := by trivial",
+            )
+
     def test_duplicate_proof_raises(self):
         with self.assertRaises(ValueError):
             _check_lean(
-                _marker("proof", excerpt="a"),
-                _marker("proof", excerpt="b"),
+                _marker("proof", excerpt="a proof"),
+                _marker("proof", excerpt="a   proof"),
                 "theorem foo : True := by trivial",
             )
+
+    def test_distinct_proof_passages_share_a_declaration(self):
+        _check_lean(
+            _marker("proof", excerpt="first induction case"),
+            _marker("proof", excerpt="second induction case"),
+            "theorem foo : True := by trivial",
+        )
+
+    def test_same_statement_in_different_chapters_is_allowed(self):
+        _check_lean(
+            _marker("statement", source="chapter.md", title="Main theorem"),
+            _marker("statement", source="appendix.md", title="Main theorem"),
+            "theorem foo : True := by trivial",
+        )
+
+    def test_distinct_statement_titles_are_allowed(self):
+        _check_lean(
+            _marker("statement", title="Uniform theorem"),
+            _marker("statement", title="Special case"),
+            "theorem foo : True := by trivial",
+        )
 
     def test_duplicate_prose_is_allowed(self):
         # One declaration may anchor several prose passages (real usage in
@@ -311,6 +416,47 @@ class DeclTargetMultiplicityTests(unittest.TestCase):
             "",
             _marker("statement"),
             "theorem bar : True := by trivial",
+        )
+
+
+class MixedScopeTest(unittest.TestCase):
+    def test_partial_skip_does_not_hide_local_claim(self):
+        text = (
+            "\\begin{theorem*}\n"
+            "<!-- formalization: skip-begin (external input) -->\n"
+            "External claim.\n<!-- formalization: skip-end -->\n"
+            "Local consequence.\n\\end{theorem*}\n"
+        )
+        u = by_label(units(text), "theorem")
+        self.assertEqual(u.status, "uncovered")
+        a = text.index("Local consequence.")
+        u = by_label(units(text, [(a, a + len("Local consequence."))]), "theorem")
+        self.assertEqual(u.status, "covered")
+
+    def test_partial_skip_leaves_other_unlinked_claims_visible(self):
+        text = (
+            "Local first.\n<!-- formalization: skip-begin (external) -->\n"
+            "External.\n<!-- formalization: skip-end -->\nLocal last.\n"
+        )
+        u = next(u for u in units(text, [(0, len("Local first."))]) if not u.structural)
+        self.assertEqual(u.status, "partial")
+        self.assertTrue(any("Local last" in g.text for g in u.gaps))
+
+    def test_structural_roadmap_and_layout_delimiters(self):
+        text = (
+            "<!-- formalization: structural (proof roadmap) -->\n"
+            "We first give the construction and then prove uniqueness.\n\n"
+            "\\begin{samepage}\n\n\\end{samepage}\n"
+        )
+        self.assertTrue(all(u.structural for u in units(text)))
+
+    def test_index_only_commands_are_not_gaps(self):
+        self.assertFalse(cov.is_substantive_gap(r"\end{proof}\termref{absoluteness}"))
+        self.assertTrue(cov.is_substantive_gap(r"\termuse{absoluteness}"))
+
+    def test_metadata_is_not_a_gap(self):
+        self.assertFalse(
+            cov.is_substantive_gap("<!-- formalization: require -->\n\\begin{mathmeta}\n\\define{Foo}\n\\end{mathmeta}")
         )
 
 

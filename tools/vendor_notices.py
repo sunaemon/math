@@ -78,6 +78,12 @@ def render_notices(manifest: dict) -> str:
     for component in manifest["components"]:
         files = ", ".join(f"`{f}`" for f in component.get("files", []))
         lines += ["", "---", "", f"## {component['name']}", ""]
+        distribution = (
+            "Build-time only; component code is excluded from static viewer exports"
+            if component.get("distribution") == "build-only"
+            else "Included in static viewer exports"
+        )
+        lines.append(f"- Distribution: {distribution}")
         lines.append(f"- Version: {component['version']}")
         lines.append(f"- Project: {component['homepage']}")
         lines.append(f"- License: {component['spdx']}")
@@ -142,9 +148,9 @@ def fetch_one(component: dict) -> bool:
         print(f"  {component['id']}: licenseUrl must be https; skipping")
         return False
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=30) as response:
             text = response.read().decode("utf-8")
-    except (urllib.error.URLError, TimeoutError) as error:
+    except (OSError, UnicodeError, TimeoutError) as error:
         print(f"  {component['id']}: fetch failed ({error}); leaving {rel} unchanged")
         return False
     (VENDOR_DIR / rel).write_text(text, encoding="utf-8")
@@ -155,9 +161,8 @@ def fetch_one(component: dict) -> bool:
 def cmd_fetch_license(args: argparse.Namespace) -> int:
     manifest = load_manifest()
     components = manifest["components"] if args.all else [find_component(manifest, args.id)]
-    for component in components:
-        fetch_one(component)
-    return 0
+    results = [fetch_one(component) for component in components]
+    return int(not all(results))
 
 
 def main(argv: list[str]) -> int:

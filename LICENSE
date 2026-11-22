@@ -25,3 +25,39 @@ covered by the licenses above. Each component is redistributed under its own
 upstream license. See
 [tools/formalization-viewer/vendor/THIRD-PARTY-NOTICES.md](tools/formalization-viewer/vendor/THIRD-PARTY-NOTICES.md)
 for the full list, versions, and license texts.
+
+Book dependencies and validation adapters under `polish-space/vendor/` have
+component-specific licensing recorded in
+[polish-space/vendor/manifest.json](polish-space/vendor/manifest.json).
+The Borel determinacy port retains its upstream Apache-2.0 license. The
+separately fetched AFK validation dependency is Apache-2.0; the locally
+written AFK adapter remains MIT-licensed. Their license texts are retained
+in the corresponding component directories.
+
+## Static viewer distribution
+
+The static viewer includes KaTeX, KaTeX fonts, pdf.js, DOMPurify, and Pagefind
+under their individual upstream licenses. Its About dialog lists these shipped
+components alongside the repository's MIT and CC BY 4.0 scopes.
+
+The following dependencies are used only during building or verification;
+their component code is excluded from the static viewer distribution and they
+are not listed in the viewer's About dialog:
+
+- web-tree-sitter, tree-sitter-markdown, and tree-sitter-lean: MIT. Their source
+  files and license texts are recorded in the viewer's
+  [vendor manifest](tools/formalization-viewer/vendor/manifest.json) and
+  [third-party notices](tools/formalization-viewer/vendor/THIRD-PARTY-NOTICES.md).
+  Static exports contain the resulting highlighting data rather than these
+  runtime and grammar files.
+- Manthe Borel determinacy: Apache-2.0. See
+  [LICENSE](polish-space/vendor/borel-det/LICENSE).
+- Ackerman–Freer–Knight Vaught conjecture formalization: Apache-2.0. See
+  [LICENSE](polish-space/vendor/afk-validation/LICENSE).
+- Book AFK validation adapter: MIT. See
+  [LICENSE-MIT](polish-space/vendor/afk-validation/LICENSE-MIT).
+
+The book dependencies' versions and provenance are recorded in
+[polish-space/vendor/manifest.json](polish-space/vendor/manifest.json).
+Original license texts and notices may be retained as attribution metadata
+without distributing the corresponding component code.

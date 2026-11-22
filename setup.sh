@@ -18,6 +18,10 @@
 #   - The pinned Lean toolchain (lean-toolchain) is provisioned for the
 #     formalization viewer/LSP tooling only, not the PDF book build; skip it with
 #     PROVISION_LEAN=0.
+#   - po4a and GNU gettext maintain localized chapter catalogs and regenerate
+#     translated Markdown. po4a is a mise-managed tool (http:po4a in mise.toml);
+#     its two CPAN Perl dependencies are built against the system Perl into the
+#     repo-local .perllib/. GNU gettext is pinned in mise.toml (conda:gettext-tools).
 #
 # `make` runs every tool through mise except TeX, so mise must be on PATH; if it
 # is reported missing, re-run ./setup.sh --run and restart your shell, or pass
@@ -31,13 +35,12 @@ MISE_BIN="${MISE_BIN:-}"
 BREW_BIN="${BREW_BIN:-}"
 
 # Reproducible TeX Live package source. The default is a frozen, dated tlnet
-# snapshot from the TeX Live archive (2026/05/15 -> TeX Live 2026). The
+# snapshot from the TeX Live archive (2026/10/25 -> TeX Live 2026). The
 # repo-local TeX Live tree under .texlive/ is built and its packages installed
-# from this snapshot, so `tlmgr install` does not drift with the live CTAN
-# mirror — the one un-pinned link in an otherwise fully pinned toolchain.
+# from this snapshot, so repeated installs and updates use the same packages.
 # Override with another archive date, a local mirror, or the keyword `ctan` for
 # the live default; bump the date deliberately.
-TLMGR_REPOSITORY="${TLMGR_REPOSITORY:-https://www.texlive.info/tlnet-archive/2026/05/15/tlnet}"
+TLMGR_REPOSITORY="${TLMGR_REPOSITORY:-https://www.texlive.info/tlnet-archive/2026/10/25/tlnet}"
 TEXLIVE_ROOT="${TEXLIVE_ROOT:-${PWD}/.texlive}"
 TEXLIVE_INSTALL_ROOT="${TEXLIVE_INSTALL_ROOT:-${TEXLIVE_ROOT}/texlive}"
 
@@ -52,30 +55,64 @@ TEXLIVE_PACKAGES=(
   amsmath
   bookmark
   booktabs
+  caption
   etoolbox
   fancyhdr
   fontspec
   footnotehyper
   geometry
+  haranoaji
   hyperref
   latex
   latex-bin
   lm
   latexdiff
   luatex
+  luatexja
   luaotfload
   lualatex-math
   makeindex
   microtype
   parskip
   pgf
+  regexpatch
+  selnolig
   texfot
   tools
   unicode-math
+  upmendex
   upquote
   ulem
   xcolor
+  xkeyval
   xurl
+)
+
+# po4a itself is pinned and provisioned by mise (see the http:po4a tool in
+# mise.toml); this minimum only guards against a resolved po4a that is somehow
+# older than what the translation workflow needs. The Makefile and po4a.cfg use
+# options (e.g. --wrap-po, --width) and rely on PO/POT output formatting that
+# older builds such as Ubuntu noble's 0.69 do not reproduce.
+PO4A_MIN_VERSION="0.74"
+
+# po4a is a Perl app whose two non-core CPAN dependencies mise does not manage.
+# They are installed against the system Perl into a repo-local library tree
+# (analogous to .texlive/) so no sudo or distribution Perl packages are needed;
+# the Makefile puts this on PERL5LIB when it runs po4a. YAML::Tiny is pure Perl;
+# Syntax::Keyword::Try is XS, so a C compiler and make (part of the build basics
+# below) are required to build it.
+PERL_MODULES=(YAML::Tiny Syntax::Keyword::Try)
+PERL_LOCAL_LIB="${PERL_LOCAL_LIB:-${PWD}/.perllib}"
+CPANM_URL="${CPANM_URL:-https://cpanmin.us}"
+
+GETTEXT_COMMANDS=(
+  msgattrib
+  msgcat
+  msgcmp
+  msgfmt
+  msggrep
+  msginit
+  msgmerge
 )
 
 log() {
@@ -152,12 +189,29 @@ find_cmd() {
 }
 
 find_mise() {
-  find_cmd mise \
+  # Match Makefile: prefer a direct executable over a mise-managed mise shim.
+  local on_path candidate
+  on_path="$(command -v mise 2>/dev/null || true)"
+  if [[ -n "${on_path}" && "${on_path}" != */shims/mise ]]; then
+    printf '%s\n' "${on_path}"
+    return 0
+  fi
+  for candidate in \
     /opt/homebrew/bin/mise \
     /usr/local/bin/mise \
     /home/linuxbrew/.linuxbrew/bin/mise \
     "${HOME}/.local/bin/mise" \
-    "${HOME}/.cargo/bin/mise"
+    "${HOME}/.cargo/bin/mise"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  if [[ -n "${on_path}" ]]; then
+    printf '%s\n' "${on_path}"
+    return 0
+  fi
+  return 1
 }
 
 find_brew() {
@@ -191,6 +245,94 @@ set_brew_bin() {
   fi
 
   BREW_BIN=""
+}
+
+# GNU gettext is pinned in mise.toml (conda:gettext-tools); put its bin dir on PATH
+# so the gettext checks and po4a find it. A no-op before `mise install`.
+ensure_gettext_on_path() {
+  local mise home
+  mise="$(mise_cmd)" || return 0
+  home="$("${mise}" where "conda:gettext-tools" 2>/dev/null)" || return 0
+  [[ -n "${home}" && -d "${home}/bin" ]] || return 0
+  case ":${PATH}:" in
+  *":${home}/bin:"*) ;;
+  *)
+    PATH="${home}/bin:${PATH}"
+    export PATH
+    ;;
+  esac
+}
+
+# PERL5LIB for running the mise-managed po4a: the repo-local CPAN tree first,
+# then the po4a install's bundled Locale::Po4a modules, then any inherited path.
+# Mirrors the Makefile's PO4A_PERL5LIB.
+po4a_perl5lib() {
+  local home="$1"
+  printf '%s' "${PERL_LOCAL_LIB}/lib/perl5:${home}/lib${PERL5LIB:+:${PERL5LIB}}"
+}
+
+# Absolute path to the po4a script provisioned by mise's http backend, or a
+# non-zero exit when it is not installed yet.
+po4a_bin_path() {
+  local mise home
+  mise="$(mise_cmd)" || return 1
+  home="$("${mise}" where "http:po4a" 2>/dev/null)" || return 1
+  [[ -n "${home}" && -x "${home}/po4a" ]] || return 1
+  printf '%s' "${home}/po4a"
+}
+
+po4a_version_available() {
+  local po4a home
+  po4a="$(po4a_bin_path)" || return 1
+  home="$(dirname "${po4a}")"
+  PERL5LIB="$(po4a_perl5lib "${home}")" "${po4a}" --version
+}
+
+# True when a Perl module loads under the system Perl with the repo-local CPAN
+# tree prepended to @INC.
+perl_module_present() {
+  PERL5LIB="${PERL_LOCAL_LIB}/lib/perl5${PERL5LIB:+:${PERL5LIB}}" \
+    perl -M"$1" -e1 >/dev/null 2>&1
+}
+
+perl_modules_available() {
+  command -v perl >/dev/null 2>&1 || return 1
+  local module
+  for module in "${PERL_MODULES[@]}"; do
+    perl_module_present "${module}" || return 1
+  done
+}
+
+gettext_version_available() {
+  local command
+  if ! command="$(find_cmd "$1")"; then
+    return 1
+  fi
+  "${command}" --version
+}
+
+# Compare dotted numeric versions ("$1" >= "$2") without `sort -V`, which the
+# BSD sort on some macOS releases does not support.
+version_ge() {
+  local -a lhs rhs
+  local IFS=.
+  read -r -a lhs <<<"$1"
+  read -r -a rhs <<<"$2"
+  local i max="${#lhs[@]}"
+  ((${#rhs[@]} > max)) && max="${#rhs[@]}"
+  for ((i = 0; i < max; i++)); do
+    local l=$((10#${lhs[i]:-0})) r=$((10#${rhs[i]:-0}))
+    ((l > r)) && return 0
+    ((l < r)) && return 1
+  done
+  return 0
+}
+
+po4a_version_ok() {
+  local version
+  version="$(po4a_version_available 2>/dev/null | sed -n 's/^po4a version \([0-9][0-9.]*\).*$/\1/p')"
+  [[ -n "${version}" ]] || return 1
+  version_ge "${version}" "${PO4A_MIN_VERSION}"
 }
 
 mise_cmd() {
@@ -237,44 +379,95 @@ elan_bin() {
 }
 
 elan_init_bin() {
-  local candidate
-  for candidate in \
-    "${HOME}/.local/share/mise/installs/github-leanprover-elan/4.2.1/elan-init" \
-    "${HOME}/.local/share/mise/installs/github-leanprover-elan"/*/elan-init; do
-    if [[ -x "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
-
+  local mise prefix
+  mise="$(mise_cmd)"
+  if prefix="$("${mise}" where github:leanprover/elan 2>/dev/null)" && [[ -x "${prefix}/elan-init" ]]; then
+    printf '%s\n' "${prefix}/elan-init"
+    return 0
+  fi
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf '%s\n' "${HOME}/.local/share/mise/installs/github-leanprover-elan/<version>/elan-init"
     return 0
   fi
-
   return 1
 }
 
 ensure_elan() {
-  if elan_bin >/dev/null 2>&1; then
-    return 0
-  fi
-
-  local init
+  local init installed expected current
   if ! init="$(elan_init_bin)"; then
     return 1
   fi
-
-  run_cmd "${init}" -y --no-modify-path
-  elan_bin >/dev/null 2>&1
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    run_cmd "${init}" -y --no-modify-path --default-toolchain none
+    return 0
+  fi
+  expected="$("${init}" --version | awk '{print $2}')" || return 1
+  [[ -n "${expected}" ]] || return 1
+  if installed="$(elan_bin)" && current="$("${installed}" --version | awk '{print $2}')" && [[ "${current}" == "${expected}" ]]; then
+    return 0
+  fi
+  if ! run_cmd "${init}" -y --no-modify-path --default-toolchain none; then
+    return 1
+  fi
+  installed="$(elan_bin)" || return 1
+  [[ "$("${installed}" --version | awk '{print $2}')" == "${expected}" ]]
 }
 
 RESOLVED_TEX_CMD=()
 
+# TeX Live's name for this host's binary directory, or empty when unknown.
+texlive_host_platform() {
+  case "$(uname -s)-$(uname -m)" in
+  Darwin-*) echo universal-darwin ;;
+  Linux-aarch64 | Linux-arm64) echo aarch64-linux ;;
+  Linux-x86_64) echo x86_64-linux ;;
+  esac
+}
+
+# The tree may hold binaries for several platforms (a checkout shared between
+# macOS and a Linux VM), so only the host's bin dir counts; on hosts without a
+# known platform name, fall back to every bin dir.
 texlive_bin_dirs() {
-  if [[ -d "${TEXLIVE_INSTALL_ROOT}/bin" ]]; then
+  local platform
+  platform="$(texlive_host_platform)"
+  if [[ -n "${platform}" ]]; then
+    if [[ -d "${TEXLIVE_INSTALL_ROOT}/bin/${platform}" ]]; then
+      printf '%s\n' "${TEXLIVE_INSTALL_ROOT}/bin/${platform}"
+    fi
+  elif [[ -d "${TEXLIVE_INSTALL_ROOT}/bin" ]]; then
     find "${TEXLIVE_INSTALL_ROOT}/bin" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort
   fi
+}
+
+texlive_repository_url() {
+  if [[ "${TLMGR_REPOSITORY}" == "ctan" ]]; then
+    printf '%s\n' "https://mirror.ctan.org/systems/texlive/tlnet"
+  else
+    printf '%s\n' "${TLMGR_REPOSITORY%/}"
+  fi
+}
+
+# A tree installed on another platform has every package but no binaries for
+# this host. Bootstrap this platform's kpathsea and tlmgr from the pinned
+# repository, then let `tlmgr platform add` fetch the remaining binaries,
+# instead of deleting a tree the other platform still uses.
+# TAR_OPTIONS=--absolute-names makes GNU tar create ../ symlinks directly; its
+# default placeholder files cannot be replaced on some shared VM folders.
+add_texlive_host_platform() {
+  local platform archive pkg
+  platform="$(texlive_host_platform)"
+  [[ -n "${platform}" && -f "${TEXLIVE_INSTALL_ROOT}/tlpkg/texlive.tlpdb" ]] || return 0
+  [[ -d "${TEXLIVE_INSTALL_ROOT}/bin/${platform}" ]] && return 0
+  log "--- 🇯🇵 Adding ${platform} binaries to the repo-local TeX Live tree ---"
+  archive="$(texlive_repository_url)/archive"
+  for pkg in kpathsea texlive.infra; do
+    log "+ curl -fsSL ${archive}/${pkg}.${platform}.tar.xz | tar -xJ -C ${TEXLIVE_INSTALL_ROOT}"
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+      curl -fsSL "${archive}/${pkg}.${platform}.tar.xz" |
+        TAR_OPTIONS=--absolute-names tar -xJ -C "${TEXLIVE_INSTALL_ROOT}"
+    fi
+  done
+  TAR_OPTIONS=--absolute-names run_cmd "${TEXLIVE_INSTALL_ROOT}/bin/${platform}/tlmgr" platform add "${platform}"
 }
 
 # Prepend the repo-local TeX Live bin dir to PATH once, so TeX tools resolve
@@ -367,6 +560,7 @@ repo_texlive_complete() {
 }
 
 install_repo_texlive() {
+  add_texlive_host_platform
   if resolve_tex_cmd tlmgr && [[ "${RESOLVED_TEX_CMD[0]}" == "${TEXLIVE_ROOT}"/* ]] && repo_texlive_complete; then
     log "--- 🇯🇵 Repo-local TeX Live already installed at ${TEXLIVE_ROOT} ---"
     return
@@ -385,7 +579,7 @@ install_repo_texlive() {
 
   if [[ -d "${TEXLIVE_INSTALL_ROOT}" ]] && ! repo_texlive_complete; then
     log "Removing incomplete repo-local TeX Live tree: ${TEXLIVE_INSTALL_ROOT}"
-    rm -rf "${TEXLIVE_INSTALL_ROOT}"
+    bash tools/remove_setup_cache.sh "${PWD}" "${TEXLIVE_INSTALL_ROOT}"
   fi
 
   local tmpdir archive installer profile
@@ -397,6 +591,29 @@ install_repo_texlive() {
     rm -rf "${tmpdir}"
     log "❌ Failed to download TeX Live installer from $(texlive_install_url)"
     exit 1
+  fi
+  # Lock the executable installer as well as the dated package repository.
+  # Update the default URL and this digest together. Custom mirrors may supply
+  # TEXLIVE_INSTALL_SHA256; their HTTPS endpoint is otherwise the trust boundary.
+  local expected_sha actual_sha
+  expected_sha="${TEXLIVE_INSTALL_SHA256:-}"
+  if [[ -z "${expected_sha}" && "$(texlive_repository_url)" == "https://www.texlive.info/tlnet-archive/2026/10/25/tlnet" ]]; then
+    expected_sha="df872fe2aa1278af8199edcab7deb7f3a045e776afeb511bf9a317be64bdb7f7"
+  fi
+  if [[ -n "${expected_sha}" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual_sha="$(sha256sum "${archive}")"
+    else
+      require_cmd shasum
+      actual_sha="$(shasum -a 256 "${archive}")"
+    fi
+    if [[ "${actual_sha%% *}" != "${expected_sha}" ]]; then
+      rm -rf "${tmpdir}"
+      log "❌ TeX Live installer SHA256 mismatch; refusing to execute it."
+      exit 1
+    fi
+  else
+    log "Custom TeX Live repository: set TEXLIVE_INSTALL_SHA256 to pin its installer."
   fi
   if ! tar -xzf "${archive}" -C "${tmpdir}"; then
     rm -rf "${tmpdir}"
@@ -426,7 +643,7 @@ tlpdbopt_install_docfiles 0
 tlpdbopt_install_srcfiles 0
 EOF
 
-  "${installer}" -profile "${profile}" -repository "${TLMGR_REPOSITORY}"
+  "${installer}" -profile "${profile}" -repository "$(texlive_repository_url)"
   rm -rf "${tmpdir}"
 }
 
@@ -576,7 +793,51 @@ doctor_lefthook_hook_check() {
   else
     doctor_fail "git pre-commit hook installed (lefthook)"
     log "   ↳ Run 'mise exec -- lefthook install' (or './setup.sh --run') to install git hooks."
+    return
   fi
+  if grep -qF "${LEFTHOOK_MISSING_LINE}" "${hook}" 2>/dev/null; then
+    doctor_fail "git pre-commit hook fails when lefthook is missing"
+    log "   ↳ Run './setup.sh --run' to harden the generated hook."
+  else
+    doctor_ok "git pre-commit hook fails when lefthook is missing"
+  fi
+}
+
+# lefthook's generated hook prints "Can't find lefthook in PATH" and exits 0
+# when it cannot locate the binary, so a commit from a shell without the mise
+# toolchain silently skips `make lint`. Rewrite that fallback to fail instead;
+# LEFTHOOK=0 remains the explicit bypass handled at the top of the hook.
+# `lefthook install` regenerates the hooks, so this runs after every install.
+LEFTHOOK_MISSING_LINE='echo "Can'"'"'t find lefthook in PATH"'
+
+harden_lefthook_hooks() {
+  local hooks_dir hook tmp
+  hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null || true)"
+  [[ -n "${hooks_dir}" && -d "${hooks_dir}" ]] || return 0
+  for hook in "${hooks_dir}"/*; do
+    [[ -f "${hook}" && "${hook}" != *.sample ]] || continue
+    grep -qF "${LEFTHOOK_MISSING_LINE}" "${hook}" || continue
+    log "+ harden ${hook} (fail when lefthook is missing)"
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      continue
+    fi
+    tmp="${hook}.tmp.$$"
+    awk -v needle="${LEFTHOOK_MISSING_LINE}" '
+      {
+        i = index($0, needle)
+        if (i > 0) {
+          indent = substr($0, 1, i - 1)
+          print indent "echo \"Can'"'"'t find lefthook in PATH; refusing to skip the git hook.\" >&2"
+          print indent "echo \"Run ./setup.sh --run, or set LEFTHOOK=0 to bypass deliberately.\" >&2"
+          print indent "exit 1"
+        } else {
+          print
+        }
+      }
+    ' "${hook}" >"${tmp}"
+    chmod +x "${tmp}"
+    mv "${tmp}" "${hook}"
+  done
 }
 
 require_cmd() {
@@ -603,6 +864,13 @@ sudo_cmd() {
 
 install_macos() {
   log "✅ Running on macOS"
+  local command_name
+  for command_name in cc make; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+      log "Missing ${command_name}: install Xcode Command Line Tools with xcode-select --install."
+      [[ "${DRY_RUN}" -eq 1 ]] || exit 1
+    fi
+  done
 
   set_mise_bin
   if [[ -n "${MISE_BIN}" ]]; then
@@ -639,6 +907,10 @@ install_mise_linux() {
 
   require_cmd curl
   log "--- 🛠 Installing mise ---"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    log "Dry-run: would download https://mise.run and run its installer."
+    return
+  fi
   local mise_installer
   mise_installer=$(mktemp) || exit 1
   # mise.run is a floating installer (the one unpinned executable in an
@@ -662,31 +934,44 @@ install_mise_linux() {
   set_mise_bin
 }
 
+# Commands the Linux build needs from the system: a C compiler for GHC and the
+# XS Perl module, make, and curl/git for fetching tools.
+LINUX_BUILD_BASICS=(cc make curl git)
+
+linux_build_basics_available() {
+  local cmd
+  for cmd in "${LINUX_BUILD_BASICS[@]}"; do
+    command -v "${cmd}" >/dev/null 2>&1 || return 1
+  done
+}
+
 install_linux() {
   log "✅ Running on Linux"
   local found_system_manager=0
 
-  # libgmp's dev symlink (libgmp.so) is what `-lgmp` resolves at link time: the
-  # mise-provisioned GHC links every Haskell binary (book-filter) against gmp,
-  # and the devcontainer base ships only the runtime libgmp, so the build fails
-  # with "cannot find -lgmp" without the -dev/-devel package here.
-  if command -v apt-get >/dev/null 2>&1; then
+  # Only the build basics come from the system; gettext and libgmp (for linking
+  # book-filter) are pinned in mise.toml. Skip the package manager, and with it
+  # sudo, when the basics are already present (e.g. a rootless VM).
+  if linux_build_basics_available; then
+    log "--- 📦 System build tools already installed (${LINUX_BUILD_BASICS[*]}) ---"
+    found_system_manager=1
+  elif command -v apt-get >/dev/null 2>&1; then
     found_system_manager=1
     log "--- 📦 Installing System Tools via apt ---"
     sudo_cmd apt-get update
-    sudo_cmd apt-get install -y build-essential ca-certificates curl git make libgmp-dev
+    sudo_cmd apt-get install -y build-essential ca-certificates curl git make
   elif command -v dnf >/dev/null 2>&1; then
     found_system_manager=1
     log "--- 📦 Installing System Tools via dnf ---"
-    sudo_cmd dnf install -y ca-certificates curl gcc gcc-c++ git make gmp-devel
+    sudo_cmd dnf install -y ca-certificates curl gcc gcc-c++ git make
   elif command -v paru >/dev/null 2>&1; then
     found_system_manager=1
     log "--- 📦 Installing System Tools via paru ---"
-    run_cmd paru -S --needed --noconfirm base-devel ca-certificates curl git make gmp
+    run_cmd paru -S --needed --noconfirm base-devel ca-certificates curl git make
   elif command -v pacman >/dev/null 2>&1; then
     found_system_manager=1
     log "--- 📦 Installing System Tools via pacman ---"
-    sudo_cmd pacman -S --needed --noconfirm base-devel ca-certificates curl git make gmp
+    sudo_cmd pacman -S --needed --noconfirm base-devel ca-certificates curl git make
   else
     set_brew_bin
   fi
@@ -700,13 +985,78 @@ install_linux() {
   install_mise_linux
 }
 
+# po4a itself is a mise-managed tool (http:po4a in mise.toml) installed by the
+# later `mise install` step, as is GNU gettext (conda:gettext-tools).
+# This function provisions only po4a's CPAN Perl modules.
+install_translation_tools() {
+  install_perl_modules
+}
+
+# Install po4a's CPAN dependencies against the system Perl into the repo-local
+# ${PERL_LOCAL_LIB} (no sudo, no distribution Perl packages). Uses a system
+# cpanm when present, otherwise the self-contained App::cpanminus script fetched
+# over curl; both only need core Perl plus the C toolchain from the build
+# basics. Like the mise.run bootstrap, the fallback cpanmin.us script is a
+# floating HTTPS installer, not a checksum-locked download. Prefer a packaged
+# system cpanm when bootstrap reproducibility is required. The XS module (Syntax::Keyword::Try) is compiled here.
+install_perl_modules() {
+  if perl_modules_available; then
+    log "--- 🌐 po4a Perl modules already installed (${PERL_MODULES[*]}) ---"
+    return
+  fi
+
+  if ! command -v perl >/dev/null 2>&1; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      log "Dry-run: perl not found; it is required to build po4a's Perl modules."
+      return
+    fi
+    log "❌ perl not found; install a system Perl (with a C compiler and make) and rerun setup."
+    exit 1
+  fi
+
+  # Reaching here means some module does not load, which after a system Perl
+  # upgrade is true of every compiled object in the tree: the .so files no
+  # longer match the interpreter's ABI, while the .pm files still record the
+  # current version. cpanm reads those versions, calls the distributions up to
+  # date and skips them, and the stale objects of transitive XS dependencies
+  # break the next build anyway. The tree is a derived cache, so discard it and
+  # let cpanm compile everything against the Perl now installed.
+  if [[ -d "${PERL_LOCAL_LIB}" ]]; then
+    log "--- 🌐 Discarding the unusable Perl tree in ${PERL_LOCAL_LIB} ---"
+    run_cmd bash tools/remove_setup_cache.sh "${PWD}" "${PERL_LOCAL_LIB}"
+  fi
+
+  log "--- 🌐 Installing po4a Perl modules into ${PERL_LOCAL_LIB} (${PERL_MODULES[*]}) ---"
+  local cpanm
+  if cpanm="$(find_cmd cpanm)"; then
+    run_cmd "${cpanm}" --notest --local-lib "${PERL_LOCAL_LIB}" "${PERL_MODULES[@]}"
+  elif [[ "${DRY_RUN}" -eq 1 ]]; then
+    log "Dry-run: would download ${CPANM_URL} and run" \
+      "'perl cpanm --notest --local-lib ${PERL_LOCAL_LIB} ${PERL_MODULES[*]}'."
+    return
+  else
+    local workdir
+    workdir="$(mktemp -d)"
+    run_cmd curl -fsSL -o "${workdir}/cpanm" "${CPANM_URL}"
+    run_cmd perl "${workdir}/cpanm" --notest --local-lib "${PERL_LOCAL_LIB}" "${PERL_MODULES[@]}"
+    rm -rf "${workdir}"
+  fi
+
+  if [[ "${DRY_RUN}" -eq 0 ]] && ! perl_modules_available; then
+    log "❌ Failed to install po4a's Perl modules (${PERL_MODULES[*]})."
+    exit 1
+  fi
+}
+
 install_texlive_packages() {
   log "--- 🇯🇵 Installing TeX Live packages ---"
   install_repo_texlive
   if [[ -n "${TLMGR_REPOSITORY}" ]]; then
     log "Pinning TeX Live package repository: ${TLMGR_REPOSITORY}"
-    run_tex_cmd tlmgr option repository "${TLMGR_REPOSITORY}"
+    run_tex_cmd tlmgr option repository "$(texlive_repository_url)"
   fi
+  # A restored cache may contain older packages from the previous snapshot.
+  run_tex_cmd tlmgr update --self --all
   run_tex_cmd tlmgr install "${TEXLIVE_PACKAGES[@]}"
   run_tex_cmd luaotfload-tool --update --force
 }
@@ -747,10 +1097,33 @@ provision_lean() {
   fi
 }
 
+# Drop any ghc/cabal install that mise cannot resolve a runnable bin for, so the
+# subsequent `mise install` rebuilds it through the ghcup plugin registered
+# above. mise's default `ghc`/`cabal` backend is conda, and a conda-installed
+# cabal lands at <install>/cabal with no bin/ subdirectory, where `mise exec --
+# cabal` fails with "couldn't exec process: No such file or directory". mise
+# never reinstalls an already-present version, so such a stale conda-layout
+# install — left over from a checkout provisioned before the ghcup plugin was
+# adopted — is otherwise never replaced. A healthy ghcup install resolves fine
+# and is left untouched; a not-yet-installed tool has no `mise where` path and
+# is likewise skipped (the `mise install` below installs it fresh).
+heal_ghcup_backend() {
+  local tool mise
+  mise="$(mise_cmd)"
+  for tool in ghc cabal; do
+    if "${mise}" where "${tool}" >/dev/null 2>&1 &&
+      ! "${mise}" which "${tool}" >/dev/null 2>&1; then
+      log "--- ♻️  Reinstalling ${tool} via ghcup (unusable non-ghcup layout detected) ---"
+      run_mise uninstall "${tool}"
+    fi
+  done
+}
+
 run_doctor() {
   log "--- 🔎 Checking repository setup ---"
 
   set_mise_bin
+  ensure_gettext_on_path
   if [[ -n "${MISE_BIN}" ]]; then
     doctor_ok "mise found at ${MISE_BIN}"
   else
@@ -759,15 +1132,31 @@ run_doctor() {
     exit 1
   fi
 
+  doctor_check "C compiler available" command -v cc
+  doctor_check "make available" command -v make
   doctor_check "mise.toml present" test -f mise.toml
   doctor_mise_trust_check
   doctor_mise_check "GHC available through mise" ghc --version
   doctor_mise_check "cabal available through mise" cabal --version
   doctor_mise_check "Python available through mise" python --version
   doctor_mise_check "Pandoc available through mise" pandoc --version
+  doctor_check "po4a >= ${PO4A_MIN_VERSION} available (mise http:po4a)" po4a_version_ok
+  local perl_module
+  for perl_module in "${PERL_MODULES[@]}"; do
+    doctor_check "Perl module ${perl_module} available (.perllib)" perl_module_present "${perl_module}"
+  done
+  local gettext_command
+  for gettext_command in "${GETTEXT_COMMANDS[@]}"; do
+    doctor_check "GNU gettext ${gettext_command} --version succeeds" gettext_version_available "${gettext_command}"
+  done
   doctor_tex_check "LuaLaTeX available" lualatex --version
   doctor_tex_check "latexdiff available" latexdiff --version
   doctor_tex_available_check "makeindex available" makeindex
+  doctor_tex_available_check "upmendex available (Japanese index builds)" upmendex
+  doctor_tex_check "LuaTeX-ja package available" kpsewhich luatexja.sty
+  doctor_tex_check "xkeyval package available (required by LuaTeX-ja)" kpsewhich xkeyval.sty
+  doctor_tex_check "selnolig package available (required by Pandoc's LuaTeX template)" kpsewhich selnolig.sty
+  doctor_tex_check "Harano Aji Japanese font available" kpsewhich HaranoAjiMincho-Regular.otf
   # The Makefile pipes every LuaLaTeX run through texfot; PDF builds fail without it.
   doctor_tex_available_check "texfot available (required: PDF builds pipe LuaLaTeX through it)" texfot
   doctor_mise_check "Node available through mise" node --version
@@ -799,6 +1188,20 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log "--- Dry-run mode: commands will be printed, not run. Use --run to install. ---"
 fi
 
+# In a linked git worktree, clone the main checkout's gitignored caches
+# (.texlive/, */.lake/, build/ dirs) before provisioning anything, so the TeX
+# Live install below sees the tree as already present instead of downloading
+# it again. The clone is copy-on-write where the filesystem supports it and a
+# no-op in the main checkout or when the caches already exist; see
+# tools/worktree_caches.sh.
+if [[ -x tools/worktree_caches.sh ]]; then
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    tools/worktree_caches.sh --dry-run
+  else
+    tools/worktree_caches.sh
+  fi
+fi
+
 case "$(uname -s)" in
 Darwin)
   install_macos
@@ -811,6 +1214,8 @@ Linux)
   exit 1
   ;;
 esac
+
+install_translation_tools
 
 set_mise_bin
 if [[ -z "${MISE_BIN}" && "${DRY_RUN}" -eq 0 ]]; then
@@ -839,9 +1244,9 @@ log "--- 🛡 Setting up mise-managed tools ---"
 run_mise trust
 # Pin GHC and cabal to the ghcup backend before installing. mise's `ghc`/`cabal`
 # registry entries default to the conda backend, whose package set is
-# platform-spotty: conda-forge has no ghc 9.6.7 for linux-x64, so a plain
+# platform-spotty: conda-forge has no ghc 9.14.1 for linux-x64, so a plain
 # `mise install` fails there with "conda solve failed: No candidates were found
-# for ghc ==9.6.7" (it works on macOS only because conda happens to carry it).
+# for ghc ==9.14.1" (it works on macOS only because conda happens to carry it).
 # ghcup is the canonical, cross-platform GHC installer and carries the pinned
 # ghc/cabal on both macOS and Linux. Installing the plugin under the tool name
 # (`ghc`, `cabal`) makes mise prefer it over the conda registry default — the
@@ -849,10 +1254,12 @@ run_mise trust
 # Re-installing an already-present plugin is a no-op, so this stays idempotent.
 run_mise plugin install --yes ghc https://github.com/mise-plugins/mise-ghcup
 run_mise plugin install --yes cabal https://github.com/mise-plugins/mise-ghcup
+heal_ghcup_backend
 run_mise install
 
 log "--- 🪝 Installing git hooks (lefthook) ---"
 run_mise exec -- lefthook install
+harden_lefthook_hooks
 
 install_texlive_packages
 

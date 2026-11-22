@@ -21,6 +21,10 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { CliUsageError, optionValue } from "./cli-values.ts";
+import { atomicWrite } from "./file-output.ts";
+import { walkFiles, isTopLevelName } from "./projects.ts";
 import { LeanServer } from "./lean-server.ts";
 
 const CACHE_VERSION = 1;
@@ -75,8 +79,7 @@ function toolchainHash(root: string): string {
 }
 
 // In-project files imported by `p` (module Foo.Bar -> leanSrc/Foo/Bar.lean).
-function projectImports(p: string, leanSrc: string): string[] {
-  const text = fs.readFileSync(p, "utf-8");
+function projectImports(text: string, leanSrc: string): string[] {
   const deps: string[] = [];
   for (const match of text.matchAll(IMPORT_RE)) {
     const candidate = path.join(leanSrc, ...match[1].split(".")) + ".lean";
@@ -97,22 +100,45 @@ function stableStringify(value: unknown): string {
     .join(",")}}`;
 }
 
-// Hash of the file, its transitive in-project imports, and toolchain pins.
-function cacheKey(p: string, leanSrc: string, pins: string): string {
-  const closure = new Map<string, string>();
-  const queue = [path.resolve(p)];
-  while (queue.length) {
-    const current = queue.pop()!;
-    if (closure.has(current)) continue;
-    closure.set(current, fileSha256(current));
-    queue.push(...projectImports(current, leanSrc));
+// One generation snapshots each file once. Keep the existing closure-key
+// encoding so unchanged Lean files reuse their previously generated caches.
+export class CacheKeys {
+  private readonly snapshots = new Map<string, { hash: string; imports: string[] }>();
+  private readonly leanSrc: string;
+  private readonly pins: string;
+  private readonly readFile: (file: string) => Buffer;
+
+  constructor(leanSrc: string, pins: string, readFile: (file: string) => Buffer = (file) => fs.readFileSync(file)) {
+    this.leanSrc = path.resolve(leanSrc);
+    this.pins = pins;
+    this.readFile = readFile;
   }
-  const files = [...closure.entries()]
-    .map(([abs, hash]) => [path.relative(leanSrc, abs), hash] as [string, string])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return createHash("sha256")
-    .update(stableStringify({ version: CACHE_VERSION, pins, files }))
-    .digest("hex");
+
+  key(file: string): string {
+    const closure = new Map<string, string>();
+    const queue = [path.resolve(file)];
+    while (queue.length) {
+      const current = queue.pop()!;
+      if (closure.has(current)) continue;
+      let snapshot = this.snapshots.get(current);
+      if (!snapshot) {
+        const bytes = this.readFile(current);
+        snapshot = {
+          hash: createHash("sha256").update(bytes).digest("hex"),
+          imports: projectImports(bytes.toString("utf-8"), this.leanSrc),
+        };
+        this.snapshots.set(current, snapshot);
+      }
+      closure.set(current, snapshot.hash);
+      queue.push(...snapshot.imports);
+    }
+    const files = [...closure.entries()]
+      .map(([abs, hash]) => [path.relative(this.leanSrc, abs), hash] as [string, string])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return createHash("sha256")
+      .update(stableStringify({ version: CACHE_VERSION, pins: this.pins, files }))
+      .digest("hex");
+  }
 }
 
 // Drop the position-specific `range` from termGoal/hover responses: the viewer
@@ -215,44 +241,9 @@ function buildCache(
 }
 
 function discoverLeanFiles(leanSrc: string): string[] {
-  const found: string[] = [];
-  const seen = new Set<string>();
-  const stack = [leanSrc];
-  while (stack.length) {
-    const dir = stack.pop()!;
-    let real: string;
-    try {
-      real = fs.realpathSync(dir);
-    } catch {
-      continue;
-    }
-    if (seen.has(real)) continue;
-    seen.add(real);
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const full = path.join(dir, entry.name);
-      const isDir = entry.isDirectory() || (entry.isSymbolicLink() && safeIsDir(full));
-      if (isDir) {
-        if (!entry.name.startsWith(".")) stack.push(full);
-      } else if (entry.name.endsWith(".lean")) {
-        found.push(full);
-      }
-    }
-  }
-  return found.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-}
-
-function safeIsDir(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
+  return [...walkFiles(leanSrc, (name) => !name.startsWith("."))]
+    .filter((file) => file.endsWith(".lean"))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // Generate caches under outDir; returns {generated, reused} file lists. The Lean
@@ -265,18 +256,27 @@ export async function generate(
   elabTimeout = 1800,
   log: Logger = (m) => process.stdout.write(`${m}\n`),
 ): Promise<{ generated: string[]; reused: string[] }> {
+  if (!isTopLevelName(projectDir)) throw new Error("Project directory must be a top-level name");
+  if (!Number.isFinite(elabTimeout) || elabTimeout <= 0)
+    throw new Error("Elaboration timeout must be positive and finite");
   root = path.resolve(root);
   const projectRoot = path.join(root, projectDir);
   const leanSrc = path.join(projectRoot, "lean");
   const targets = files ? files.map((f) => path.resolve(f)) : discoverLeanFiles(leanSrc);
-  const pins = toolchainHash(projectRoot);
+  for (const file of targets) {
+    const relative = path.relative(projectRoot, file);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`Lean cache target is outside the project: ${file}`);
+    }
+  }
+  const keys = new CacheKeys(leanSrc, toolchainHash(projectRoot));
 
   const stale: Array<{ p: string; rel: string; outPath: string; key: string }> = [];
   const reused: string[] = [];
   for (const p of targets) {
     const rel = path.relative(projectRoot, p);
     const outPath = path.join(outDir, rel + ".json");
-    const key = cacheKey(p, leanSrc, pins);
+    const key = keys.key(p);
     let existingKey: string | null = null;
     if (fs.existsSync(outPath)) {
       try {
@@ -295,9 +295,9 @@ export async function generate(
   const server = new LeanServer(projectRoot);
   const generated: string[] = [];
   try {
-    await server.initialize(`file://${projectRoot}`);
+    await server.initialize(pathToFileURL(projectRoot).href);
     for (const { p, rel, outPath, key } of stale) {
-      const uri = `file://${p}`;
+      const uri = pathToFileURL(p).href;
       const text = fs.readFileSync(p, "utf-8");
       const lines = text.split("\n");
       const started = Date.now();
@@ -314,7 +314,7 @@ export async function generate(
       const diagnostics = server.diagnosticsFor(uri);
       const cache = buildCache(rel, key, lines, samples, diagnostics, tables);
       fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      fs.writeFileSync(outPath, JSON.stringify(cache));
+      atomicWrite(outPath, JSON.stringify(cache));
       const elapsed = (Date.now() - started) / 1000;
       log(`lsp-cache: wrote ${path.relative(root, outPath)} (${samples.size} samples, ${elapsed.toFixed(1)}s)`);
       generated.push(rel);
@@ -333,16 +333,24 @@ interface CliArgs {
   elabTimeout: number;
 }
 
-function parseArgs(argv: string[]): CliArgs {
+export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = { files: [], root: ".", projectDir: "polish-space", out: null, elabTimeout: 1800 };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--root") args.root = argv[++i];
-    else if (arg === "--project-dir") args.projectDir = argv[++i];
-    else if (arg === "--out") args.out = argv[++i];
-    else if (arg === "--elab-timeout") args.elabTimeout = Number.parseInt(argv[++i], 10);
+    if (arg === "--root") args.root = optionValue(argv, i++);
+    else if (arg === "--project-dir") args.projectDir = optionValue(argv, i++);
+    else if (arg === "--out") args.out = optionValue(argv, i++);
+    else if (arg === "--elab-timeout") {
+      args.elabTimeout = Number(optionValue(argv, i++));
+      if (!Number.isFinite(args.elabTimeout) || args.elabTimeout <= 0)
+        throw new CliUsageError("--elab-timeout must be a positive finite number");
+    } else if (arg === "--") {
+      args.files.push(...argv.slice(i + 1));
+      break;
+    } else if (arg.startsWith("--")) throw new CliUsageError(`Unknown option: ${arg}`);
     else args.files.push(arg);
   }
+  if (!isTopLevelName(args.projectDir)) throw new CliUsageError("--project-dir must be a top-level project name");
   return args;
 }
 
@@ -362,6 +370,9 @@ async function main(): Promise<void> {
   process.stdout.write(`lsp-cache: ${generated.length} generated, ${reused.length} reused\n`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  void main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  void main().catch((error: Error) => {
+    process.stderr.write(`lsp-cache: ${error.message}\n`);
+    process.exitCode = error instanceof CliUsageError ? 2 : 1;
+  });
 }

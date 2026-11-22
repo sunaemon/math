@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tools/claude_worktree_create.sh",
+            "timeout": 600,
+            "statusMessage": "Creating worktree and CoW-cloning build caches"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -4,6 +4,24 @@
 // out of source-render.ts so this off-by-one-prone math has no dependencies (in
 // particular not escapeHtml/util, which touch the DOM at load) and can be unit
 // tested directly with `node --test`.
+import type { CorrespondenceReport } from "./correspondence-model.js";
+
+export function formulaLineSpans(text: string, report: CorrespondenceReport): Map<number, any[]> {
+  if (report.status !== "current") return new Map();
+  const spans = convertSpansToUtf16(
+    text,
+    report.formulas.map((row) => ({
+      startOffset: row.bodyStart,
+      endOffset: row.bodyStart + Array.from(row.book).length,
+      index: row.index,
+    })),
+    "codepoint",
+  );
+  const checked = spans.filter(
+    (span, index) => text.slice(span.startOffset, span.endOffset) === report.formulas[index].book,
+  );
+  return bucketByLine(buildLineStarts(text), text.length, checked);
+}
 
 export function buildLineStarts(text: string): number[] {
   const starts = [0];
@@ -48,6 +66,19 @@ export function bucketByLine(lineStarts: number[], textLength: number, items: an
     }
   }
   return byLine;
+}
+
+// Slice the text covered by one span, converting codepoint offsets to UTF-16
+// first when needed. Used by the marker copy shortcut to extract a booklink
+// span's TeX source verbatim.
+export function spanText(
+  text: string,
+  span: { startOffset?: number; endOffset?: number },
+  offsetSpace: "utf16" | "codepoint",
+): string {
+  if (!Number.isInteger(span.startOffset) || !Number.isInteger(span.endOffset)) return "";
+  const [converted] = convertSpansToUtf16(text, [span], offsetSpace);
+  return text.slice(converted.startOffset, converted.endOffset);
 }
 
 // Convert every span's codepoint offsets to UTF-16 offsets in one forward pass

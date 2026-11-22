@@ -26,6 +26,8 @@ repo-relative ``\\input`` of ``macros.tex``, and the book uses inline TikZ with 
 debug build, with ``-output-directory`` set to the build dir. Units are
 ``\\include``'d by bare name; the build puts the unit dir on ``TEXINPUTS`` so the
 names resolve while each unit's ``.aux`` lands flat in the output dir.
+The build holds the LaTeX lock while splitting. If a cached warm master names
+a different chapter-unit list, it is invalidated before the next preview.
 """
 
 from __future__ import annotations
@@ -40,32 +42,54 @@ BOUNDARY = re.compile(r"\\(chapter\*?|part)\b")
 LABEL = re.compile(r"\\label\{sec:([A-Za-z0-9:_-]+)\}")
 # A chapter source's leading "# Title {#sec:ID}" anchor (Pandoc heading id).
 HEADING_ID = re.compile(r"^\#\s+.*\{\#([A-Za-z0-9:_-]+)\}", re.MULTILINE)
+AUX_INPUT = re.compile(r"^\\@input\{([^{}]+)\.aux\}", re.MULTILINE)
+ENDMATTER = re.compile(r"^\\printindex\b|^\\chapter\*.*\\label\{bibliography\}")
+
+
+def matter_start(body: list[str], start: int, lower: int = 0) -> int:
+    """Keep page breaks and TOC anchors with the heading they introduce."""
+    lead = (r"\cleardoublepage", r"\phantomsection", r"\addcontentsline", r"\protect")
+    while start > lower:
+        prev = body[start - 1].lstrip()
+        if prev and prev.startswith(lead):
+            start -= 1
+        else:
+            break
+    return start
+
+
+def endmatter_units(body: list[str]) -> list[tuple[str, str]]:
+    """Separate the index and bibliography, preserving their source order."""
+    headings = [
+        (i, "_index" if ln.startswith(r"\printindex") else "_bibliography")
+        for i, ln in enumerate(body)
+        if ENDMATTER.match(ln)
+    ]
+    starts = [0 if k == 0 else matter_start(body, i, headings[k - 1][0] + 1) for k, (i, _) in enumerate(headings)]
+    return [
+        (name, "".join(body[starts[k] : starts[k + 1] if k + 1 < len(starts) else len(body)]))
+        for k, (_, name) in enumerate(headings)
+    ]
 
 
 def split_body(body: list[str]) -> tuple[int, list[int]]:
     """Return ``(end_start, unit_starts)``: the index where the end matter
-    (``\\printindex`` and the bibliography) begins, and the body-line indices that
+    (the index and bibliography, in either order) begins, and the body-line indices that
     open each chapter unit. A ``\\part`` immediately followed by a ``\\chapter`` is
     folded into that chapter's unit so the part heading travels with it."""
     end_start = next(
-        (i for i, ln in enumerate(body) if ln.startswith(r"\printindex")),
+        (i for i, ln in enumerate(body) if ENDMATTER.match(ln)),
         None,
     )
     if end_start is None:
-        raise SystemExit(
-            "split_preview_tex: no \\printindex line found in the debug .tex; "
+        raise ValueError(
+            "no index or bibliography heading found in the debug .tex; "
             "expected the index/bibliography end matter to follow the last chapter"
         )
-    # Pull the index's page-break preamble (\cleardoublepage \phantomsection
+    # Pull the end matter's page-break preamble (\cleardoublepage \phantomsection
     # \addcontentsline) into the end matter so it is not stranded on the last
     # chapter.
-    lead = (r"\cleardoublepage", r"\phantomsection", r"\addcontentsline", r"\protect")
-    while end_start > 0:
-        prev = body[end_start - 1].lstrip()
-        if prev and prev.startswith(lead):
-            end_start -= 1
-        else:
-            break
+    end_start = matter_start(body, end_start)
 
     boundaries = [i for i in range(end_start) if BOUNDARY.match(body[i])]
     starts: list[int] = []
@@ -86,7 +110,15 @@ def chapter_id(chapter_md: Path) -> str | None:
     if not m:
         return None
     ident = m.group(1)
-    return ident[4:] if ident.startswith("sec:") else ident
+    return ident.removeprefix("sec:")
+
+
+def frontmatter_units(text: str) -> list[tuple[str, str]]:
+    """Give the contents its own preview, leaving the title page separate."""
+    toc = re.search(r"(?m)^\{\s*\n\\setcounter\{tocdepth\}[^\n]*\n\\tableofcontents\b", text)
+    if toc is None:
+        return [("_front", text)]
+    return [("_front", text[: toc.start()]), ("_contents", text[toc.start() :])]
 
 
 def main(argv: list[str]) -> int:
@@ -110,7 +142,11 @@ def main(argv: list[str]) -> int:
     preamble = "".join(lines[:bd])
     body = lines[bd + 1 : ed]
 
-    end_start, starts = split_body(body)
+    try:
+        end_start, starts = split_body(body)
+    except ValueError as error:
+        print(f"split_preview_tex: {error}", file=sys.stderr)
+        return 1
     if not starts:
         print(f"split_preview_tex: no chapter boundaries found in {args.debug_tex}", file=sys.stderr)
         return 1
@@ -125,7 +161,7 @@ def main(argv: list[str]) -> int:
     chapter_paths = [Path(c) for c in manifest.get("chapters", [])]
     has_chapter = re.compile(r"\\chapter\*?\b")
 
-    units: list[tuple[str, str]] = [("_front", "".join(body[: starts[0]]))]
+    units = frontmatter_units("".join(body[: starts[0]]))
     chapter_map: dict[str, str] = {}
     ci = pi = 0
     for k, i in enumerate(starts):
@@ -141,21 +177,23 @@ def main(argv: list[str]) -> int:
             expect = chapter_id(chapter_paths[ci])
             if label and expect and label.group(1) != expect:
                 print(
-                    f"split_preview_tex: warning: chapter #{ci} ({name}) tex label "
+                    f"split_preview_tex: chapter #{ci} ({name}) tex label "
                     f"sec:{label.group(1)} != manifest heading sec:{expect}",
                     file=sys.stderr,
                 )
+                return 1
         else:
             name = f"_chapter-extra-{ci}"
         units.append((name, chunk))
         chapter_map[name] = name
         ci += 1
-    units.append(("_endmatter", "".join(body[end_start:])))
+    units.extend(endmatter_units(body[end_start:]))
     if ci != len(chapter_paths):
         print(
-            f"split_preview_tex: warning: {ci} chapter chunks vs {len(chapter_paths)} manifest chapters",
+            f"split_preview_tex: {ci} chapter chunks vs {len(chapter_paths)} manifest chapters",
             file=sys.stderr,
         )
+        return 1
 
     out_dir = args.out_dir
     unit_dir = out_dir / f"{args.stem}-preview"
@@ -173,6 +211,15 @@ def main(argv: list[str]) -> int:
         include_names.append(name)
 
     includes = "\n".join(rf"\include{{{n}}}" for n in include_names)
+    # Warm aux files deliberately survive ordinary text edits. A changed unit
+    # list is different: reading the old master can load labels from a removed
+    # chapter as well as its replacement. Invalidate that cache so the order-only
+    # Make prerequisite warms the current layout before seeding a preview.
+    # Make runs this split under the LaTeX lock, so no live writer is removed.
+    warm_aux = out_dir / f"{args.stem}-preview-master.aux"
+    if warm_aux.exists() and AUX_INPUT.findall(warm_aux.read_text(encoding="utf-8")) != include_names:
+        warm_aux.unlink()
+        print("  split-preview: chapter layout changed; invalidated warm cross-reference aux")
     # \PreviewOnly (a repo build passes it as \def on the command line) selects a
     # single \include; absent, every unit is typeset (the full warm-aux build).
     hook = r"\ifdefined\PreviewOnly\expandafter\includeonly\expandafter{\PreviewOnly}\fi" + "\n"

@@ -6,10 +6,9 @@
 // callbacks, woken on every inbound message, plays the same role on Node's
 // single-threaded loop.
 
-import { spawn } from "node:child_process";
-import type { ChildProcessByStdio } from "node:child_process";
-import type { Writable, Readable } from "node:stream";
-import { terminate } from "./process-group.ts";
+import { killGroup, terminate } from "./process-group.ts";
+import { LspFrames } from "./lsp-frames.ts";
+import { spawnLean, type LeanProc, type SpawnLean } from "./lsp-process.ts";
 
 export interface JsonRpcMessage {
   id?: number | string;
@@ -20,7 +19,7 @@ export interface JsonRpcMessage {
 }
 
 export class LeanServer {
-  private readonly proc: ChildProcessByStdio<Writable, Readable, null>;
+  private readonly proc: LeanProc;
   private nextId = 1;
   readonly responses = new Map<number, JsonRpcMessage>();
   readonly diagnostics = new Map<string, unknown[]>();
@@ -28,12 +27,8 @@ export class LeanServer {
   private closed = false;
   private waiters: Array<() => void> = [];
 
-  constructor(root: string) {
-    this.proc = spawn("lake", ["env", "lean", "--server"], {
-      cwd: root,
-      stdio: ["pipe", "pipe", "ignore"],
-      detached: true,
-    });
+  constructor(root: string, spawnServer: SpawnLean = spawnLean) {
+    this.proc = spawnServer(root);
     this.startReader();
   }
 
@@ -58,30 +53,22 @@ export class LeanServer {
   }
 
   private startReader(): void {
-    let buffer = Buffer.alloc(0);
+    const frames = new LspFrames();
     const onEnd = (): void => {
       this.closed = true;
       this.wake();
     };
     this.proc.stdout.on("data", (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      for (;;) {
-        const headerEnd = buffer.indexOf("\r\n\r\n");
-        if (headerEnd < 0) return;
-        let length = 0;
-        let malformed = false;
-        for (const line of buffer.subarray(0, headerEnd).toString("latin1").split("\r\n")) {
-          if (line.toLowerCase().startsWith("content-length:")) {
-            const parsed = Number.parseInt(line.slice(line.indexOf(":") + 1).trim(), 10);
-            if (Number.isNaN(parsed)) malformed = true;
-            else length = parsed;
-          }
-        }
-        if (malformed) return onEnd();
-        const bodyStart = headerEnd + 4;
-        if (buffer.length - bodyStart < length) return;
-        const body = buffer.subarray(bodyStart, bodyStart + length).toString("utf-8");
-        buffer = buffer.subarray(bodyStart + length);
+      if (this.closed) return;
+      let messages: string[];
+      try {
+        messages = frames.push(chunk);
+      } catch {
+        onEnd();
+        killGroup(this.proc, "SIGTERM");
+        return;
+      }
+      for (const body of messages) {
         let message: JsonRpcMessage;
         try {
           message = JSON.parse(body);
@@ -94,6 +81,7 @@ export class LeanServer {
     this.proc.stdout.on("end", onEnd);
     this.proc.on("exit", onEnd);
     this.proc.on("error", onEnd);
+    this.proc.stdin.on("error", onEnd);
   }
 
   private dispatch(message: JsonRpcMessage): void {

@@ -1,0 +1,66 @@
+module
+
+public import PolishSpaceBook.CantorInternalSelectedFamily
+public import PolishSpaceBook.CantorInternalUnionInputs
+public import PolishSpaceBook.CantorApproximationFamilyChoice
+public import PolishSpaceBook.BorelInternalInterpretationFamily
+public import PolishSpaceBook.CantorApproximationAdmissibility
+public import PolishSpaceBook.CantorInternalMeasureFormula
+public import PolishSpaceBook.SetTheoryDefinableChoice
+public import PolishSpaceBook.CantorInternalRegularity
+public import PolishSpaceBook.CantorInternalApproximations
+public import PolishSpaceBook.CantorInternalDyadicBounds
+public import PolishSpaceBook.BorelInternalInclusion
+public import PolishSpaceBook.BorelInternalCounterexampleTree
+public import PolishSpaceBook.BorelInternalRowChild
+public import PolishSpaceBook.BorelCanonicalBasis
+public import PolishSpaceBook.SetTheoryNaturalPairing
+public import PolishSpaceBook.AppendixLogic
+public import PolishSpaceBook.ForcingNames
+public import PolishSpaceBook.ForcingFormulaTruth
+public import PolishSpaceBook.SetTheoryModelClosure
+public import PolishSpaceBook.SetTheoryAbsoluteness
+public import PolishSpaceBook.SetTheorySeparation
+public import PolishSpaceBook.ForcingPairing
+public import PolishSpaceBook.ForcingUnionClosure
+public import PolishSpaceBook.SetTheoryOrdinalFormulas
+public import PolishSpaceBook.SetTheoryInaccessibleUniverse
+public import PolishSpaceBook.SetTheoryFiniteReflection
+public import PolishSpaceBook.SetTheoryMostowski
+public import PolishSpaceBook.SetTheoryCountableCollapse
+public import PolishSpaceBook.SetTheoryInternalOrdinalRepresentation
+public import PolishSpaceBook.ForcingOrdinalBounds
+public import PolishSpaceBook.SetTheoryFunctionClosure
+public import PolishSpaceBook.SetTheoryRecursiveSolutions
+public import PolishSpaceBook.SetTheoryTransfiniteRecursion
+public import PolishSpaceBook.SetTheoryRecursiveFormulas
+public import PolishSpaceBook.SetTheoryInternalRecursion
+public import PolishSpaceBook.SetTheoryFreshChoice
+public import PolishSpaceBook.SetTheoryChoiceEnumeration
+public import PolishSpaceBook.SetTheoryTransitiveBounds
+public import PolishSpaceBook.ForcingOrdinalPreservation
+public import PolishSpaceBook.SetTheoryInternalHierarchy
+public import PolishSpaceBook.ForcingAtomicGlobalDefinability
+public import PolishSpaceBook.ForcingDefiningFormulas
+public import PolishSpaceBook.ForcingGenericTruth
+public import PolishSpaceBook.ForcingOpenDense
+public import PolishSpaceBook.ForcingCheckConventions
+public import PolishSpaceBook.ForcingSeparationClosure
+public import PolishSpaceBook.ForcingPowerSet
+public import PolishSpaceBook.ForcingReplacement
+public import PolishSpaceBook.ForcingGroundCovers
+public import PolishSpaceBook.ForcingChoice
+public import PolishSpaceBook.BorelInternalCantorInterpretation
+public import PolishSpaceBook.BorelInternalRankBounds
+
+@[expose] public section
+
+/-!
+# Appendix: set theory
+
+Formalization targets for `polish-space/src/polish-space-book/appendix-set-theory.md`.
+-/
+
+namespace PolishSpaceBook
+
+end PolishSpaceBook

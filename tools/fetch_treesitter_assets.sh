@@ -14,15 +14,15 @@
 #   VERSIONS                                       pinned versions and lean commit
 #
 # The tree-sitter CLI (for building the Lean grammar to Wasm) comes from mise.
-# `tree-sitter build --wasm` falls back to the emsdk Docker image when emcc is
-# not on PATH, so a running Docker daemon is required for the Lean build.
+# `tree-sitter build --wasm` obtains the supported wasi-sdk and Binaryen
+# toolchain when needed; the CLI manages their local cache.
 
 set -euo pipefail
 
 # --- Pinned versions -------------------------------------------------------
-WEB_TREE_SITTER_VERSION="0.26.9"
-MARKDOWN_VERSION="0.5.3"
-LEAN_COMMIT="463a9d8a509c935f4e10854b5078bbe2839b274c"
+WEB_TREE_SITTER_VERSION="0.27.1"
+MARKDOWN_VERSION="0.5.4"
+LEAN_COMMIT="916c44f4d89c970f66dd34a49e7ce848f4d29e72"
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,7 +85,7 @@ lean_dir="${WORK_DIR}/tree-sitter-lean"
 git clone --quiet https://github.com/Julian/tree-sitter-lean "${lean_dir}"
 git -C "${lean_dir}" checkout --quiet "${LEAN_COMMIT}"
 
-log "Building tree-sitter-lean.wasm (emcc via Docker fallback)"
+log "Building tree-sitter-lean.wasm with the CLI-managed Wasm toolchain"
 tree_sitter build --wasm --output "${VENDOR_DIR}/tree-sitter-lean.wasm" "${lean_dir}"
 cp "${lean_dir}/queries/highlights.scm" "${QUERIES_DIR}/lean.scm"
 

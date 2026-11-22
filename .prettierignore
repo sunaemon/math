@@ -10,7 +10,11 @@
 # pandoc directives, strict 120-column wrapping) — Prettier must not touch them.
 polish-space/src/**/*.md
 polish-space-ch1/src/**/*.md
+polish-space-ja/src/**/*.md
 
 # Test fixtures encode the exact bytes the test suites assert on.
 tests/fixtures/
 tools/formalization-viewer/fixtures/
+
+# Preserve the supplied review verbatim; finding identities include source lines.
+reviews/infrastructure-9d6e65df.md

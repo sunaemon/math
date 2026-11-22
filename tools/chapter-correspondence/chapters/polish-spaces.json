@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "chapter": "polish-spaces",
+  "source": "polish-space/src/polish-space-book/polish-spaces.md",
+  "leanProject": "polish-space",
+  "leanModules": ["PolishSpaceBook.PolishSpaces", "PolishSpaceBook.PartIScope"],
+  "openNamespaces": ["PolishSpaceBook", "Set", "Topology"],
+  "review": "tools/chapter-correspondence/review.json",
+  "notationProfiles": ["core", "polish-spaces"]
+}

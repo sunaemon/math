@@ -1,3 +1,4 @@
+import { Recovery } from "./recovery.js";
 // Minimal Lean LSP client for the formalization viewer infoview.
 //
 // Talks to tools/formalization-viewer/server/serve.ts: the "lsp" channel of the shared
@@ -34,9 +35,6 @@ interface Lsp {
   ready: boolean;
   onDiagnostics: DiagnosticsHandler | null;
   onStatus: StatusHandler | null;
-  healAttempts?: number;
-  healTimer?: ReturnType<typeof setTimeout> | null;
-  healing?: boolean;
 }
 
 const lsp: Lsp = {
@@ -291,7 +289,7 @@ async function handshake(): Promise<boolean> {
     );
     notify("initialized", {});
     lsp.ready = true;
-    lsp.healAttempts = 0;
+    recovery.reset();
     lsp.onStatus?.("ready");
     return true;
   } catch (error) {
@@ -302,33 +300,17 @@ async function handshake(): Promise<boolean> {
   }
 }
 
-function scheduleHeal() {
-  // A timer pending OR a heal body already running both count as healing in
-  // progress. Clearing healTimer at the start of the callback must not open a
-  // window for a second concurrent heal body (which would clear pending /
-  // openVersions out from under the in-flight handshake); the `healing` flag
-  // keeps the heal loop single-flight across the await.
-  if (lsp.healTimer || lsp.healing) return;
-  lsp.healAttempts = (lsp.healAttempts || 0) + 1;
-  const delay = Math.min(15000, 1000 * lsp.healAttempts);
-  lsp.healTimer = setTimeout(async () => {
-    lsp.healTimer = null;
-    lsp.healing = true;
-    // A reconnect spawns a fresh server: drop stale request and document state.
-    for (const entry of lsp.pending.values()) entry.reject(new Error("LSP reconnecting"));
-    lsp.pending.clear();
-    lsp.openVersions.clear();
-    lsp.onStatus?.("reconnecting");
-    let ok = false;
-    try {
-      ok = await handshake();
-    } finally {
-      lsp.healing = false;
-    }
-    // Schedule the next backoff attempt only after this body has released the
-    // `healing` guard, so the retry is sequential rather than concurrent.
-    if (!ok) scheduleHeal();
-  }, delay);
+const recovery = new Recovery(async () => {
+  // A fresh server invalidates pending requests and document versions.
+  for (const entry of lsp.pending.values()) entry.reject(new Error("LSP reconnecting"));
+  lsp.pending.clear();
+  lsp.openVersions.clear();
+  lsp.onStatus?.("reconnecting");
+  return handshake();
+});
+
+function scheduleHeal(): void {
+  recovery.schedule();
 }
 
 export function uriForRepoPath(repoPath: string): string | null {

@@ -29,8 +29,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import booklink_coverage as cov  # noqa: E402
-import booklink_sourcemap as bk  # noqa: E402
+import booklink_coverage as cov
+import booklink_sourcemap as bk
 
 # A line whose stripped text ends a sentence or a display-math / environment block,
 # so a paragraph break may follow it.
@@ -176,6 +176,7 @@ def main(argv) -> int:
 
     seen = set()
     any_change = False
+    manual = 0
     for source in sorted(covered_by_source):
         if args.source and not source.endswith(args.source):
             continue
@@ -193,6 +194,7 @@ def main(argv) -> int:
         print(f"\n=== {path} ===")
         for n in notes:
             print(f"  {n}")
+            manual += int("MANUAL:" in n)
         if args.apply:
             path.write_text(new_text, encoding="utf-8")
             print("  [written]")
@@ -207,7 +209,8 @@ def main(argv) -> int:
             sys.stdout.writelines(diff)
     if not any_change:
         print("No flagged skip blocks found.")
-    return 0
+    print(f"Manual blocks remaining: {manual}")
+    return int(manual > 0)
 
 
 if __name__ == "__main__":

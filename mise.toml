@@ -1,26 +1,46 @@
 [tools]
-ghc = "9.6.7"
-cabal = "3.12.1.0"
-python = "3.14.5"
-node = "24.12.0"
-watchexec = "2.5.1"
-pandoc = "3.9.0.2"
-tree-sitter = "0.26.9"
-lefthook = "2.1.9"
-gh = "2.94.0"
-ruff = "0.15.17"
-oxlint = "1.70.0"
-shfmt = "3.13.1"
+ghc = "9.14.1"
+cabal = "3.18.2.0"
+python = "3.15.1"
+node = "26.12.1"
+watchexec = "2.8.0"
+pandoc = "3.12.1"
+# conda-forge's build targets an older glibc; the upstream aarch64-linux
+# release needs glibc 2.39, which e.g. Ubuntu 22.04 lacks.
+"conda:tree-sitter-cli" = "0.27.1"
+lefthook = "2.2.2"
+gh = "2.103.2"
+ruff = "0.17.2"
+"npm:oxlint" = "1.89.0"
+shfmt = "3.14.1"
 shellcheck = "0.11.0"
 taplo = "0.10.0"
 actionlint = "1.7.12"
-"ubi:fourmolu/fourmolu" = "0.19.0.1"
+"ubi:fourmolu/fourmolu" = "0.21.0.0"
 "ubi:ndmitchell/hlint" = "3.10"
-"npm:typescript" = "5.9.3"
-"npm:esbuild" = "0.28.1"
-"npm:prettier" = "3.4.2"
-"npm:@types/node" = "24.13.2"
-"github:leanprover/elan" = "4.2.1"
+"npm:typescript" = "7.0.2"
+"npm:esbuild" = "0.28.2"
+"npm:prettier" = "3.9.10"
+"github:leanprover/elan" = "4.2.4"
+# GNU gettext (msgmerge, msgcat, ...) for the po4a translation workflow, pinned
+# here instead of coming from Homebrew or the distribution so every platform
+# runs the same version without sudo. Use gettext-tools, not the gettext
+# metapackage, whose own files contain no executables for mise to put on PATH.
+"conda:gettext-tools" = "1.0"
+# libgmp headers and libgmp.so for linking Haskell binaries (book-filter): the
+# Linux GHC links against gmp, and minimal images ship only the runtime
+# libgmp.so.10. The Makefile passes this prefix to cabal on Linux only.
+"conda:gmp" = { version = "6.3.0", os = ["linux"] }
+
+# po4a maintains the localized chapter catalogs and regenerates translated
+# Markdown. Its GitHub release is a Perl source tarball, so the http backend
+# unpacks the whole tree (the `po4a` script plus its Locale::Po4a lib/), rather
+# than a single binary. po4a is a Perl app, and its two non-core CPAN
+# dependencies (YAML::Tiny and the XS module Syntax::Keyword::Try) are not
+# managed by mise; setup.sh installs them against the system Perl into the
+# repo-local .perllib/. The Makefile runs the po4a script with PERL5LIB pointing
+# at both .perllib/ and this install's lib/.
+"http:po4a" = { version = "0.74", url = "https://github.com/mquinson/po4a/releases/download/v0.74/po4a-0.74.tar.gz", strip_components = 1 }
 
 [env]
 _.path = ["{{env.HOME}}/.elan/bin"]

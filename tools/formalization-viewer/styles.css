@@ -9,10 +9,210 @@
   --accent: #1f6feb;
   --mark: #fff0a6;
   --active: #ffbe55;
+  --code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* Solarized palette: https://ethanschoonover.com/solarized/ */
+  --code-bg: #fdf6e3;
+  --code-panel: #eee8d5;
+  --code-fg: #3f565d;
+  --code-muted: #3f565d;
+  --code-log-fg: #3f565d;
+  --syntax-keyword: #4c5900;
+  --syntax-string: #005e54;
+  --syntax-number: #a11155;
+  --syntax-type: #6f4d00;
+  --syntax-function: #02568e;
+  --syntax-operator: #4c5900;
+  --syntax-label: #9c2900;
+}
+
+#correspondence-dialog {
+  width: min(1080px, calc(100vw - 32px));
+  max-height: 88dvh;
+  box-sizing: border-box;
+  overflow: auto;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+#correspondence-dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+.correspondence-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.correspondence-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 1.15rem;
+}
+#correspondence-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--code-font);
+}
+#correspondence-dialog code,
+.correspondence-tree {
+  overflow-wrap: anywhere;
+}
+#correspondence-dialog select {
+  max-width: 100%;
+}
+#correspondence-dialog .select-combo {
+  max-width: 100%;
+}
+#correspondence-dialog summary {
+  cursor: pointer;
+  padding: 6px 0;
+}
+.correspondence-tree {
+  padding-inline-start: 16px;
+  font-family: var(--code-font);
+  font-size: 0.85rem;
+}
+.correspondence-operator {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+.correspondence-operator table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.correspondence-operator td,
+.correspondence-operator th {
+  text-align: start;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  padding: 6px;
+}
+#correspondence-source {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 10px;
+}
+#correspondence-source mark {
+  color: var(--text);
+  background: var(--mark);
+}
+
+.formula-overlay {
+  text-decoration: underline dotted var(--accent) 1.5px;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.formula-overlay:hover,
+.formula-overlay:focus-visible,
+.formula-overlay.formula-selected,
+.formula-overlay.formula-hovered {
+  outline: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.pdf-formula {
+  position: absolute;
+  z-index: 4;
+  cursor: pointer;
+  border-bottom: 1.5px dotted var(--accent);
+  box-sizing: border-box;
+}
+.pdf-formula:hover,
+.pdf-formula:focus-visible,
+.pdf-formula.formula-selected,
+.pdf-formula.formula-hovered {
+  outline: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+#formula-popup {
+  position: fixed;
+  z-index: 1000;
+  max-width: min(42rem, calc(100vw - 24px));
+  max-height: 45dvh;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 5px 24px rgb(0 0 0 / 20%);
+  background: var(--panel);
+  color: var(--text);
+}
+#formula-popup[hidden] {
+  display: none;
+}
+#formula-popup pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--code-font);
+}
+#formula-popup button {
+  margin: 8px 8px 0 0;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --border: #35434b;
+  --text: #d5dfe3;
+  --muted: #93a1a1;
+  --bg: #111a20;
+  --panel: #18252d;
+  --header: #202f38;
+  --accent: #5ba7de;
+  --code-bg: #002b36;
+  --code-panel: #073642;
+  --code-fg: #839496;
+  --code-log-fg: #839496;
+  --syntax-number: #d33682;
+  --code-muted: #93a1a1;
+  --syntax-keyword: #859900;
+  --syntax-string: #2aa198;
+  --syntax-type: #b58900;
+  --syntax-function: #268bd2;
+  --syntax-label: #cb4b16;
+  --syntax-operator: #859900;
+}
+
+:root[data-color-scheme="classic"] {
+  --code-bg: #fff;
+  --code-panel: #f4f6f9;
+  --code-fg: #1c2430;
+  --code-muted: #7a8294;
+  --code-log-fg: #d5dfe3;
+  --syntax-keyword: #a626a4;
+  --syntax-string: #50a14f;
+  --syntax-number: #986801;
+  --syntax-type: #c18401;
+  --syntax-function: #4078f2;
+  --syntax-operator: #0184bc;
+  --syntax-label: #986801;
+}
+
+:root[data-color-scheme="classic"][data-theme="dark"] {
+  --code-bg: #1e1e1e;
+  --code-panel: #282828;
+  --code-fg: #d4d4d4;
+  --code-muted: #909090;
+  --syntax-keyword: #c586c0;
+  --syntax-string: #ce9178;
+  --syntax-number: #b5cea8;
+  --syntax-type: #4ec9b0;
+  --syntax-function: #dcdcaa;
+  --syntax-operator: #9cdcfe;
+  --syntax-label: #d7ba7d;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* The UA's `[hidden] { display: none }` loses to any author rule that sets
+   `display` on the same element (`.vo-panels label`, `.select-label`, …), so
+   hidden controls stayed visible. Restate it here so the attribute wins. */
+[hidden] {
+  display: none !important;
 }
 
 /* Show focus rings only for keyboard navigation, not after a mouse click. */
@@ -27,13 +227,17 @@
 
 html,
 body {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   margin: 0;
+  overscroll-behavior-y: none;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
+  height: 100dvh;
   font:
     14px/1.4 system-ui,
     -apple-system,
@@ -48,9 +252,11 @@ body {
   border-bottom: 1px solid var(--border);
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  flex: none;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   min-height: 48px;
   padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
 }
 
 .icon-button {
@@ -79,13 +285,30 @@ body {
 
 button,
 select {
-  background: #fff;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
   font: inherit;
   min-height: 32px;
   padding: 5px 9px;
+}
+
+input,
+textarea {
+  background-color: var(--panel);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+}
+
+option {
+  background: var(--panel);
+  color: var(--text);
 }
 
 button {
@@ -97,17 +320,8 @@ button[aria-pressed="true"] {
   color: var(--accent);
 }
 
-/* Drop the OS dropdown chrome and match the custom marker field: a muted caret
-   (same ▾ as .marker-field-caret) and room for it. */
 select {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 7 8 3.5Z' fill='%23647084'/%3E%3C/svg%3E");
-  background-position: right 9px center;
-  background-repeat: no-repeat;
   cursor: pointer;
-  padding-right: 24px;
 }
 
 select:hover,
@@ -134,11 +348,32 @@ select:hover,
 
 .toolbar-selects .select-label-grow {
   flex: 1;
+  min-width: 160px;
 }
 
-#book-select-label select {
-  max-width: 200px;
-  width: auto;
+/* Let CSS choose the compact layout without cloning/measuring the controls. */
+@media (max-width: 600px) {
+  .toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  #prev-entry,
+  #next-entry {
+    display: none;
+  }
+}
+@media (max-width: 240px) {
+  .toolbar-selects {
+    display: contents;
+  }
+  .toolbar .settings {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .toolbar #marker-combo {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+  }
 }
 
 .select-label {
@@ -166,11 +401,12 @@ select:hover,
   position: relative;
 }
 
-.marker-field {
+.select-field {
   align-items: center;
   display: flex;
   gap: 6px;
   min-height: 32px;
+  min-width: 0;
   text-align: left;
   width: 100%;
 }
@@ -179,7 +415,7 @@ select:hover,
   margin-right: 0;
 }
 
-.marker-field-label {
+.select-field-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -187,10 +423,36 @@ select:hover,
   white-space: nowrap;
 }
 
-.marker-field-caret {
+.select-caret {
+  align-items: center;
   color: var(--muted);
-  flex: none;
-  font-size: 10px;
+  display: inline-flex;
+  flex: 0 0 10px;
+  height: 10px;
+  justify-content: center;
+  line-height: 0;
+  width: 10px;
+}
+
+/* One geometric caret for all fields; its position never depends on the
+   baseline, font, or length of the selected label. */
+.select-caret::before {
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  content: "";
+  height: 4px;
+  width: 6px;
+}
+
+/* Ctrl/Cmd+C copy-TeX feedback: brief flash on the marker field. */
+.marker-field.is-copied {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.marker-field.is-copy-failed {
+  border-color: #e11d48;
+  color: #e11d48;
 }
 
 .marker-popover {
@@ -200,13 +462,13 @@ select:hover,
   box-shadow: 0 12px 32px rgba(28, 36, 48, 0.2);
   display: flex;
   flex-direction: column;
-  left: 0;
+  inset: auto;
+  margin: 0;
   max-height: 45vh;
   overflow: hidden;
-  position: absolute;
-  top: calc(100% + 6px);
-  width: min(600px, calc(100vw - 1.5rem));
-  z-index: 40;
+  padding: 0;
+  position: fixed;
+  max-width: calc(100vw - 1.5rem);
 }
 
 .marker-popover[hidden] {
@@ -221,7 +483,7 @@ select:hover,
   border-radius: 0;
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 16px;
   margin: 0;
   padding: 9px 12px;
   width: 100%;
@@ -232,6 +494,7 @@ select:hover,
 }
 
 .marker-list {
+  overflow-anchor: none;
   list-style: none;
   margin: 0;
   overflow-y: auto;
@@ -239,6 +502,8 @@ select:hover,
 }
 
 .marker-row {
+  height: var(--marker-row-height, 52px);
+  overflow: hidden;
   border-radius: 6px;
   cursor: pointer;
   padding: 6px 9px;
@@ -362,34 +627,11 @@ select:hover,
   display: none;
 }
 
-.cselect-field {
-  align-items: center;
-  display: flex;
-  gap: 6px;
-  max-width: 100%;
-  min-height: 32px;
-  text-align: left;
-}
-
-.cselect-label {
-  max-width: 46ch;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cselect-caret {
-  color: var(--muted);
-  flex: none;
-  font-size: 10px;
-}
-
-/* Fixed (not absolute) so the popover escapes the enclosing
-   `.pane { overflow: hidden }`, which would otherwise clip it (and its shadow)
-   to the pane box. enhanceSelect() sets left/top/min-width from the field's
-   screen rect on open. */
+/* Top-layer placement and viewport fitting are handled by CSS below. */
 .cselect-popover {
+  inset: auto;
+  margin: 0;
+  padding: 0;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -397,7 +639,7 @@ select:hover,
   display: flex;
   flex-direction: column;
   max-height: 45vh;
-  max-width: min(560px, calc(100vw - 1.5rem));
+  max-width: calc(100vw - 1.5rem);
   /* A position:fixed element that is itself the scroll container has a Chrome
      compositing bug where its overscroll bounce reveals whatever is painted
      behind it (the source code). Keep this fixed box a plain overflow:hidden
@@ -423,7 +665,7 @@ select:hover,
   color: var(--text);
   flex: none;
   font: inherit;
-  font-size: 13px;
+  font-size: 16px;
   margin: 0;
   padding: 9px 12px;
   width: 100%;
@@ -494,7 +736,14 @@ select:hover,
 }
 
 .settings {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   position: relative;
+}
+
+.settings-menu[popover]:not(:popover-open) {
+  display: none;
 }
 
 .settings-menu {
@@ -505,17 +754,13 @@ select:hover,
   display: flex;
   flex-direction: column;
   gap: 10px;
-  left: auto;
-  width: 264px;
+  inset: auto;
+  margin: 0;
+  width: min(320px, calc(100vw - 24px));
+  max-height: calc(100vh - 76px);
+  overflow-y: auto;
   padding: 12px 14px 10px;
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 30;
-}
-
-.settings-menu[hidden] {
-  display: none;
+  position: fixed;
 }
 
 .vo-title {
@@ -582,6 +827,28 @@ select:hover,
   font-size: 13px;
 }
 
+.vo-row select {
+  max-width: 145px;
+  min-width: 0;
+}
+
+.vo-row .cselect {
+  flex: 0 1 145px;
+  width: 145px;
+}
+
+.vo-document {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vo-document .cselect,
+.vo-document .cselect-field {
+  min-width: 0;
+  width: 100%;
+}
+
 /* Segmented control */
 .segmented {
   background: var(--bg);
@@ -589,11 +856,6 @@ select:hover,
   border-radius: 7px;
   display: inline-flex;
   overflow: hidden;
-}
-
-.segmented.segmented-full {
-  display: flex;
-  width: 100%;
 }
 
 .segmented button {
@@ -608,10 +870,6 @@ select:hover,
   min-height: 26px;
   padding: 4px 12px;
   white-space: nowrap;
-}
-
-.segmented.segmented-full button {
-  flex: 1;
 }
 
 .segmented button:first-child {
@@ -658,7 +916,8 @@ select:hover,
 
 .workspace {
   display: flex;
-  height: calc(100vh - 49px);
+  flex: 1;
+  min-height: 0;
   padding: 4px;
   position: relative;
 }
@@ -692,10 +951,16 @@ select:hover,
   border: 1px solid var(--border);
   border-radius: 8px;
   display: grid;
-  grid-template-rows: 34px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 120px;
   min-width: 120px;
   overflow: hidden;
+  position: relative;
+}
+
+.pane > :not(.pane-header):not(.mark-rail) {
+  grid-column: 1;
+  grid-row: 2;
 }
 
 .pane[hidden],
@@ -712,19 +977,27 @@ select:hover,
 }
 
 .pane-header {
+  min-height: 34px;
   align-items: center;
   background: var(--header);
   border-bottom: 1px solid var(--border);
   cursor: grab;
   display: flex;
-  gap: 12px;
+  gap: 4px 12px;
+  flex-wrap: wrap;
   justify-content: space-between;
+  min-width: 0;
   padding: 0 10px;
   user-select: none;
 }
 
 .pane-header:active {
   cursor: grabbing;
+}
+
+.pane-header > .pane-actions {
+  margin-left: auto;
+  max-width: 100%;
 }
 
 /* Flex-item splitters sit between siblings of a split. */
@@ -819,6 +1092,7 @@ select:hover,
   align-items: center;
   cursor: default;
   display: flex;
+  flex-shrink: 0;
   gap: 6px;
   min-width: 0;
 }
@@ -829,20 +1103,217 @@ select:hover,
   white-space: nowrap;
 }
 
-/* "Building…" pill in the PDF pane header while the server auto-rebuilds the
-   selected PDF after a Markdown edit; a failed build flashes red briefly. */
+.pane-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
+  color: var(--muted);
+}
+
+.pane-maximize {
+  flex: 0 0 30px;
+  min-height: 30px;
+  min-width: 30px;
+}
+
+.pane-close {
+  flex: 0 0 30px;
+  min-height: 30px;
+  min-width: 30px;
+}
+
+.pane-close:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pane-maximize[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.overlay-toggle {
+  flex: 0 0 28px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 4px;
+}
+
+.overlay-toggle[aria-pressed="true"] {
+  background: var(--header);
+  color: var(--accent);
+}
+
+.pane[data-pane="pdf"] > .pane-header,
+.pane[data-pane="pdf-peer"] > .pane-header {
+  container-name: pdf-header;
+  container-type: inline-size;
+}
+
+@container pdf-header (max-width: 240px) {
+  .pane-header > .pane-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0;
+  }
+
+  .pane-actions > .icon-button,
+  .pane-actions > .build-status {
+    flex: 0 0 24px;
+    min-width: 24px;
+    padding: 2px;
+    width: 24px;
+  }
+}
+
+/* Very narrow PDF headers drop the open-in-new-tab link so the overlay,
+   maximize and close buttons stay visible. */
+@container pdf-header (max-width: 170px) {
+  .pane-actions > .pane-open {
+    display: none;
+  }
+}
+
+body.is-pane-maximized > .toolbar,
+body.is-pane-maximized .pane-header,
+body.is-pane-maximized .mark-rail {
+  display: none;
+}
+
+html.is-pane-maximized,
+body.is-pane-maximized {
+  display: block;
+  height: auto;
+  min-height: 100dvh;
+}
+
+body.is-pane-maximized .workspace {
+  display: block;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+body.is-pane-maximized .pane {
+  border: 0;
+  border-radius: 0;
+  display: block;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+body.is-pane-maximized .document-scroller {
+  height: auto;
+  min-height: 100dvh;
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+
+body.is-pane-maximized .chapter-pull {
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: 50%;
+  position: fixed;
+  transform: translateX(-50%);
+}
+
+body.is-pane-maximized .chapter-pull[data-direction="previous"] {
+  bottom: auto;
+  top: max(12px, env(safe-area-inset-top));
+}
+
+body.is-pane-maximized .pane > :not(.pane-header):not(.mark-rail) {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.pane-tools {
+  display: flex;
+  gap: 6px;
+  position: fixed;
+  right: max(10px, env(safe-area-inset-right));
+  top: max(10px, env(safe-area-inset-top));
+  z-index: 25;
+}
+
+.pane-tools[hidden] {
+  display: none;
+}
+
+.pane-restore,
+.pane-tools .overlay-toggle,
+.pane-tools .pane-search {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--muted);
+  height: 36px;
+  opacity: 0.75;
+  flex: 0 0 36px;
+  width: 36px;
+}
+
+.pane-restore:hover,
+.pane-restore:focus-visible,
+.pane-tools .overlay-toggle:hover,
+.pane-tools .overlay-toggle:focus-visible,
+.pane-tools .pane-search:hover,
+.pane-tools .pane-search:focus-visible {
+  opacity: 1;
+}
+
+.pane-tools .overlay-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+@media (max-width: 600px) {
+  .pane-header {
+    gap: 4px;
+    padding: 0 4px;
+  }
+
+  .pane-actions {
+    gap: 2px;
+  }
+}
+
+/* A compact log icon; show a spinner while building and red on failure. */
 .build-status {
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--accent);
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
   display: inline-flex;
   flex: none;
-  font-size: 11px;
-  gap: 5px;
+  font-family: inherit;
   line-height: 1;
-  padding: 3px 8px;
+  min-height: 28px;
+  width: 28px;
+  padding: 4px;
+}
+
+.build-status:hover {
+  background: var(--panel);
+}
+
+.build-status-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* Keep keyboard focus inside the compact header button rather than drawing
+   an oversized ring that spills into the PDF pane and is clipped by it. */
+.build-status:focus-visible {
+  outline-offset: -2px;
 }
 
 .build-status[hidden] {
@@ -850,28 +1321,26 @@ select:hover,
 }
 
 .build-status::before {
+  display: none;
   animation: build-spin 0.8s linear infinite;
   border: 2px solid currentcolor;
   border-radius: 50%;
   border-top-color: transparent;
   content: "";
-  height: 10px;
-  width: 10px;
+  height: 14px;
+  width: 14px;
+}
+
+.build-status[data-state="building"]::before {
+  display: block;
+}
+
+.build-status[data-state="building"] svg {
+  display: none;
 }
 
 .build-status[data-state="failed"] {
-  border-color: #b42318;
   color: #b42318;
-}
-
-.build-status[data-state="failed"]::before {
-  animation: none;
-  border-color: transparent;
-  /* a small "!" disc instead of the spinner */
-  background: currentcolor;
-  height: 4px;
-  width: 4px;
-  margin: 3px;
 }
 
 @keyframes build-spin {
@@ -886,22 +1355,17 @@ select:hover,
   }
 }
 
-.pdf-controls,
 .file-controls {
   align-items: center;
   display: grid;
   flex: 1 1 auto;
-  gap: 12px;
-  grid-template-columns: auto minmax(140px, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
 }
 
-.pdf-controls select,
-.file-controls select {
-  font-size: 12px;
-  min-height: 26px;
+.file-controls > .cselect,
+.file-controls .cselect-field {
   min-width: 0;
-  padding: 3px 7px;
   width: 100%;
 }
 
@@ -913,13 +1377,57 @@ select:hover,
 }
 
 .pdf-viewer {
+  /* Page offsets and scrollTop must use the same coordinate space. */
+  position: relative;
   align-content: start;
   background: #3d424a;
   display: grid;
   gap: 12px;
   justify-items: center;
   overflow: auto;
+  overscroll-behavior-y: contain;
   padding: 8px 0;
+}
+
+.chapter-pull {
+  align-self: end;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  grid-column: 1;
+  grid-row: 2;
+  justify-self: center;
+  margin: 12px;
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  padding: 8px 12px;
+  pointer-events: none;
+  position: relative;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 5;
+}
+
+.chapter-pull[hidden] {
+  display: none;
+}
+
+.chapter-pull[data-direction="previous"] {
+  align-self: start;
+}
+
+.chapter-pull::after {
+  background: var(--accent);
+  bottom: 0;
+  content: "";
+  height: 3px;
+  left: 0;
+  position: absolute;
+  transform: scaleX(var(--pull-progress, 0));
+  transform-origin: left;
+  width: 100%;
 }
 
 .pdf-message {
@@ -938,30 +1446,37 @@ select:hover,
   width: 100%;
 }
 
-.pdf-page::before {
-  color: #8a93a3;
-  content: attr(data-page);
-  font-size: 12px;
-  left: 8px;
+.pdf-page.is-dark-pdf {
+  background: #002b36;
+}
+
+.pdf-render-filters {
   position: absolute;
-  top: 6px;
-  z-index: 1;
+  pointer-events: none;
+}
+
+/* Expand light strokes slightly against the dark PDF background, including
+   mathematical glyphs, without changing page geometry or selection overlays. */
+.pdf-page.is-dark-pdf canvas {
+  filter: url("#dark-pdf-weight");
 }
 
 .pdf-page canvas {
   display: block;
-  height: auto;
+  height: 100%;
   width: 100%;
 }
 
-/* `formalization: skip` overlay band on the PDF, mirroring the Markdown pane's
-   grey skip wash. Takes the pointer (default cursor) so hovering it lights every
-   fragment of the skip across panes and shows the reason tooltip; wheel scrolling
-   still passes through to the viewer. z-index 2 sits above the canvas (and the
-   page-number ::before) but below the booklink overlays (z-index 3). */
+/* `formalization: skip` overlay band on the PDF, rendered exactly like the
+   booklink overlays (.pdf-mark) but in the neutral skip grey — one more
+   highlight layer, not a distinct wash. Takes the pointer (default cursor) so
+   hovering it lights every fragment of the skip across panes and shows the
+   reason tooltip; wheel scrolling still passes through to the viewer. z-index 2
+   sits above the canvas but below the colored
+   booklink overlays (z-index 3). */
 .pdf-skip-band {
-  background: rgba(120, 124, 134, 0.22);
-  border-left: 2px solid rgba(120, 124, 134, 0.6);
+  --mark-rgb: 120, 124, 134;
+  background: rgba(var(--mark-rgb), 0.14);
   left: 0;
   position: absolute;
   right: 0;
@@ -970,7 +1485,7 @@ select:hover,
 }
 
 .pdf-skip-band.is-hover {
-  background: rgba(120, 124, 134, 0.34);
+  background: rgba(var(--mark-rgb), 0.22);
 }
 
 /* Per-entry booklink overlay on the PDF: the canvas counterpart of the source
@@ -1004,13 +1519,9 @@ select:hover,
 }
 
 .source {
-  font:
-    12px/1.45 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    "Liberation Mono",
-    monospace;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font: 12px/1.45 var(--code-font);
   margin: 0;
   overflow: auto;
   padding: 10px 12px;
@@ -1112,7 +1623,7 @@ select:hover,
 }
 
 .lean-fold > summary::before {
-  color: var(--muted);
+  color: var(--code-muted);
   content: "▸";
   font-size: 10px;
 }
@@ -1122,11 +1633,11 @@ select:hover,
 }
 
 .lean-fold:not([open]) > summary {
-  opacity: 0.7;
+  color: var(--code-muted);
 }
 
 .lean-fold:not([open]) > summary::after {
-  color: var(--muted);
+  color: var(--code-muted);
   content: attr(data-fold-count);
   font-size: 11px;
   font-style: italic;
@@ -1138,18 +1649,12 @@ select:hover,
 
 /* LSP hover tooltip for the Lean pane. */
 .lean-hover {
-  background: var(--panel);
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: 0 8px 24px rgba(28, 36, 48, 0.18);
-  color: var(--text);
-  font:
-    12px/1.45 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    "Liberation Mono",
-    monospace;
+  color: var(--code-fg);
+  font: 12px/1.45 var(--code-font);
   max-height: 320px;
   max-width: 480px;
   overflow: auto;
@@ -1170,7 +1675,7 @@ body.show-line-numbers .line {
 }
 
 body.show-line-numbers .line::before {
-  color: var(--muted);
+  color: var(--code-muted);
   content: attr(data-line);
   left: 0;
   position: absolute;
@@ -1218,17 +1723,23 @@ body.show-line-numbers .line::before {
   box-shadow: inset 0 -2px 0 rgba(var(--mark-rgb, 124, 58, 237), 0.5);
 }
 
-/* `formalization: skip` overlay: book prose deliberately not formalized. A
-   neutral grey wash with a dashed left rail, distinct from the coloured booklink
-   marks, so skipped regions read as "intentionally out of scope" rather than as
-   another linked entry. The reason text shows as a native title tooltip. */
+/* `formalization: skip` overlay: book prose deliberately not formalized.
+   Rendered exactly like a booklink mark, only in a neutral grey hue, so skipped
+   regions read as one more highlight layer. The reason text shows as a native
+   title tooltip. */
 .skip-mark {
-  background: rgba(120, 124, 134, 0.1);
+  --mark-rgb: 120, 124, 134;
+  background: rgba(var(--mark-rgb), 0.12);
   border-radius: 3px;
   box-decoration-break: clone;
+  cursor: pointer;
   -webkit-box-decoration-break: clone;
-  box-shadow: inset 2px 0 0 rgba(120, 124, 134, 0.5);
   transition: background 0.12s ease;
+}
+
+/* Mirror the marks' focus dimming so the unfocused pane stays uniformly calm. */
+.pane:not(.is-focus-pane) .skip-mark {
+  background: rgba(var(--mark-rgb), 0.07);
 }
 
 /* `:hover` gives the fragment under the pointer immediate feedback; `.is-hover`
@@ -1236,49 +1747,74 @@ body.show-line-numbers .line::before {
    region lights together across panes, like the booklink marks. */
 .skip-mark:hover,
 .skip-mark.is-hover {
-  background: rgba(120, 124, 134, 0.2);
+  background: rgba(var(--mark-rgb), 0.16);
 }
 
-/* Tree-sitter token colors. Text color only, so they compose over the mark
-   background overlay (which sets only background). Light One-Light-ish palette. */
+/* The global Highlights setting hides marker washes, PDF bands, and rails
+   in every pane, including panes shown later. Spans stay in the DOM for
+   scroll sync and navigation through the marker palette. */
+body.marks-off .pane .mark,
+body.marks-off .pane .mark.is-hover,
+body.marks-off .pane .mark.active,
+body.marks-off .pane .skip-mark,
+body.marks-off .pane .skip-mark:hover,
+body.marks-off .pane .skip-mark.is-hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+body.marks-off .pane .pdf-mark,
+body.marks-off .pane .pdf-skip-band {
+  display: none;
+}
+
+body.marks-off .pane > .mark-rail {
+  display: none;
+}
+
+body.marks-off .pane.has-mark-rail {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Shared syntax colors compose over marker backgrounds in either mode. */
 .tok-keyword {
-  color: #a626a4;
+  color: var(--syntax-keyword);
 }
 
 .tok-string {
-  color: #50a14f;
+  color: var(--syntax-string);
 }
 
 .tok-number,
 .tok-attribute {
-  color: #986801;
+  color: var(--syntax-number);
 }
 
 .tok-comment {
-  color: #8b919e;
+  color: var(--code-muted);
   font-style: italic;
 }
 
 .tok-type,
 .tok-module {
-  color: #c18401;
+  color: var(--syntax-type);
 }
 
 .tok-function {
-  color: #4078f2;
+  color: var(--syntax-function);
 }
 
 .tok-operator {
-  color: #0184bc;
+  color: var(--syntax-operator);
 }
 
 .tok-punctuation {
-  color: #7a8294;
+  color: var(--code-muted);
 }
 
 .tok-heading,
 .tok-link {
-  color: #1f6feb;
+  color: var(--syntax-function);
   font-weight: 600;
 }
 
@@ -1291,28 +1827,24 @@ body.show-line-numbers .line::before {
 }
 
 .tok-literal {
-  color: #50a14f;
+  color: var(--syntax-string);
 }
 
 .tok-label {
-  color: #986801;
+  color: var(--syntax-label);
 }
 
 .infoview {
-  font:
-    12px/1.5 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    "Liberation Mono",
-    monospace;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font: 12px/1.5 var(--code-font);
   min-height: 0;
   overflow: auto;
   padding: 10px 12px;
 }
 
 .infoview-pos {
-  color: var(--muted);
+  color: var(--code-muted);
   font-size: 11px;
   margin-bottom: 8px;
   overflow-wrap: anywhere;
@@ -1323,7 +1855,7 @@ body.show-line-numbers .line::before {
 }
 
 .infoview-section h4 {
-  color: var(--muted);
+  color: var(--code-muted);
   font:
     600 11px/1.2 system-ui,
     -apple-system,
@@ -1334,7 +1866,7 @@ body.show-line-numbers .line::before {
 }
 
 .infoview-goal {
-  background: #f4f6f9;
+  background: var(--code-panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   margin: 0 0 6px;
@@ -1344,12 +1876,12 @@ body.show-line-numbers .line::before {
 }
 
 .infoview-empty {
-  color: var(--muted);
+  color: var(--code-muted);
   font-size: 12px;
 }
 
 .infoview-empty code {
-  background: #eef2f6;
+  background: var(--code-panel);
   border-radius: 4px;
   padding: 1px 4px;
 }
@@ -1361,7 +1893,7 @@ body.show-line-numbers .line::before {
 }
 
 .infoview-msg-loc {
-  color: var(--muted);
+  color: var(--code-muted);
   font-size: 11px;
 }
 
@@ -1396,30 +1928,124 @@ body.show-line-numbers .line::before {
   color: #e11d48;
 }
 
-@media (max-width: 900px) {
-  .toolbar {
-    grid-template-columns: 1fr auto auto auto;
-  }
+.view-startup {
+  display: none;
+}
 
-  .toolbar-selects {
-    grid-column: 1 / -1;
-  }
+:root[data-view-starting] .toolbar,
+:root[data-view-starting] .workspace {
+  visibility: hidden;
+}
+
+:root[data-view-starting] .view-startup {
+  color: var(--muted);
+  display: grid;
+  inset: 0;
+  place-items: center;
+  position: fixed;
+}
+
+.startup-card {
+  max-width: calc(100vw - 40px);
+  width: 360px;
+}
+
+.startup-card h1 {
+  color: var(--text);
+  font-size: 22px;
+  margin: 0 0 12px;
+}
+
+#startup-detail {
+  font-size: 13px;
+  min-height: 2.8em;
+}
+
+#startup-progress {
+  accent-color: var(--accent);
+  height: 6px;
+  width: 100%;
+}
+
+.startup-steps {
+  list-style: none;
+  padding: 0;
+}
+
+.startup-steps li {
+  font-size: 12px;
+  margin: 7px 0;
+}
+
+.startup-steps li::before {
+  content: "○";
+  display: inline-block;
+  width: 20px;
+}
+
+.startup-steps [data-state="done"]::before {
+  color: var(--accent);
+  content: "✓";
+}
+
+.startup-steps [data-state="working"] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.startup-steps [data-state="working"]::before {
+  color: var(--accent);
+  content: "→";
+}
+
+.pdf-load-status {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0;
+  width: 300px;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  padding: 5px 8px;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 4;
+}
+
+body.is-pane-maximized .pdf-load-status {
+  bottom: max(8px, env(safe-area-inset-bottom));
+  left: 50%;
+  right: auto;
+  position: fixed;
+  transform: translateX(-50%);
 }
 
 /* About — version & license dialog */
 .about-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
+  background: transparent;
+  border: none;
+  box-sizing: border-box;
+  height: 100%;
+  max-height: none;
+  max-width: none;
+  padding: 1.5rem;
+  width: 100%;
+}
+
+.about-overlay[open] {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 1.5rem;
-  background: rgba(28, 36, 48, 0.45);
 }
 
-.about-overlay[hidden] {
-  display: none;
+.about-overlay::backdrop {
+  background: rgba(28, 36, 48, 0.45);
 }
 
 .about-dialog {
@@ -1446,7 +2072,8 @@ body.show-line-numbers .line::before {
   color: var(--muted);
 }
 
-.about-close {
+.about-close,
+.build-log-close {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
@@ -1461,7 +2088,8 @@ body.show-line-numbers .line::before {
   cursor: pointer;
 }
 
-.about-close:hover {
+.about-close:hover,
+.build-log-close:hover {
   background: var(--header);
   color: var(--text);
 }
@@ -1619,4 +2247,906 @@ body.show-line-numbers .line::before {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Overlay anchors re-exposing the PDF's link annotations (the canvas render
+   drops them). Always clickable; the global Links setting adds the
+   visible outline via body.links-on. Above .pdf-mark (z-index 3) so a
+   link inside a booklink band still wins the click. */
+/* Keep the parent out of a stacking context so every printed link core is
+   above every neighbouring hit extension. CSS owns all pointer hit testing. */
+.pdf-link-box {
+  /* Enlarge the real accessible target, not only a generated hit-test box.
+     The high-priority ::after core stays over the printed annotation. */
+  box-sizing: content-box;
+  padding: 12px;
+  margin: -12px;
+  cursor: pointer;
+  position: absolute;
+  z-index: auto;
+}
+.pdf-link-box::before,
+.pdf-link-box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.pdf-link-box::before {
+  z-index: 5;
+}
+.pdf-link-box::after {
+  inset: 12px;
+  z-index: 6;
+}
+
+.pdf-link-box:focus-visible {
+  outline: none;
+}
+.pdf-link-box:focus-visible::after {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+body.links-on .pane .pdf-link-box::after {
+  background: rgba(37, 99, 235, 0.08);
+  border-radius: 2px;
+  outline: 1px solid rgba(37, 99, 235, 0.5);
+}
+
+.term-definition-preview,
+.term-context-menu {
+  inset: auto;
+  margin: 0;
+  position: fixed;
+  z-index: 70;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(28, 36, 48, 0.22);
+  font:
+    13px/1.4 system-ui,
+    sans-serif;
+}
+
+.term-definition-preview {
+  width: min(552px, calc(100vw - 24px));
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  padding: 12px;
+}
+
+.term-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.term-preview-actions button {
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.term-preview-body {
+  margin-top: 8px;
+  max-height: min(50vh, 420px);
+  overflow: auto;
+}
+
+.pdf-destination-highlight {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(250, 204, 21, 0.36);
+  outline: 1px solid rgba(202, 138, 4, 0.7);
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+
+.pdf-destination-highlight.is-transient {
+  animation: pdf-destination-fade 1.8s ease-out forwards;
+}
+
+:root[data-theme="dark"] .pdf-destination-highlight {
+  mix-blend-mode: screen;
+}
+
+:root[data-theme="dark"] .marker-chip[data-kind="statement"] {
+  color: #c4b5fd;
+}
+
+@keyframes pdf-destination-fade {
+  0%,
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pdf-destination-highlight.is-transient {
+    animation: none;
+  }
+}
+
+.term-preview-page {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.term-context-menu {
+  width: max-content;
+  display: grid;
+  min-width: min(230px, calc(100vw - 16px));
+  padding: 5px;
+}
+
+.term-context-menu button {
+  background: transparent;
+  border: none;
+  text-align: left;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+.term-context-menu button:hover:not(:disabled),
+.term-context-menu button:focus-visible {
+  background: var(--header);
+}
+
+.term-context-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.build-log-dialog {
+  background: var(--bg, #fff);
+  color: var(--text, #222);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: min(1000px, 90vw);
+  max-height: 85vh;
+}
+
+.build-log-dialog::backdrop {
+  background: #0006;
+}
+
+.build-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.build-log-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.build-log-close {
+  position: static;
+  flex-shrink: 0;
+}
+
+.build-log-dialog pre {
+  background: #000;
+  color: var(--code-log-fg);
+  border-radius: 6px;
+  padding: 12px;
+  overflow: auto;
+  height: min(60vh, 650px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--code-font);
+  font-size: 12px;
+}
+
+.build-log-progress {
+  align-items: center;
+  color: var(--syntax-function);
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  white-space: normal;
+}
+
+.build-log-progress::before {
+  animation: build-spin 0.8s linear infinite;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  content: "";
+  flex: 0 0 12px;
+  height: 12px;
+  width: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-log-progress::before {
+    animation: none;
+  }
+}
+
+.term-preview-source {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.term-preview-uses {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.term-preview-uses-title {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.term-preview-use {
+  display: block;
+  padding: 4px 0;
+}
+
+button.term-preview-use {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.term-preview-use-where {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.term-preview-use-excerpt {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-preview-uses-more {
+  color: var(--muted);
+  font-size: 11px;
+  padding-top: 2px;
+}
+
+.term-preview-source .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Native PDF.js text layout (matching the pinned PDF.js release). The clipped
+   host matches our cropped canvas; spans remain at full-page coordinates. */
+.pdf-text-host {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 4;
+}
+.pdf-text-layer {
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  position: absolute;
+  top: 0;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdf-text-layer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
+}
+.pdf-text-layer > :not(.markedContent),
+.pdf-text-layer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pdf-text-layer .markedContent {
+  display: contents;
+}
+.pdf-text-layer ::selection {
+  color: transparent;
+  background: rgba(37, 99, 235, 0.3);
+}
+
+#chat-toggle {
+  position: fixed;
+  right: calc(20px + env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 4px 18px #0003;
+  z-index: 66;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#chat-toggle:hover {
+  filter: brightness(1.1);
+}
+#chat-toggle:focus-visible {
+  outline: 3px solid var(--text);
+  outline-offset: 3px;
+}
+#chat-toggle[hidden] {
+  display: none;
+}
+#selection-ask {
+  position: fixed;
+  z-index: 1100;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--panel);
+  box-shadow: 0 4px 16px #0003;
+}
+#viewer-chat {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100vw);
+  z-index: 65;
+  background: var(--panel);
+  color: var(--text);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  box-shadow: -8px 0 24px #0001;
+}
+#viewer-chat[hidden],
+#selection-ask[hidden] {
+  display: none;
+}
+body.chat-open .workspace {
+  margin-right: min(440px, 100vw);
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-header strong {
+  flex: 1;
+}
+.chat-header button {
+  padding: 4px 8px;
+}
+.chat-connection,
+#chat-context {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+#viewer-chat summary {
+  cursor: pointer;
+}
+.chat-connect-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+}
+.chat-connection[open] {
+  max-height: 45%;
+  overflow: auto;
+}
+#viewer-chat input,
+#viewer-chat select,
+#viewer-chat textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+#chat-context[open] {
+  max-height: 30%;
+  overflow: auto;
+}
+#chat-context pre {
+  font: 12px/1.5 monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#chat-context h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+}
+#chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+}
+.chat-message {
+  padding: 10px;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.chat-user {
+  background: var(--header);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+.chat-assistant {
+  user-select: text;
+}
+.chat-assistant[data-incomplete] {
+  border-left: 2px solid var(--border);
+}
+.chat-message pre {
+  white-space: pre;
+  overflow: auto;
+  padding: 8px;
+  background: var(--code-bg);
+  font-size: 12px;
+}
+.chat-paragraph {
+  margin: 0 0 12px;
+}
+.chat-message .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+#chat-status {
+  margin: 0;
+  padding: 0 12px;
+  font-size: 12px;
+}
+#chat-status:not(:empty) {
+  padding-bottom: 8px;
+}
+#chat-form {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+#chat-question {
+  resize: vertical;
+  max-height: 25vh;
+}
+.chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.chat-actions span {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+}
+@media (max-width: 760px) {
+  body.chat-open .workspace {
+    margin-right: 0;
+  }
+  #viewer-chat {
+    width: min(440px, 100vw);
+  }
+}
+#chat-login-error {
+  font-size: 12px;
+  color: #b43b32;
+  margin: 6px 0 0;
+}
+#chat-login-error:empty {
+  display: none;
+}
+#chat-callback[aria-invalid="true"] {
+  border-color: #b43b32;
+}
+
+/* Formula layout is native MathML; KaTeX is only a TeX-to-MathML converter. */
+math {
+  font-family: math;
+}
+.term-preview-source math[display="block"],
+.chat-message math[display="block"] {
+  overflow-x: auto;
+  max-width: 100%;
+  margin-block: 1em;
+}
+
+/* A centred CSS fallback remains usable without anchor positioning. */
+.marker-popover,
+.cselect-popover,
+.settings-menu {
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  max-width: calc(100vw - 16px);
+}
+.marker-popover,
+.cselect-popover {
+  width: min(320px, calc(100vw - 16px));
+  max-height: 45dvh;
+}
+.settings-menu {
+  max-height: calc(100dvh - 16px);
+}
+
+@supports (anchor-scope: --field) {
+  .cselect {
+    anchor-scope: --select-field;
+  }
+  .cselect-field {
+    anchor-name: --select-field;
+  }
+  .cselect-popover {
+    position-anchor: --select-field;
+    --picker-width: min(max(anchor-size(width), 240px), calc(100vw - 16px));
+  }
+  .marker-combo {
+    anchor-scope: --marker-field;
+  }
+  #marker-field {
+    anchor-name: --marker-field;
+  }
+  .marker-popover {
+    position-anchor: --marker-field;
+    --picker-width: min(anchor-size(width), calc(100vw - 16px));
+  }
+  .settings {
+    anchor-scope: --settings-field;
+  }
+  #settings-toggle {
+    anchor-name: --settings-field;
+  }
+  .settings-menu {
+    position-anchor: --settings-field;
+    --picker-width: min(320px, calc(100vw - 16px));
+    max-height: calc(100dvh - 76px);
+  }
+  .marker-popover,
+  .cselect-popover,
+  .settings-menu {
+    translate: none;
+    inset: auto;
+    margin: 6px 0;
+    position-area: bottom span-right;
+    width: var(--picker-width);
+    position-try-fallbacks:
+      flip-inline,
+      flip-block,
+      flip-inline flip-block;
+    position-try-order: most-height;
+  }
+}
+
+.term-definition-preview,
+.term-context-menu {
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+}
+.term-context-position {
+  position: fixed;
+  left: var(--context-x);
+  top: var(--context-y);
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  anchor-name: --term-context-point;
+}
+@supports (anchor-name: --term-popup-anchor) and (position-area: bottom) {
+  .term-popup-anchor {
+    anchor-name: --term-popup-anchor;
+  }
+  .term-definition-preview,
+  .term-context-menu {
+    position-anchor: --term-popup-anchor;
+    position-area: bottom span-right;
+    inset: auto;
+    translate: none;
+    margin: 8px;
+    position-try-fallbacks:
+      flip-inline,
+      flip-block,
+      flip-inline flip-block;
+    position-try-order: most-height;
+  }
+  .term-context-menu.is-positioned-at-pointer {
+    position-anchor: --term-context-point;
+  }
+}
+
+#book-search {
+  width: min(720px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 18px;
+}
+#book-search::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+#book-search header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+#book-search-input {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  width: 0;
+  margin: 0;
+  padding: 10px;
+  font: inherit;
+}
+.search-query-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+#book-search header > label {
+  display: inline-flex;
+  flex: none;
+}
+#book-search header > button {
+  flex: none;
+}
+#book-search-results {
+  list-style: none;
+  padding: 0;
+}
+#book-search-results li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border-top: 1px solid var(--border);
+  padding: 4px 0;
+}
+#book-search-results li > a,
+#book-search-results li > button {
+  flex: 0 1 auto;
+  max-width: 30%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#book-search-results li > button {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+#book-search-results a {
+  font-weight: bold;
+  color: var(--accent);
+}
+#book-search-results p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#book-search-results small {
+  flex: 0 1 auto;
+  max-width: 25%;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#book-search button,
+#book-search-toggle {
+  min-height: 32px;
+}
+.line.search-hit {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: rgb(255 200 0 / 15%);
+}
+#book-search .search-scope-control {
+  flex: 1;
+  min-width: 0;
+  width: 0;
+}
+.search-navigation {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+#book-search-results .is-selected {
+  box-shadow: inset 3px 0 var(--accent);
+  padding-left: 10px;
+}
+.pane-search-result {
+  color: var(--accent);
+  font: inherit;
+}
+.pdf-search-hit {
+  position: absolute;
+  left: 2%;
+  right: 2%;
+  height: 1.8%;
+  translate: 0 -100%;
+  background: rgb(255 190 0 / 25%);
+  outline: 1px solid var(--accent);
+  pointer-events: none;
+  z-index: 7;
+}
+
+/* Draw the keyboard ring inside short pane headers, which clip their contents. */
+.pane-header .icon-button:focus-visible,
+.pane-header .build-status:focus-visible {
+  outline-offset: -2px;
+}
+#book-search [role="status"]:empty,
+#book-search-results:empty {
+  display: none;
+}
+
+.book-search-menu-action {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.search-caption {
+  flex: 1;
+}
+.pane-search-bar {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: min(420px, calc(100% - 8px));
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 15%);
+  z-index: 30;
+  container-type: inline-size;
+}
+.pane-search-bar .search-query-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  margin: 0;
+  gap: 4px;
+}
+.pane-search-bar #book-search-input {
+  width: 100%;
+}
+.pane-search-bar [role="status"] {
+  margin: 0;
+  width: 10ch;
+  min-width: 10ch;
+  max-width: 10ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+@container (max-width: 340px) {
+  .pane-search-bar .search-query-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .pane-search-bar #book-search-input {
+    grid-column: 1 / -1;
+  }
+}
+body.is-pane-maximized .pane-search-bar {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  width: min(420px, calc(100vw - 20px));
+}
+body.is-pane-maximized.pane-search-active .pane-tools {
+  display: none;
+}
+
+/* In narrow split panes, stack the fixed counter without squeezing controls. */
+@container (max-width: 190px) {
+  .pane-search-bar .search-query-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .pane-search-bar [role="status"] {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+  .pane-search-bar .search-navigation {
+    justify-self: end;
+  }
+  .pane-search-bar .icon-button {
+    min-width: 24px;
+    min-height: 28px;
+    padding: 2px;
+  }
+}
+.pane > .pane-search-bar[role="search"] {
+  /* Anchor to the content row: follow wrapped headers without a guessed height. */
+  grid-area: 2 / 1 / 3 / 2;
+}
+
+.lean-formula-overlay {
+  background: #b5d9ff66;
+  outline: 1px dotted #408ac9;
+  border-radius: 2px;
+}
+
+.lean-formula-anchor {
+  cursor: pointer;
+  text-decoration: underline dotted color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.lean-formula-anchor:focus-visible,
+.lean-formula-anchor.formula-hovered {
+  outline: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* Partial operator matches are evidence inside an expression, not a filled
+   highlight of the entire formula. Keep the unverified gaps unpainted. */
+.lean-formula-anchor.formula-partial-active {
+  background: transparent;
+  outline: none;
+  text-decoration: underline dotted light-dark(#9b5b00, #f7bc62) 2px;
+  text-underline-offset: 3px;
+}
+.formula-lean-status[data-coverage="partial"] {
+  border-left: 3px dotted light-dark(#9b5b00, #f7bc62);
+  padding-left: 8px;
 }

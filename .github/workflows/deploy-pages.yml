@@ -1,12 +1,12 @@
 # CD for the public mirror (sunaemon/math), produced by tools/publish_math.sh,
-# which contains only the polish-space-ch1 excerpt plus shared tooling. Builds
-# the ch1 static viewer distribution and deploys it to GitHub Pages.
+# which contains the full English book, the polish-space-ch1 excerpt, and shared
+# tooling. Builds both viewer mounts and deploys them together to GitHub Pages.
 #
 # Requires Pages to be enabled on the `math` repo with "GitHub Actions" as the
 # source (Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
 #
 # The private repo runs check.yml instead; this job gates on the repo name so it
-# only deploys from the public mirror (and never leaks the full private book).
+# only deploys from the public mirror.
 name: deploy-pages
 
 on:
@@ -37,7 +37,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Make room for mathlib's olean cache + TeX Live + toolchains (see check.yml).
       - name: Free disk space
@@ -49,20 +49,20 @@ jobs:
       # Provision the mise binary + PATH and cache the tool installs. install:
       # false defers `mise install` to setup.sh below, so its ghcup-backed
       # ghc/cabal plugins are registered before tools install — mise's default
-      # conda GHC backend has no linux-64 candidate for the pinned 9.6.7.
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      # conda GHC backend has no linux-64 candidate for the pinned 9.14.1.
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5.2.3
         with:
           cache: true
           install: false
 
       - name: Cache TeX Live snapshot
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .texlive
           key: texlive-${{ runner.os }}-${{ hashFiles('setup.sh') }}
 
       - name: Cache mathlib build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/mathlib
           key: mathlib-${{ runner.os }}-${{ hashFiles('**/lake-manifest.json', 'lean-toolchain') }}
@@ -73,8 +73,9 @@ jobs:
       - name: Provision toolchain (mise tools + TeX Live + Lean)
         run: ./setup.sh --run
 
-      # Builds the ch1 dist: debug + release PDFs, sourcemaps, and the Lean
-      # infoview cache (which compiles ch1's standalone lake project).
+      # Each static export owns its destination. Keep the excerpt's existing
+      # root redirect, then add the English book at the QR code's /polish-space/
+      # mount. Each build includes the corresponding release PDF.
       #
       # No --base-path and no CNAME: sunaemon.dev is the custom domain of the
       # user site (sunaemon.github.io), so this repo is served as a project page
@@ -83,14 +84,20 @@ jobs:
       # (util.ts mountPrefix), so the dist needs no prefix baked in. Passing
       # --base-path math would double it (sunaemon.dev/math/math/...), and a
       # CNAME here would clash with the user site that owns the domain.
-      - name: Build ch1 viewer dist
-        run: make dist BOOKLINK_PROJECT=polish-space-ch1
+      - name: Build both English viewer editions
+        run: |
+          make dist BOOKLINK_PROJECT=polish-space-ch1
+          if test -f polish-space/src/polish-space-book.json; then
+            make lean LAKE_PROJECTS=polish-space
+            make dist BOOKLINK_PROJECT=polish-space BOOKLINK_DIST_DIR=build/pages-full BOOKLINK_DIST_FLAGS=--no-lake-build
+            mv build/pages-full/polish-space dist/polish-space
+          fi
 
-      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: dist
 
       - id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

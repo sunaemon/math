@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildLineStarts, offsetToLine, bucketByLine, convertSpansToUtf16 } from "./source-offsets.ts";
+import { buildLineStarts, offsetToLine, bucketByLine, convertSpansToUtf16, spanText } from "./source-offsets.ts";
 
 test("buildLineStarts records the start of every line", () => {
   assert.deepEqual(buildLineStarts(""), [0]);
@@ -84,4 +84,19 @@ test("convertSpansToUtf16 clamps an out-of-range offset to the UTF-16 length", (
   assert.deepEqual(convertSpansToUtf16(text, [{ startOffset: 2, endOffset: 99 }], "codepoint"), [
     { startOffset: 3, endOffset: 4 },
   ]);
+});
+
+test("spanText slices UTF-16 offsets directly", () => {
+  assert.equal(spanText("hello\nworld\n", { startOffset: 6, endOffset: 11 }, "utf16"), "world");
+});
+
+test("spanText converts codepoint offsets across a surrogate pair", () => {
+  // "a😀bcd": codepoints a=0, 😀=1, b=2, c=3, d=4; slicing [2,4) must skip the
+  // full astral character, not split it.
+  assert.equal(spanText("a😀bcd", { startOffset: 2, endOffset: 4 }, "codepoint"), "bc");
+});
+
+test("spanText returns empty for missing offsets", () => {
+  assert.equal(spanText("abc", {}, "utf16"), "");
+  assert.equal(spanText("abc", { startOffset: 1 }, "codepoint"), "");
 });

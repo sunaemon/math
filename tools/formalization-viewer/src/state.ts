@@ -1,3 +1,5 @@
+import type { ReferenceRegistry } from "./link-preview.js";
+import type { DefinitionRegistry } from "./definition-registry.js";
 // Shared viewer state: the loaded project manifest, the live application state
 // object, and the cached DOM element references. Split out of app.ts so the
 // rendering modules (source view, PDF, infoview, ...) can read and mutate one
@@ -8,8 +10,12 @@
 // importers see the updated value because the reassignment happens in this module.
 
 import type { LayoutNode } from "./layout-tree.js";
+import type { NavigationLocation } from "./permalink.js";
 
 export interface Project {
+  references?: ReferenceRegistry;
+  fixedMath?: Record<string, string>;
+  definitionRegistry?: DefinitionRegistry;
   dir?: string;
   mount?: string;
   repository?: string;
@@ -19,13 +25,24 @@ export interface Project {
   leanSourcePrefix?: string;
   leanRootModule?: string;
   sourceMap?: string;
+  parallelPdf?: { label?: string; dir?: string; mount?: string; path?: string; mapPath?: string; texPath?: string };
   pdf?: string;
   pdfs?: string[];
+  chapterTitles?: Record<string, string>;
+  previewSections?: Record<string, string>;
   static?: boolean;
   version?: { describe?: string; rev?: string; date?: string };
   license?: {
+    vendorManifests?: string[];
     summary?: string;
-    items?: Array<{ scope?: string; spdx?: string; version?: string; source?: string; file?: string; text?: string }>;
+    items?: Array<{
+      scope?: string;
+      spdx?: string;
+      version?: string;
+      source?: string;
+      file?: string;
+      text?: string;
+    }>;
   };
   [key: string]: any;
 }
@@ -40,6 +57,7 @@ export function setProject(next: Project): void {
 }
 
 export interface PdfPageState {
+  failures?: number;
   pageNumber: number;
   el: HTMLElement;
   canvas: HTMLCanvasElement;
@@ -48,10 +66,15 @@ export interface PdfPageState {
 }
 
 export interface State {
+  pdfMode: "chapter" | "full";
   sync: boolean;
   lineNumbers: boolean;
+  // Workspace-wide marker highlights and PDF link outlines.
+  markHighlights: boolean;
+  linkHighlights: boolean;
   entries: any[];
-  activeIndex: number;
+  location: NavigationLocation;
+  readonly activeIndex: number;
   panes: Record<string, HTMLElement>;
   fileChoices: { md: string[]; lean: string[]; tex: string[] };
   selectedSources: { md: string | null; lean: string | null; tex: string | null };
@@ -70,27 +93,31 @@ export interface State {
     // overwrite a newer position's goal (the same discipline as the hover token).
     goalToken: number;
   };
-  layout: { tree: LayoutNode | null };
+  layout: { tree: LayoutNode | null; maximized?: string };
   suppressScroll: boolean;
   suppressedPanes: Set<string>;
-  scrollReleaseTimer: ReturnType<typeof setTimeout> | null;
   syncScrollTimer: ReturnType<typeof setTimeout> | null;
   pdf: {
     path: string | null;
+    loadedPath?: string | null;
+    pending?: boolean;
+    deferred?: boolean;
     document: any;
     loadingTask: any;
     renderToken: number;
     currentPage: number | null;
     pageCount: number | null;
     pageStates: Map<number, PdfPageState>;
-    targets: Map<number, { pageNumber: number; y: number }>;
+    targets: Map<number, { pageNumber: number; fraction: number }>;
     skipBands: Array<{
       key: string;
       reason: string;
       // top/bottom are fractions of the page height (0 = page top, 1 = page
-      // bottom); bottom null means "down to the page bottom". Stored
-      // scale-independently so a pane resize never leaves the band stale.
-      segments: Array<{ pageNumber: number; top: number; bottom: number | null }>;
+      // bottom); bottom null means "down to the page bottom". left/right are
+      // page-width fractions: skips flow like the entry bands (first line from
+      // its first glyph, last line to its last glyph, full width between).
+      // Stored scale-independently so a pane resize never leaves the band stale.
+      segments: Array<{ pageNumber: number; top: number; bottom: number | null; left: number; right: number }>;
     }>;
     // One colored, interactive overlay per booklink entry, mirroring the source
     // panes' .mark spans. `index` is the entry's position in state.entries (the
@@ -125,6 +152,9 @@ export interface State {
   dragPane?: string | null;
   paneSections?: Record<string, HTMLElement | null>;
   focusedPane?: string;
+  // Which document Ctrl/Cmd+C copies TeX from: the pane the reader last
+  // selected a marker in ("peer" only via the peer PDF pane's marks).
+  copyTexOrigin: "project" | "peer";
   hoveredEntry?: string | null;
   hoveredSkip?: string | null;
   pdfjs?: any;
@@ -133,11 +163,18 @@ export interface State {
 }
 
 export const state: State = {
+  pdfMode: "chapter",
   sync: true,
   lineNumbers: false,
+  markHighlights: true,
+  linkHighlights: false,
   entries: [],
-  activeIndex: 0,
+  location: { kind: "entry", index: 0 },
+  get activeIndex() {
+    return this.location.kind === "entry" ? this.location.index : -1;
+  },
   focusedPane: "md",
+  copyTexOrigin: "project",
   panes: {},
   fileChoices: {
     md: [],
@@ -165,7 +202,6 @@ export const state: State = {
   layout: { tree: null },
   suppressScroll: false,
   suppressedPanes: new Set(),
-  scrollReleaseTimer: null,
   syncScrollTimer: null,
   pdf: {
     path: null,
@@ -185,7 +221,6 @@ export const state: State = {
 };
 
 export const els = {
-  status: document.getElementById("status"),
   bookSelect: document.getElementById("book-select") as HTMLSelectElement | null,
   markerCombo: document.getElementById("marker-combo") as HTMLElement,
   markerField: document.getElementById("marker-field") as HTMLButtonElement,
@@ -195,13 +230,17 @@ export const els = {
   markerList: document.getElementById("marker-list") as HTMLElement,
   syncSeg: document.getElementById("sync-seg") as HTMLElement | null,
   linenumSeg: document.getElementById("linenum-seg") as HTMLElement | null,
+  highlightsSeg: document.getElementById("highlights-seg") as HTMLElement | null,
+  linksSeg: document.getElementById("links-seg") as HTMLElement | null,
   prev: document.getElementById("prev-entry") as HTMLElement,
   next: document.getElementById("next-entry") as HTMLElement,
   workspace: document.querySelector(".workspace") as HTMLElement,
+  paneRestore: document.getElementById("pane-restore") as HTMLButtonElement,
+  paneTools: document.getElementById("pane-tools") as HTMLElement,
   settingsToggle: document.getElementById("settings-toggle") as HTMLElement,
   settingsMenu: document.getElementById("settings-menu") as HTMLElement,
   aboutOpen: document.getElementById("about-open") as HTMLElement,
-  aboutOverlay: document.getElementById("about-overlay") as HTMLElement,
+  aboutOverlay: document.getElementById("about-overlay") as HTMLDialogElement,
   aboutClose: document.getElementById("about-close") as HTMLElement,
   aboutBook: document.getElementById("about-book") as HTMLElement,
   aboutVersionText: document.getElementById("about-version-text") as HTMLElement,
@@ -216,12 +255,14 @@ export const els = {
   pdfSelect: document.getElementById("pdf-select") as HTMLSelectElement,
   pdfBuildStatus: document.getElementById("pdf-build-status") as HTMLElement | null,
   mdSource: document.getElementById("md-source") as HTMLElement,
+  pdfPeerViewer: document.getElementById("pdf-peer-viewer") as HTMLElement,
+  pdfPeerBuildStatus: document.getElementById("pdf-peer-build-status") as HTMLElement | null,
+  pdfPeerLink: document.getElementById("pdf-peer-link") as HTMLAnchorElement,
+  pdfPeerPaneOption: document.getElementById("pdf-peer-pane-option") as HTMLElement,
   leanSource: document.getElementById("lean-source") as HTMLElement,
   texSource: document.getElementById("tex-source") as HTMLElement,
   mdSelect: document.getElementById("md-select") as HTMLSelectElement,
   leanSelect: document.getElementById("lean-select") as HTMLSelectElement,
-  mdMeta: document.getElementById("md-meta"),
-  leanMeta: document.getElementById("lean-meta"),
   texMeta: document.getElementById("tex-meta"),
   infoviewBody: document.getElementById("infoview-body"),
   infoviewStatus: document.getElementById("infoview-status"),

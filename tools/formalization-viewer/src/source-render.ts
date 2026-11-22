@@ -1,3 +1,4 @@
+import { setHTML } from "./safe-html.js";
 // Source-pane rendering: turn a source file's text plus its booklink mark
 // spans and syntax-highlight tokens into the per-line HTML shown in the md /
 // lean / tex panes, with Lean fold regions collapsed. Pure functions over their
@@ -79,6 +80,7 @@ export function renderSource(
   const tokensByLine = bucketByLine(lineStarts, text.length, highlights);
 
   const lines = text.split("\n");
+  const keyboardEntries = new Set<number>();
   const lineDivs = lines.map((lineText, lineIndex) => {
     const marks = marksByLine.get(lineIndex) || [];
     const skips = skipsByLine.get(lineIndex) || [];
@@ -107,7 +109,10 @@ export function renderSource(
       }
       const mark = segments[i].mark;
       if (mark) {
-        body += `<span class="mark" data-pane="${paneName}" data-entry="${mark.index}" style="${markerStyle(mark.target)}">${inner}</span>`;
+        const control =
+          !keyboardEntries.has(mark.index) && inner.trim() ? ' role="button" tabindex="0" data-mark-control=""' : "";
+        if (control) keyboardEntries.add(mark.index);
+        body += `<span${control} class="mark" data-pane="${paneName}" data-entry="${mark.index}" style="${markerStyle(mark.target)}">${inner}</span>`;
       } else {
         const skip = segments[i].skip;
         const reason = skip.reason ? ` title="${escapeHtml(skip.reason)}"` : "";
@@ -128,7 +133,7 @@ export function renderSource(
   }
 
   if (!foldByStart.size) {
-    pre.innerHTML = lineDivs.join("");
+    setHTML(pre, lineDivs.join(""));
     return;
   }
 
@@ -148,5 +153,5 @@ export function renderSource(
       i += 1;
     }
   }
-  pre.innerHTML = html;
+  setHTML(pre, html);
 }

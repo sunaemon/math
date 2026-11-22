@@ -9,12 +9,28 @@
 
 // `left` is the line's leftmost glyph as a fraction of the page width (0 when no
 // x mapping was supplied), used to tell a mid-line booklink start from a raised
-// line/item-start one.
-export type LineBox = { top: number; bottom: number; baseline: number; left: number };
+// line/item-start one. `right` is the line's rightmost glyph extent (1 when no x
+// mapping was supplied), used to end a skip band at the last glyph of its last
+// line rather than at the page edge.
+export type LineBox = {
+  top: number;
+  bottom: number;
+  baseline: number;
+  left: number;
+  right: number;
+  proofLabelRight?: number;
+};
+
+// The book uses bare folios in the top/bottom page margin. Do not include
+// those PDF text items in body-line geometry; numeric text inside the type
+// block remains ordinary content, including standalone displayed numbers.
+export function isPageFolio(text: string, baselineFraction: number): boolean {
+  return /^(?:[0-9]+|[ivxlcdm]+)$/i.test(text.trim()) && (baselineFraction < 0.08 || baselineFraction > 0.9);
+}
 
 // A glyph run reduced to what line-grouping needs: its baseline (PDF y, page
-// coordinates), glyph-box height, and optional left x (PDF points).
-export type TextRun = { baseline: number; height: number; x?: number };
+// coordinates), glyph-box height, and optional left x / width (PDF points).
+export type TextRun = { baseline: number; height: number; x?: number; width?: number };
 
 export type SkipSegment = { pageNumber: number; top: number; bottom: number | null };
 
@@ -22,11 +38,22 @@ export type SkipSegment = { pageNumber: number; top: number; bottom: number | nu
 // on a baseline still matches that line rather than the next one.
 export const SNAP_TOL = 0.004;
 
+// Two baseline-adjacent run groups whose gap is at most this fraction of the
+// larger group's height are one visual text line. A full-size combining accent
+// (the hat of $\hat d$) is emitted a couple of points above the text baseline
+// and would otherwise become its own "line" for band edges to snap onto — it is
+// full-size, so the smaller-font sub-run heuristics below cannot absorb it.
+// Genuine adjacent lines sit a full baselineskip apart and stay separate.
+const LINE_MERGE_RATIO = 0.5;
+
 // Group glyph runs into per-line boxes expressed as fractions of the page
-// height. Runs that share a (rounded) baseline form one line; its box spans the
-// union of an 0.8/0.2 ascent/descent split of each run's height, matching how
-// body type sits in its line box. `toFraction` maps a PDF y to a top-down page
-// fraction (pdf.js `viewport.convertToViewportPoint(0, y)[1] / viewport.height`).
+// height. Runs that share a (rounded) baseline form one line, and groups whose
+// baselines are far closer than a line height (accents, see LINE_MERGE_RATIO)
+// are folded together, keeping the wider group's baseline as the textual one;
+// a line's box spans the union of an 0.8/0.2 ascent/descent split of each
+// run's height, matching how body type sits in its line box. `toFraction` maps
+// a PDF y to a top-down page fraction (pdf.js
+// `viewport.convertToViewportPoint(0, y)[1] / viewport.height`).
 // `xToFraction` (optional) maps a PDF x to a page-width fraction for each line's
 // left edge. Result is sorted top→bottom by baseline.
 export function groupTextLines(
@@ -34,30 +61,54 @@ export function groupTextLines(
   toFraction: (pdfY: number) => number,
   xToFraction?: (pdfX: number) => number,
 ): LineBox[] {
-  const byLine = new Map<number, { pdfTop: number; pdfBottom: number; pdfBase: number; pdfLeft: number }>();
+  const byLine = new Map<
+    number,
+    { pdfTop: number; pdfBottom: number; pdfBase: number; pdfLeft: number; pdfRight: number }
+  >();
   for (const run of runs) {
     const h = run.height > 0 ? run.height : 0;
     const x = typeof run.x === "number" ? run.x : Infinity;
+    const right = typeof run.x === "number" ? run.x + (typeof run.width === "number" ? run.width : 0) : -Infinity;
     const rec = byLine.get(Math.round(run.baseline));
     if (rec) {
       rec.pdfTop = Math.max(rec.pdfTop, run.baseline + 0.8 * h);
       rec.pdfBottom = Math.min(rec.pdfBottom, run.baseline - 0.2 * h);
       rec.pdfLeft = Math.min(rec.pdfLeft, x);
+      rec.pdfRight = Math.max(rec.pdfRight, right);
     } else {
       byLine.set(Math.round(run.baseline), {
         pdfTop: run.baseline + 0.8 * h,
         pdfBottom: run.baseline - 0.2 * h,
         pdfBase: run.baseline,
         pdfLeft: x,
+        pdfRight: right,
       });
     }
   }
-  return [...byLine.values()]
+  const width = (g: { pdfLeft: number; pdfRight: number }): number =>
+    Number.isFinite(g.pdfLeft) && Number.isFinite(g.pdfRight) ? g.pdfRight - g.pdfLeft : -1;
+  const merged: Array<{ pdfTop: number; pdfBottom: number; pdfBase: number; pdfLeft: number; pdfRight: number }> = [];
+  for (const group of [...byLine.values()].sort((a, b) => b.pdfBase - a.pdfBase)) {
+    const prev = merged[merged.length - 1];
+    const prevHeight = prev ? prev.pdfTop - prev.pdfBottom : 0;
+    const groupHeight = group.pdfTop - group.pdfBottom;
+    if (prev && prev.pdfBase - group.pdfBase <= LINE_MERGE_RATIO * Math.max(prevHeight, groupHeight)) {
+      prev.pdfBase = width(group) > width(prev) ? group.pdfBase : prev.pdfBase;
+      prev.pdfTop = Math.max(prev.pdfTop, group.pdfTop);
+      prev.pdfBottom = Math.min(prev.pdfBottom, group.pdfBottom);
+      prev.pdfLeft = Math.min(prev.pdfLeft, group.pdfLeft);
+      prev.pdfRight = Math.max(prev.pdfRight, group.pdfRight);
+    } else {
+      merged.push({ ...group });
+    }
+  }
+  return merged
     .map((r) => ({
       top: toFraction(r.pdfTop),
       bottom: toFraction(r.pdfBottom),
       baseline: toFraction(r.pdfBase),
       left: xToFraction && Number.isFinite(r.pdfLeft) ? xToFraction(r.pdfLeft) : 0,
+      right: xToFraction && Number.isFinite(r.pdfRight) ? xToFraction(r.pdfRight) : 1,
     }))
     .sort((a, b) => a.baseline - b.baseline);
 }
@@ -210,6 +261,9 @@ export function mainLineBelow(index: number, lines: LineBox[]): number {
 
 export type FlowSegment = { pageNumber: number; top: number; bottom: number | null; left: number; right: number };
 
+export type AnchorPoint = { pageNumber: number; frac: number; xFrac: number };
+export type PageLineCache = (pageNumber: number) => Promise<LineBox[]>;
+
 // Highlight a booklink span as a text selection flows: the first line runs from
 // its start x to the right edge, the lines between run full width, and the last
 // line runs from the left edge to its end x. All y positions are page-height
@@ -249,6 +303,185 @@ export function flowBandSegments(
   return [...first, ...middle, ...last];
 }
 
+// The index of the first body line of a fresh page. A start anchor stranded at
+// the foot of the previous page resumes below the running head, so skip
+// leading lines that are isolated from the following line by well over a line
+// height: the folio/running head sits above the type block with a wide gap,
+// while consecutive body lines (and a display equation's surrounding skips)
+// stay within ~1.5 line heights. -1 for a page with no lines.
+export function firstContentLine(lines: LineBox[]): number {
+  if (!lines.length) return -1;
+  let i = 0;
+  while (i + 1 < lines.length) {
+    const gap = lines[i + 1].top - lines[i].bottom;
+    const height = Math.max(lines[i].bottom - lines[i].top, lines[i + 1].bottom - lines[i + 1].top);
+    if (gap <= height * 1.5) break;
+    i += 1;
+  }
+  return i;
+}
+
+// amsthm prints the proof heading before a body-start anchor. Include that
+// heading only when the span starts immediately after it, never for later
+// excerpts on the same line.
+function startsAfterProofLabel(x: number, line: LineBox): boolean {
+  return line.proofLabelRight != null && x >= line.proofLabelRight - 0.004 && x <= line.proofLabelRight + 0.02;
+}
+
+// Resolve a booklink span against the PDF's actual text lines. In addition to
+// sharing the same first/last-line geometry between the primary and parallel
+// PDF panes, this handles a TeX page-break edge case: an environment-start
+// hypertarget can remain at the foot of the preceding page after the rendered
+// environment moves to the next page. When a raised start has no line below it,
+// continue on the following page instead of painting the preceding page's
+// remaining whitespace.
+async function resolveEntryFlowBlocks(
+  start: AnchorPoint,
+  end: AnchorPoint,
+  pageLines: PageLineCache,
+): Promise<FlowSegment[]> {
+  let startPage = start.pageNumber;
+  let startLines = await pageLines(startPage);
+  let si = lineIndexAt(start.frac, startLines);
+  const raisedStart = si < 0 || startLines[si].baseline < start.frac - SNAP_TOL;
+  if (raisedStart) {
+    si = mainLineBelow(lineIndexBelow(start.frac, startLines), startLines);
+    while (si < 0 && startPage < end.pageNumber) {
+      startPage += 1;
+      startLines = await pageLines(startPage);
+      si = mainLineBelow(firstContentLine(startLines), startLines);
+    }
+  }
+
+  const endLines = await pageLines(end.pageNumber);
+  const endRes = endLineResolve(end.frac, end.xFrac, endLines);
+  const ei = endRes.index;
+  if (si < 0 || ei < 0 || startPage > end.pageNumber) {
+    return skipBandSegments(
+      { pageNumber: start.pageNumber, frac: snapBandTop(start.frac, await pageLines(start.pageNumber)) },
+      { pageNumber: end.pageNumber, frac: snapBandBottom(end.frac, endLines) },
+    ).map((segment) => ({ ...segment, left: 0, right: 1 }));
+  }
+
+  const sLine = startLines[si];
+  const eLine = endLines[ei];
+  const nextStart = si + 1 < startLines.length ? Math.max(startLines[si + 1].top, sLine.bottom) : null;
+  return flowBandSegments(
+    {
+      startPage,
+      startTop: sLine.top,
+      startBottom: sLine.bottom,
+      nextTop: nextStart,
+      endPage: end.pageNumber,
+      endTop: eLine.top,
+      endBottom: endLineBottom(endLines, ei),
+      startX: raisedStart || startsAfterProofLabel(start.xFrac, sLine) ? sLine.left : start.xFrac,
+      endX: endRes.right,
+    },
+    startPage === end.pageNumber && si === ei,
+  );
+}
+
+// SkipStart uses the same un-raised, first-glyph anchor as BooklinkStart.
+// Keep a start on its own baseline even at the left margin. Only anchors in
+// the gap between lines need the raised/page-break fallback. The end marker
+// retains its block-form convention of covering the last line at the margin.
+async function resolveSkipFlowBlocks(
+  start: AnchorPoint,
+  end: AnchorPoint,
+  pageLines: PageLineCache,
+): Promise<FlowSegment[]> {
+  let startPage = start.pageNumber;
+  let startLines = await pageLines(startPage);
+  let si = lineIndexAt(start.frac, startLines);
+  const raisedStart = si < 0 || startLines[si].baseline < start.frac - SNAP_TOL;
+  if (raisedStart) {
+    si = mainLineBelow(lineIndexBelow(start.frac, startLines), startLines);
+    while (si < 0 && startPage < end.pageNumber) {
+      startPage += 1;
+      startLines = await pageLines(startPage);
+      si = mainLineBelow(firstContentLine(startLines), startLines);
+    }
+  }
+
+  const endLines = await pageLines(end.pageNumber);
+  const ei = lineIndexAt(end.frac, endLines);
+  if (si < 0 || ei < 0 || startPage > end.pageNumber) {
+    return skipBandSegments(
+      { pageNumber: start.pageNumber, frac: snapBandTop(start.frac, await pageLines(start.pageNumber)) },
+      { pageNumber: end.pageNumber, frac: snapBandBottom(end.frac, endLines) },
+    ).map((segment) => ({ ...segment, left: 0, right: 1 }));
+  }
+
+  const sLine = startLines[si];
+  const eLine = endLines[ei];
+  const nextStart = si + 1 < startLines.length ? Math.max(startLines[si + 1].top, sLine.bottom) : null;
+  return flowBandSegments(
+    {
+      startPage,
+      startTop: sLine.top,
+      startBottom: sLine.bottom,
+      nextTop: nextStart,
+      endPage: end.pageNumber,
+      endTop: eLine.top,
+      endBottom: endLineBottom(endLines, ei),
+      startX: raisedStart || startsAfterProofLabel(start.xFrac, sLine) ? sLine.left : start.xFrac,
+      endX: end.xFrac > eLine.left + X_TOL ? end.xFrac : eLine.right,
+    },
+    startPage === end.pageNumber && si === ei,
+  );
+}
+
+// Clip every row to its actual glyph bounds, including continuation pages.
+// Keep partial first/last lines bounded by their anchors. Both PDF panes and
+// both marker kinds use this step so page/crop margins never become highlights.
+export async function clipFlowToTextLines(segments: FlowSegment[], pageLines: PageLineCache): Promise<FlowSegment[]> {
+  const result: FlowSegment[] = [];
+  for (const segment of segments) {
+    const lines = await pageLines(segment.pageNumber);
+    for (const line of lines) {
+      const top = Math.max(segment.top, line.top);
+      const bottom = Math.min(segment.bottom ?? 1, line.bottom);
+      const left = Math.max(segment.left, line.left);
+      const right = Math.min(segment.right, line.right);
+      if (bottom > top && right > left) result.push({ pageNumber: segment.pageNumber, top, bottom, left, right });
+    }
+  }
+  // Use the union of every run in a row (computed by groupTextLines), then
+  // share the ordinary inter-line gap equally. Tall mathematics must not make
+  // some rows touch while adjacent text-only rows retain white seams.
+  // Keep genuine paragraph/display spacing and page breaks intact.
+  const original = result.map((row) => ({ ...row }));
+  for (let i = 1; i < result.length; i += 1) {
+    const prev = original[i - 1];
+    const row = original[i];
+    if (prev.pageNumber !== row.pageNumber || prev.bottom == null || row.bottom == null) continue;
+    const gap = row.top - prev.bottom;
+    const height = Math.min(prev.bottom - prev.top, row.bottom - row.top);
+    if (Math.abs(gap) > height * 0.5 + 1e-9) continue;
+    const boundary = (prev.bottom + row.top) / 2;
+    result[i - 1].bottom = boundary;
+    result[i].top = boundary;
+  }
+  return result;
+}
+
+export async function resolveEntryFlowSegments(
+  start: AnchorPoint,
+  end: AnchorPoint,
+  pageLines: PageLineCache,
+): Promise<FlowSegment[]> {
+  return clipFlowToTextLines(await resolveEntryFlowBlocks(start, end, pageLines), pageLines);
+}
+
+export async function resolveSkipFlowSegments(
+  start: AnchorPoint,
+  end: AnchorPoint,
+  pageLines: PageLineCache,
+): Promise<FlowSegment[]> {
+  return clipFlowToTextLines(await resolveSkipFlowBlocks(start, end, pageLines), pageLines);
+}
+
 // Split a start/end placement into one segment per page. All positions are
 // page-height fractions; `bottom: null` means "down to the page bottom". A region
 // whose end is above its start (degenerate) yields no segments.
@@ -267,4 +500,37 @@ export function skipBandSegments(
   }
   segments.push({ pageNumber: end.pageNumber, top: 0, bottom: end.frac });
   return segments;
+}
+
+export interface SkipSyncRange {
+  key: string;
+  start: number;
+  end: number;
+}
+
+// Return the skip containing the reading line. Before the first formalization
+// entry, also bridge gaps between skip regions (section headings, whitespace,
+// and front matter) to the nearest skip. This prevents scroll sync from falling
+// through to the first booklink merely because the reading line is between two
+// deliberately skipped blocks.
+export function skipSyncLocation(
+  target: number,
+  firstEntry: number,
+  ranges: SkipSyncRange[],
+): { key: string; progress: number } | null {
+  let nearest: { range: SkipSyncRange; distance: number } | null = null;
+  for (const range of ranges) {
+    const length = Math.max(1, range.end - range.start);
+    if (target >= range.start && target <= range.end) {
+      return { key: range.key, progress: (target - range.start) / length };
+    }
+    const distance = target < range.start ? range.start - target : target - range.end;
+    if (!nearest || distance < nearest.distance) nearest = { range, distance };
+  }
+  if (!nearest || target >= firstEntry) return null;
+  const length = Math.max(1, nearest.range.end - nearest.range.start);
+  return {
+    key: nearest.range.key,
+    progress: Math.min(1, Math.max(0, (target - nearest.range.start) / length)),
+  };
 }
