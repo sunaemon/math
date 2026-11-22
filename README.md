@@ -16,7 +16,7 @@ After merging the public source update, run this from a configured local checkou
 tools/publish_pages_local.sh pages-YYYYMMDD-HHMMSS
 ```
 
-This builds both English mounts with their PDFs and Lean hover caches, packages
+This builds both English mounts with complete chapter PDFs and Lean hover caches, packages
 only those mounts, uploads `pages.tar.gz` to a public GitHub Release, and dispatches
 the Pages workflow. Actions verifies the archive SHA-256 and deploys it without
 installing the build toolchain. Use a fresh release tag for each deployment.

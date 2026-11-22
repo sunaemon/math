@@ -421,6 +421,12 @@ validate-tex validate-debug: require-mise
 # on demand by the viewer / `make <stem>-preview-<chapter>.pdf`).
 preview-warm: $(PREVIEW_MASTER_AUXES)
 
+# Explicitly requested chapter distributions; BOOKS selects book stems.
+CHAPTER_PDF_BOOKS = $(if $(strip $(BOOKS)),$(BOOKS),$(BOOK_STEMS))
+chapter-pdfs: $(foreach stem,$(CHAPTER_PDF_BOOKS),$(foreach chapter,$($(stem)_CHAPTERS),$($(stem)_DIR)/build/$(stem)-preview-$(basename $(notdir $(chapter))).pdf) $(foreach unit,_contents _bibliography _index,$($(stem)_DIR)/build/$(stem)-preview-$(unit).pdf))
+
+.PHONY: chapter-pdfs
+
 # Preferred viewer port. The formalization-viewer target resolves this through
 # $(VIEWER_SERVER_DIR)/free-port.ts: it serves on this port when free and otherwise falls back
 # to an OS-assigned free port, so a second instance (or a stale listener) never
