@@ -398,6 +398,11 @@ function loadLayout(): void {
   state.layout = { tree: flattenSameDir(tree) };
   if (typeof stored.maximized === "string" && treeLeaves(tree).includes(stored.maximized))
     state.layout.maximized = stored.maximized;
+  else {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has("layout") && !params.has("focus") && window.matchMedia("(max-width: 767px)").matches)
+      state.layout.maximized = "pdf";
+  }
 }
 
 function saveLayout(): void {
